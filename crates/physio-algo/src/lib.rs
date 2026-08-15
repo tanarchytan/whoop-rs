@@ -12,6 +12,7 @@ pub mod device_agreement;
 pub mod apportion;
 pub mod baselines;
 pub mod biological_age;
+pub mod bp;
 pub mod calories;
 pub mod calibration;
 pub mod circadian;
