@@ -8,6 +8,7 @@
 //! `hr_anomaly`, `recovery`, `strain`, `stress`, `resting_hr`, `hr_zones`, `vo2max`,
 //! `respiratory_rate`, `imu_features` and the shared `stats`.
 
+pub mod device_agreement;
 pub mod apportion;
 pub mod baselines;
 pub mod biological_age;
