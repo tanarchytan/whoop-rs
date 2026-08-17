@@ -122,7 +122,44 @@ pub fn analyze(streams: &SleepStreams) -> Vec<Session> {
 /// Stage a single detected span with the V2 recipe + the motion-aware wake refinement — the single-span
 /// re-stage a caller runs after editing a session's bounds.
 pub fn stage_refined(input: &SleepInput, steps: &[StepSample]) -> Vec<StageSegment> {
+    if !is_stageable(input) {
+        return Vec::new();
+    }
     refine::refine(&v2::stage(input), &input.accel, steps)
+}
+
+/// Beats per hour of span below which a night cannot be staged.
+///
+/// A resting adult produces roughly 3,000 beats an hour, so this floor is two orders of
+/// magnitude below a real night. It is deliberately far from the boundary: it exists to catch
+/// spans with NO cardiac signal, not to judge marginal ones.
+pub const MIN_BEATS_PER_HOUR: f64 = 30.0;
+
+/// Fraction of the span that must carry heart rate.
+pub const MIN_HR_COVERAGE: f64 = 0.10;
+
+/// Whether a span carries enough signal for a hypnogram to mean anything.
+///
+/// Deep and REM are separated ONLY by the R-R-derived `hr_var` term, so a span without R-R
+/// cannot distinguish them: both emissions collapse to their base rate and the night is scored
+/// light and awake by construction. Six of David's paired nights did exactly that, emitting deep
+/// and REM at exactly 0.0 minutes against WHOOP's own 74 and 64. Eleven more were import-sink
+/// rows with no samples at all.
+///
+/// Returning an empty hypnogram is the honest answer: the caller keeps whatever it already had,
+/// which for an imported night is WHOOP's own scoring.
+pub fn is_stageable(input: &SleepInput) -> bool {
+    let span_s = (input.end - input.start).max(0) as f64;
+    if span_s < 600.0 {
+        return false;
+    }
+    let hours = span_s / 3600.0;
+    let beats: usize = input.rr.iter().map(|r| r.intervals.len()).sum();
+    if (beats as f64) < MIN_BEATS_PER_HOUR * hours {
+        return false;
+    }
+    let hr_in_span = input.hr.iter().filter(|s| s.ts >= input.start && s.ts <= input.end).count();
+    (hr_in_span as f64) >= MIN_HR_COVERAGE * span_s
 }
 
 /// A sleep stage. String forms are `"wake" | "light" | "deep" | "rem"` for cross-platform parity.
@@ -156,3 +193,71 @@ pub struct StageSegment {
 
 #[cfg(test)]
 mod golden_tests;
+
+
+#[cfg(test)]
+mod stageable_tests {
+    use super::*;
+    use crate::sleep::input::{HrSample, RrRun};
+
+    /// A span with `hr_hz` heart-rate samples a second and `beats` R-R intervals.
+    fn night(hours: f64, hr_per_s: f64, beats: usize) -> SleepInput {
+        let span = (hours * 3600.0) as i64;
+        let n_hr = (span as f64 * hr_per_s) as i64;
+        SleepInput {
+            start: 0,
+            end: span,
+            hr: (0..n_hr).map(|i| HrSample { ts: i, bpm: 60 }).collect(),
+            rr: if beats == 0 {
+                Vec::new()
+            } else {
+                vec![RrRun { ts: 0, intervals: vec![1000u16; beats] }]
+            },
+            accel: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_real_night_is_stageable() {
+        // 8 h, one HR sample a second, ~3,600 beats an hour.
+        assert!(is_stageable(&night(8.0, 1.0, 28_800)));
+    }
+
+    #[test]
+    fn the_import_sink_is_not_stageable() {
+        // The `my-whoop` rows: a span, and nothing else. Eleven of David's nights looked like this
+        // and were staged anyway.
+        assert!(!is_stageable(&night(8.0, 0.0, 0)));
+    }
+
+    #[test]
+    fn hr_without_rr_is_not_stageable() {
+        // The six paired nights that emitted deep and REM at exactly 0.0 minutes: HR present, R-R
+        // absent, so `hr_var` is absent for every epoch and deep/REM can never win.
+        assert!(!is_stageable(&night(8.0, 1.0, 0)));
+    }
+
+    #[test]
+    fn a_trickle_of_beats_is_not_enough() {
+        // 100 beats across 8 hours is 12.5 an hour, well under the 30 floor.
+        assert!(!is_stageable(&night(8.0, 1.0, 100)));
+    }
+
+    #[test]
+    fn rr_without_hr_coverage_is_not_stageable() {
+        // Beats present but the HR series barely covers the span.
+        assert!(!is_stageable(&night(8.0, 0.01, 28_800)));
+    }
+
+    #[test]
+    fn a_span_too_short_to_mean_anything_is_not_stageable() {
+        assert!(!is_stageable(&night(0.1, 1.0, 400)));
+    }
+
+    #[test]
+    fn an_unstageable_span_yields_no_segments_rather_than_a_hypnogram() {
+        // The property that matters to the app: no stages at all, so an imported night keeps the
+        // durations it arrived with instead of being overwritten by a fabricated one.
+        assert!(stage_refined(&night(8.0, 0.0, 0), &[]).is_empty());
+    }
+}
