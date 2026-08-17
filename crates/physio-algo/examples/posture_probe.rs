@@ -16,8 +16,9 @@
 
 mod common;
 
-use common::{dirs_of, read_accel, read_meta, read_truth};
+use common::{dirs_of, read_accel, read_meta, read_rr, read_truth};
 
+use physio_algo::sleep::hrv_bands::bands_series;
 use physio_algo::sleep::posture::{posture_series, turn_series};
 use physio_algo::sleep::AccelSample;
 
@@ -83,17 +84,24 @@ struct Bucket {
     turn_s: Vec<f64>,
     jerk_w: Vec<f64>,
     jerk_s: Vec<f64>,
+    lfhf_w: Vec<f64>,
+    lfhf_s: Vec<f64>,
+    hf_w: Vec<f64>,
+    hf_s: Vec<f64>,
 }
 
 fn line(name: &str, b: &Bucket) {
     let f = |a: Option<f64>| a.map(|v| format!("{v:.3}")).unwrap_or_else(|| "  -  ".into());
     println!(
-        "  {name:<14} swing {:>6}   turn {:>6}   jerk(scalar) {:>6}    n wake {:>6} sleep {:>6}",
+        "  {name:<10} swing {:>6} turn {:>6} jerk {:>6} | LF:HF {:>6} HFpow {:>6} | n {:>6}/{:>6} rr {:>5}",
         f(auc(&b.swing_w, &b.swing_s)),
         f(auc(&b.turn_w, &b.turn_s)),
         f(auc(&b.jerk_w, &b.jerk_s)),
+        f(auc(&b.lfhf_w, &b.lfhf_s)),
+        f(auc(&b.hf_w, &b.hf_s)),
         b.swing_w.len(),
-        b.swing_s.len()
+        b.swing_s.len(),
+        b.lfhf_w.len() + b.lfhf_s.len()
     );
 }
 
@@ -127,6 +135,14 @@ fn main() {
             let post = posture_series(&grav, w0, w1, EPOCH);
             let turns = turn_series(&post);
             let jerks = jerk_series(&grav, w0, w1);
+            let mut beats: Vec<(f64, f64)> = Vec::new();
+            for run in read_rr(&dir) {
+                for ms in run.intervals {
+                    beats.push((run.ts as f64, ms as f64));
+                }
+            }
+            beats.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let bands = bands_series(&beats, w0 as f64, w1 as f64, EPOCH as f64);
 
             for k in 0..post.len().min(truth.len()) {
                 let Some(t) = truth[k] else { continue };
@@ -140,6 +156,12 @@ fn main() {
                 }
                 if let Some(v) = jerks[k] {
                     if wake { b.jerk_w.push(v) } else { b.jerk_s.push(v) }
+                }
+                if let Some(bd) = bands.get(k).and_then(|x| *x) {
+                    if let Some(r) = bd.lf_hf {
+                        if wake { b.lfhf_w.push(r) } else { b.lfhf_s.push(r) }
+                    }
+                    if wake { b.hf_w.push(bd.hf) } else { b.hf_s.push(bd.hf) }
                 }
             }
         }
