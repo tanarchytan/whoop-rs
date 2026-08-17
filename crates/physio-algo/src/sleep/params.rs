@@ -40,6 +40,15 @@ pub struct Params {
     /// what SHIPPED still carries - 0.5 is measured better on two of three cohorts but moves all three
     /// parity constants, so adopting it is a re-baseline and not a parameter edit.
     pub quiescent_hr_z_max: f64,
+
+    /// Apply the motion-quiescent clamp ONLY to epochs with no R-R behind them.
+    ///
+    /// The clamp guards against a noisy cardiac term. R-R presence is read off `resp_reg`, which is
+    /// the ONLY R-R-fed feature - `hr_var` is the per-second heart-rate standard deviation and is
+    /// present with or without beats, so it cannot answer this. Measured: disabling the clamp outright gains
+    /// kappa on both R-R cohorts (DREAMT +0.014, AAUWSS +0.019) and loses on the one with none
+    /// (sleep-accel -0.016), which is the split this switch follows. `false` is the old behaviour.
+    pub clamp_only_without_rr: bool,
     /// Added to the awake emission when peak jerk clears the gate multiple.
     pub motion_gate_boost: f64,
     /// Weight of the RSA respiration-regularity term (added to deep, subtracted from REM).
@@ -85,6 +94,7 @@ impl Params {
         jerk_move_mult: 75.0,
         jerk_gate_mult: 35.0,
         quiescent_hr_z_max: f64::INFINITY,
+        clamp_only_without_rr: false,
         motion_gate_boost: 4.0,
         resp_weight: 0.6,
         base_rate: [0.15, 0.22, 0.50, 0.34],

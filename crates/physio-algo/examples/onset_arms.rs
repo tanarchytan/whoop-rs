@@ -44,6 +44,7 @@ fn arms() -> Vec<(&'static str, Params)> {
         // The CLEAN clamp-off arm. `jerk_gate_mult` was the earlier probe and it is confounded: the
         // same constant also gates `motion_gate_boost`, so moving it changes two mechanisms at once.
         ("quiescent_hr_z_max -inf (clamp NEVER)", Params { quiescent_hr_z_max: f64::NEG_INFINITY, ..s }),
+        ("clamp_only_without_rr (THE CANDIDATE)", Params { clamp_only_without_rr: true, ..s }),
         ("awake_hr 0.4 -> 1.2", Params { awake_hr: 1.2, ..s }),
         ("awake_deadzone -> 0", Params { awake_deadzone: 0.0, ..s }),
         ("base_rate awake 0.34 -> 0.55", Params { base_rate: [0.55, 0.50, 0.15, 0.22], ..s }),
