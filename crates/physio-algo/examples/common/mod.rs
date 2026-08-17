@@ -21,11 +21,13 @@ use physio_algo::sleep::{
     StepSample, MIN_DENSE_FRACTION,
 };
 
-/// The de-duplicated corpus, and the default for every harness. The raw `fixtures_multi` root holds each
-/// beat twice on 16 of its 92 `ours` nights and 6 of its 64 `continuous` blocks, and `fixtures_multi_clean`
-/// still holds the second wearer-side duplication on 30 and 36 of them, so defaulting to either would hand
-/// back a doubled R-R stream with no error. `WHOOP_SLEEP_FIXTURES` overrides.
-const DEFAULT_ROOT: &str = "C:/Users/DavidGillot/Projects/whoop/sleep-benchmark/fixtures_multi_clean2";
+/// The de-duplicated, fidelity-repaired corpus, and the default for every harness. The raw
+/// `fixtures_multi` root holds each beat twice on 16 of its 92 `ours` nights and 6 of its 64 `continuous`
+/// blocks, and `fixtures_multi_clean` still holds the second wearer-side duplication on 30 and 36 of them,
+/// so defaulting to either would hand back a doubled R-R stream with no error. `_clean3` further repairs
+/// `aauwss/subject_12`'s placeholder gravity and all 31 gap-filled `sleep-accel` HR streams, and adds the
+/// DREAMT temp / BVP / apnea-event / demographics channels. `WHOOP_SLEEP_FIXTURES` overrides.
+const DEFAULT_ROOT: &str = "C:/Users/DavidGillot/Projects/whoop/sleep-benchmark/fixtures_multi_clean3";
 
 pub fn fixtures_root() -> PathBuf {
     std::env::var("WHOOP_SLEEP_FIXTURES").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(DEFAULT_ROOT))

@@ -24,133 +24,133 @@ cargo_root = "whoop-rs"
 # The de-duplicated corpus, both rules applied. Built by grafting onto the pinned fixtures_multi_clean,
 # never rebuilt from the raw root: that has since been rebuilt from newer backups (2,140.5 h against the
 # pinned 2,113 h), so a rebuild from it is a DIFFERENT corpus.
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 
 # ─────────────────────────────────────────── the runs ───────────────────────────────────────────
 
 [[run]]
 id = "hrv_seam"
 example = "hrv_seam"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "A"
 what = "the R-R report-seam rule, per wearer"
 
 [[run]]
 id = "hrv_window"
 example = "hrv_window"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "A"
 what = "whole-night vs deep-only vs last-deep HRV, and every published WHOOP pair"
 
 [[run]]
 id = "detect_hysteresis"
 example = "detect_hysteresis"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "B"
 what = "the 25-cell enter/exit sweep on two references, both named configs, the staging churn"
 
 [[run]]
 id = "select_bridge"
 example = "select_bridge"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "C"
 what = "nine sections: cardinality, bridging, selection, split cost, the absorb sweep, both paths"
 
 [[run]]
 id = "persist_window"
 example = "persist_window"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "D"
 what = "the stored window against fresh detection, split by who wrote each row"
 
 [[run]]
 id = "window_effect"
 example = "window_effect"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "E"
 what = "the window sensitivity itself, on both paths"
 
 [[run]]
 id = "stage_window"
 example = "stage_window"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "E"
 what = "grid origins, grid phase, the ablation, and the two main-night scorers"
 
 [[run]]
 id = "emit_wake"
 example = "emit_wake"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "F"
 what = "the wake over-call on the app's path, the region split, six levers, the PSG ledger"
 
 [[run]]
 id = "viterbi_decode"
 example = "viterbi_decode"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "G"
 what = "the decoder against three oracles and four references, the matrix and base rates measured"
 
 [[run]]
 id = "flow_az"
 example = "flow_az"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "B-I"
 what = "every stage of the flow beside the others on one reference"
 
 [[run]]
 id = "stage_fractions"
 example = "stage_fractions"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "I"
 what = "stage fractions on the export's own in-bed window, both paths, both references, three rescues"
 
 [[run]]
 id = "bench_ours"
 example = "bench_ours"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "I"
 what = "stage fractions and first-REM over all 92 nights"
 
 [[run]]
 id = "sweep_rem"
 example = "sweep_rem"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "F"
 what = "the REM guard's K x minutes grid and the ramp ceiling, on PSG truth"
 
 [[run]]
 id = "verify_934"
 example = "verify_934"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "F"
 what = "the guard per cohort, against the pre-F1 window step, with the units claim"
 
 [[run]]
 id = "ablate_cycle"
 example = "ablate_cycle"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "-"
 what = "the cycle prior ablated against PSG truth. No A-Z figure is quoted from it"
 
 [[run]]
 id = "dump_labels"
 example = "dump_labels"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "-"
 what = "per-epoch labels for an external aligner. No A-Z figure is quoted from it"
 
 [[run]]
 id = "tune_v2"
 example = "tune_v2"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "-"
 skip = "a coordinate-descent search, not a measurement; no A-Z figure is quoted from it"
 
 [[run]]
 id = "verify_backup"
 example = "verify_backup"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "-"
 skip = "reads a backup slices directory, not the fixture root; no A-Z figure is quoted from it"
 
@@ -3422,7 +3422,7 @@ step = "A"
 section = "the corpus"
 label = "0.953 rule: ours nights cleaned, and beats in -> out"
 documented = "30 of 92, 2853257 -> 2546998"
-note = "build_clean_fixtures.py fixtures_multi_clean fixtures_multi_clean2 prints it; the sweep runs cargo examples only"
+note = "build_clean_fixtures.py fixtures_multi_clean fixtures_multi_clean3 prints it; the sweep runs cargo examples only"
 
 [[figure]]
 run = "hrv_seam"
@@ -3438,21 +3438,21 @@ note = "same command; and the per-rule false-positive control is the same script
 [[run]]
 id = "wake_refine"
 example = "wake_refine"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "H"
 what = "the wake refinement: what it converts, on both references, and the three bounded rescues"
 
 [[run]]
 id = "sleep_to_charge"
 example = "sleep_to_charge"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "Z"
 what = "a known sleep error followed into Rest and Charge, with the two channels separated"
 
 [[run]]
 id = "motion_channel"
 example = "motion_channel"
-fixtures = "sleep-benchmark/fixtures_multi_clean2"
+fixtures = "sleep-benchmark/fixtures_multi_clean3"
 step = "H"
 what = "the motion channel's INPUT: the strap's on-chip ENMO against the derived jerk, with a control"
 

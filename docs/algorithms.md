@@ -9,8 +9,8 @@ Every entry point takes plain values (R-R runs, PPG samples, accel, per-epoch fi
 `HistoryRecord` slice, never a wire frame and never BLE. Absent signal returns `None`, never a fabricated
 number. Outputs are wellness estimates, never medical.
 
-`physio-algo` carries **678 unit tests** (golden vectors, parity fixtures, synthetic sweeps); the
-workspace runs **911** (measured 2026-08-06 at HEAD; re-derive, never carry forward).
+`physio-algo` carries **724 unit tests** (golden vectors, parity fixtures, synthetic sweeps); the
+workspace runs **1041** (measured 2026-08-17 at HEAD; re-derive, never carry forward).
 **Five** sleep-dataset tests read external fixtures and are `#[ignore]`d by default - three assert a
 cohort kappa, the fourth prints the whole-corpus sheet and the fifth the stream census. Run
 `cargo test -p physio-algo --test dataset_parity -- --ignored` to check the published kappas.
@@ -107,8 +107,12 @@ resp_reg  = R-R tachogram -> 4 Hz resample -> detrend -> DFT peak/sum over 0.15-
 cycle prior: deep decays to 0 after 55% of night; rem suppressed in first 12%
 Viterbi 4-state, sticky self-transitions (deep 0.76, rem 0.92, light 0.80, wake 0.90)
 ```
-Validated on DREAMT n=100 (**4-class** kappa **0.312**, at the wrist-optical ceiling), AAUWSS (**0.412**,
-n=13) and sleep-accel / Walch (**0.379**, n=31), all re-measured 2026-08-02 on `fixtures_multi_clean2`.
+Validated on DREAMT n=100 (**4-class** kappa **0.312**), AAUWSS (**0.410**, n=13) and sleep-accel / Walch
+(**0.378**, n=31), all re-measured 2026-08-17 on `fixtures_multi_clean3`. **These are near the commercial
+floor, not the wrist-optical ceiling** — an earlier version of this line said the latter and that is
+falsified: published wrist-PPG staging reaches 4-class kappa 0.638-0.65 on the same physical channels
+(Radha 2021 n=60, Fonseca 2023 n=394), and independently-measured WHOOP 4.0 scores 0.37. See
+`whoop/docs/SLEEP-RESEARCH-LANDSCAPE.md`.
 Every kappa in this doc is 4-class over Wake/Light/Deep/Rem; the 3-class DREAMT figure is a different
 measurement (0.3657) and is not comparable to any of them. `tests/dataset_parity.rs` asserts these three
 against constants 0.311 / 0.412 / 0.379 at ±0.008, so DREAMT's measured 0.312 sits 0.001 from its
@@ -424,7 +428,7 @@ direction. In the other, **20 Kotlin files still carry maths of their own**, lis
 
 | Algorithm | Evidence |
 |---|---|
-| Sleep detection + staging (V2) | Cohen's **4-class** κ against PSG, re-measured 2026-08-02: **0.312** DREAMT (100 subjects), **0.412** AAUWSS (13), **0.379** sleep-accel (31). Those three are asserted by `tests/dataset_parity.rs` against constants 0.311 / 0.412 / 0.379 at ±0.008. The 3-class DREAMT figure is a different measurement (0.3657) and is not comparable. Against our own stored hypnograms, which is a consistency read and not accuracy — the truth column is our own past output — the `--ignored` sheet prints 0.533 killa5 (13), 0.483 strap (46), 0.599 whoop4 (20); those three are printed, not asserted, and were reproduced unchanged on `fixtures_multi_clean2` on 2026-08-02. They are CIRCULAR by construction, so they are not evidence of accuracy. A re-tune was attempted and **rejected**: it gained 0.044 on the fitting set and lost up to 0.372 on held-out sets |
+| Sleep detection + staging (V2) | Cohen's **4-class** κ against PSG, re-measured 2026-08-17 on `fixtures_multi_clean3`: **0.312** DREAMT (100 subjects), **0.410** AAUWSS (13), **0.378** sleep-accel (31). Those three are asserted by `tests/dataset_parity.rs` against constants 0.311 / 0.412 / 0.379 at ±0.008. The 3-class DREAMT figure is a different measurement (0.3657) and is not comparable. Against our own stored hypnograms, which is a consistency read and not accuracy — the truth column is our own past output — the `--ignored` sheet prints 0.533 killa5 (13), 0.483 strap (46), 0.599 whoop4 (20); those three are printed, not asserted, and were reproduced unchanged on `fixtures_multi_clean3` on 2026-08-17. They are CIRCULAR by construction, so they are not evidence of accuracy. A re-tune was attempted and **rejected**: it gained 0.044 on the fitting set and lost up to 0.372 on held-out sets |
 
 ### ✅ Parity-tested — pinned to the previous implementation
 

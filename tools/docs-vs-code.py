@@ -40,7 +40,7 @@ ROOT = HERE.parent
 DOCS = ROOT / "docs"
 WHOOP = ROOT.parent
 KOTLIN = WHOOP / "noop-wt-tan" / "android" / "app" / "src" / "main" / "java"
-FIXTURES = WHOOP / "sleep-benchmark" / "fixtures_multi_clean2"
+FIXTURES = WHOOP / "sleep-benchmark" / "fixtures_multi_clean3"
 
 # Small counts a document spells out rather than digits. Comparison is case-insensitive, so the word in
 # the prose is pinned as the word, not silently accepted because a digit happened to match.

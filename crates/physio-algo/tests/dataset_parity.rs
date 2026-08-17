@@ -35,11 +35,16 @@ use physio_algo::sleep::{
     stage_v2, AccelSample, HrSample, RrRun, SleepInput, SleepStage, StageSegment,
 };
 
-/// The de-duplicated corpus, resolved off this crate's manifest dir so it works from any checkout. The
-/// raw `fixtures_multi` root holds each beat twice on some own-strap nights and `fixtures_multi_clean`
-/// still holds a second wearer-side duplication, so defaulting to either would score a doubled R-R stream.
+/// The de-duplicated, fidelity-repaired corpus, resolved off this crate's manifest dir so it works from
+/// any checkout. The raw `fixtures_multi` root holds each beat twice on some own-strap nights and
+/// `fixtures_multi_clean` still holds a second wearer-side duplication, so defaulting to either would
+/// score a doubled R-R stream. `_clean3` differs from `_clean2` in exactly three ways, all measured
+/// 2026-08-17: `aauwss/subject_12` no longer carries 36.3% placeholder (0,0,1) gravity, all 31
+/// `sleep-accel` HR streams are no longer gap-filled into 50-95% flat runs, and DREAMT gained
+/// `temp.csv` / `bvp_8hz.csv` / `events.csv` / `participant_info.csv`. Every DREAMT stream this test
+/// reads is byte-identical between the two roots, and all three cohort gates pass unchanged.
 const DEFAULT_ROOT: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../sleep-benchmark/fixtures_multi_clean2");
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../sleep-benchmark/fixtures_multi_clean3");
 
 fn fixtures_root() -> PathBuf {
     std::env::var("WHOOP_SLEEP_FIXTURES").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(DEFAULT_ROOT))

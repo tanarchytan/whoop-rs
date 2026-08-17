@@ -506,7 +506,7 @@ fn output_arms() -> Vec<OutputArm> {
 // ---------------------------------------------------------------------------------------------
 
 const DEFAULT_ROOT: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../sleep-benchmark/fixtures_multi_clean2");
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../../sleep-benchmark/fixtures_multi_clean3");
 
 fn fixtures_root() -> PathBuf {
     std::env::var("WHOOP_SLEEP_FIXTURES").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(DEFAULT_ROOT))
