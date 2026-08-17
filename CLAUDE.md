@@ -24,7 +24,7 @@ There is no `whoop-metrics` crate — it became `physio-algo`. Full graph: `docs
 ```bash
 cd whoop-rs
 cargo build
-cargo test                 # 1002 passed, 0 failed, 51 #[ignore]d  (2026-08-08; re-derive, never carry forward)
+cargo test                 # 1041 passed, 0 failed, 51 #[ignore]d  (2026-08-17; re-derive, never carry forward)
 cargo clippy --all-targets
 cargo run -p whoopctl -- scan
 
@@ -32,7 +32,8 @@ cargo run -p whoopctl -- scan
 # multi-GB tree outside the repo, so a green suite says nothing about staging. Run it whenever
 # anything under sleep/ changes:
 cargo test --release -p physio-algo --test dataset_parity -- --ignored --nocapture
-#   expect: 5 passed, 0 failed; dreamt 0.3123 (n=100), aauwss 0.412 (n=13), sleep-accel 0.379 (n=31)
+#   expect: 5 passed, 0 failed; dreamt 0.3123 (n=100), aauwss 0.4103 (n=13), sleep-accel 0.3780 (n=31)
+#   corpus: sleep-benchmark/fixtures_multi_clean3 (the pinned root; WHOOP_SLEEP_FIXTURES overrides)
 ```
 
 Pinned to **MSVC** via an in-dir `rustup override` (btleplug's WinRT deps need the MSVC linker; the
@@ -60,7 +61,7 @@ patch once it does.
   run, fold them into usable overall docs in `docs/`** (update `docs/architecture.md`, don't leave a pile
   of handoff files). One authoritative `architecture.md`, not N floating dev docs. Provenance +
   per-crate clean-state confirm live in `dev-docs/{external-sources,crates}.md`.
-- **Verify by READING the `cargo test` / `cargo build` output** (903 passed, 0 warnings, 0 clippy), never
+- **Verify by READING the `cargo test` / `cargo build` output** (all passed, 0 warnings, 0 clippy), never
   a piped exit code. That invariant must hold after every change.
 - **Gated writes only.** `command::FORBIDDEN`/`DESTRUCTIVE` refuse firmware-load/trim/DFU/config-write
   on the blind path; legitimate ones (reboot, R22) have dedicated intentional methods a UI opt-in gates.
