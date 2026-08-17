@@ -185,6 +185,41 @@ mod tests {
         );
     }
 
+    /// Pins RR_GAP_S. The fragment test above proves a split HAPPENS; it does not pin WHERE, and a
+    /// mutation sweep raised the threshold 100x with nothing noticing because its fragments sat an
+    /// hour apart. A gap just over the constant must split; one just under must not.
+    #[test]
+    fn the_gap_threshold_is_where_it_says_it_is() {
+        assert_eq!(RR_GAP_S, 10.0);
+        let two_runs = |gap: i64| {
+            let (a, start, mid) = synth(0.25, 1000.0, 40.0, 400.0);
+            let (b, _, _) = synth(0.25, 1000.0, 40.0, 400.0);
+            let mut rows = a;
+            rows.extend(b.iter().map(|(t, ms)| (t - start + mid + gap, *ms)));
+            let end = rows.last().unwrap().0;
+            resp_rate_from_rr(&rows, start, end)
+        };
+        // Under the threshold the halves are one run, so the joined span clears the window minimum.
+        assert!(two_runs(RR_GAP_S as i64 - 2).is_some(), "a sub-threshold gap must not split");
+        // Over it they are two runs, each 400 s, each still long enough to score - so this asserts the
+        // split happened by its effect on a run too short to survive one.
+        let (short, s0, _) = synth(0.25, 1000.0, 40.0, 100.0);
+        let mut frag = short.clone();
+        frag.extend(short.iter().map(|(t, ms)| (t - s0 + s0 + 600, *ms)));
+        let fe = frag.last().unwrap().0;
+        assert_eq!(resp_rate_from_rr(&frag, s0, fe), None,
+            "two 100 s fragments 600 s apart are two runs, neither long enough to score");
+    }
+
+    /// Pins the plausible-band ceiling. The sweep raised it 30% with nothing noticing.
+    #[test]
+    fn the_plausible_band_rejects_a_rate_above_its_ceiling() {
+        assert_eq!(RESP_PLAUSIBLE_MAX_BPM, 25.0);
+        assert_eq!(resp_rate_of(vec![RESP_PLAUSIBLE_MAX_BPM + 1.0; 5]), None, "above the ceiling");
+        assert_eq!(resp_rate_of(vec![RESP_PLAUSIBLE_MIN_BPM - 1.0; 5]), None, "below the floor");
+        assert!(resp_rate_of(vec![15.0; 5]).is_some(), "inside the band");
+    }
+
     /// Synthetic tachogram: mean HR with a known-Hz RSA modulation, so the recovered rate can be
     /// cross-checked against the planted breathing frequency.
     fn synth(breath_hz: f64, base_rr_ms: f64, amp_ms: f64, span_s: f64) -> (Vec<(i64, u16)>, i64, i64) {

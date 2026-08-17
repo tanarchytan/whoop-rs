@@ -456,4 +456,39 @@ mod tests {
         let still = vec![st(120, 100, Some(0)), st(150, 200, Some(0))];
         assert!(walk_class_ticks_per_minute(&still).is_empty());
     }
+
+    /// Pins SUSTAINED_WALK_TICKS_PER_MINUTE and the consecutive-minute rule it feeds. The sweep raised
+    /// it 50% unnoticed: the test above only exercised SINGLE_MINUTE_WALK_TICKS, which is four times
+    /// larger, so any sustained threshold under 40 satisfied it.
+    #[test]
+    fn the_sustained_walk_cadence_is_where_it_says_it_is() {
+        assert_eq!(SUSTAINED_WALK_TICKS_PER_MINUTE, 10);
+        assert_eq!(SUSTAINED_WALK_MIN_CONSECUTIVE_MINUTES, 2);
+        let ticks = |per_min: i32| -> HashMap<i64, i32> {
+            (1..=3).map(|m| (m, per_min)).collect()
+        };
+        let one_under = SUSTAINED_WALK_TICKS_PER_MINUTE - 1;
+        assert!(!has_locomotion(&[1, 2, 3], &ticks(one_under)),
+            "a cadence under the sustained threshold is not locomotion however long it runs");
+        assert!(has_locomotion(&[1, 2, 3], &ticks(SUSTAINED_WALK_TICKS_PER_MINUTE)),
+            "at the threshold, two consecutive minutes are");
+        assert!(!has_locomotion(&[1], &ticks(SUSTAINED_WALK_TICKS_PER_MINUTE)),
+            "one minute at the threshold is not: the consecutive rule must hold too");
+    }
+
+    /// Pins MIN_DENSE_MINUTE_COVERAGE_FRACTION. The sweep raised it 10% unnoticed.
+    #[test]
+    fn the_density_gate_declines_just_below_its_coverage_fraction() {
+        assert_eq!(MIN_DENSE_MINUTE_COVERAGE_FRACTION, 0.80);
+        let minutes = 100i64;
+        let (grav, steps) = still_streams(minutes);
+        let end = minutes * 60;
+        assert!(is_motion_dense(0, end, &grav, &steps), "full coverage is dense");
+        // Thin the step stream to just under the fraction: the gate wants a step sample in 80% of
+        // minutes, so 75% must decline.
+        let thin: Vec<StepSample> =
+            steps.iter().filter(|s| (s.ts / 60) % 4 != 0).cloned().collect();
+        assert!(!is_motion_dense(0, end, &grav, &thin),
+            "75% step coverage is under the fraction and must decline");
+    }
 }

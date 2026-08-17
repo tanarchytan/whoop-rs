@@ -190,4 +190,37 @@ mod tests {
     fn the_window_is_long_enough_for_the_lowest_band_edge() {
         assert!(WINDOW_S * VLF.0 >= 4.0, "VLF needs at least four cycles in the window");
     }
+
+    /// Pins MIN_BEATS to its value, not merely to "some floor exists". A mutation sweep found the
+    /// constant could be raised 50% with nothing noticing: the sparse-input test used 10 beats, so any
+    /// floor above 10 satisfied it.
+    #[test]
+    fn the_beat_floor_is_where_it_says_it_is() {
+        assert_eq!(MIN_BEATS, 30, "changing this changes which windows produce a spectrum at all");
+        let at = |n: usize| {
+            let b: Vec<(f64, f64)> = (0..n).map(|i| (i as f64 * 2.0, 1000.0 + 40.0 * (i as f64).sin())).collect();
+            bands_at(&b, 0.0).is_some()
+        };
+        assert!(!at(MIN_BEATS - 1), "one beat under the floor must not produce a spectrum");
+        assert!(at(MIN_BEATS + 60), "well over the floor must");
+    }
+
+    /// Pins WINDOW_S. Raising it silently would change which epochs can be scored at all, and the
+    /// sweep showed a 50% increase passing unnoticed.
+    #[test]
+    fn the_window_is_the_length_the_band_edges_were_chosen_for() {
+        assert_eq!(WINDOW_S, 270.0, "nine 30-second epochs");
+        // WINDOW_S sets how far the window REACHES, not a minimum length, so pin the reach: a signal
+        // beyond the edge must not reach the answer, and one just inside must.
+        let mut split = synthetic(0.25, WINDOW_S - 10.0, 40.0);
+        let tail_from = split.last().unwrap().0;
+        for (t, v) in synthetic(0.06, 400.0, 40.0) {
+            split.push((tail_from + 20.0 + t, v));
+        }
+        let inside = bands_at(&split, 0.0).unwrap();
+        assert!(inside.lf_hf.unwrap() < 1.0, "0.25 Hz inside the window must dominate: {inside:?}");
+        // Start the same window past the edge and the far signal, which is LF, takes over.
+        let beyond = bands_at(&split, tail_from + 20.0).unwrap();
+        assert!(beyond.lf_hf.unwrap() > 1.0, "0.06 Hz beyond it is LF-dominant: {beyond:?}");
+    }
 }

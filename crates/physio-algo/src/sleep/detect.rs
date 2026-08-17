@@ -685,6 +685,27 @@ mod tests {
         HrSample { ts, bpm }
     }
 
+    /// Pins GRAVITY_STILL_THRESHOLD_G, the constant the whole detector rests on: a sample counts as
+    /// still when its delta is UNDER it. A mutation sweep raised it 50% with nothing noticing, and it
+    /// is the exact constant any change to the detection boundary would touch.
+    #[test]
+    fn the_stillness_threshold_is_where_it_says_it_is() {
+        assert_eq!(GRAVITY_STILL_THRESHOLD_G, 0.01);
+        let p = DetectParams::default();
+        // A run of samples each moving by `step` per sample, long enough to fill the rolling window.
+        let run = |step: f64| {
+            let g: Vec<AccelSample> =
+                (0..600).map(|i| a(i, 0.0, 0.0, 1.0 + i as f64 * step)).collect();
+            let d = gravity_deltas(&g);
+            let flags = classify_still(&g, &d, &p);
+            flags.iter().filter(|b| **b).count()
+        };
+        let under = GRAVITY_STILL_THRESHOLD_G * 0.5;
+        let over = GRAVITY_STILL_THRESHOLD_G * 1.5;
+        assert!(run(under) > 0, "movement under the threshold must read as still");
+        assert_eq!(run(over), 0, "movement over it must not");
+    }
+
     #[test]
     fn gravity_deltas_first_zero_then_l2() {
         let g = vec![a(0, 0.0, 0.0, 1.0), a(1, 0.0, 0.0, 1.0), a(2, 3.0, 4.0, 1.0)];

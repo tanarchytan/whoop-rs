@@ -194,6 +194,36 @@ mod tests {
         }
     }
 
+    /// Pins DEFAULT_SLEEP_NEED_HOURS and DEEP_FLOOR_FACTOR. A mutation sweep moved both 10% with
+    /// nothing noticing: every other Rest test passes `Some(8.0)` for the need, so the default is
+    /// never exercised, and none of them puts deep at zero AND checks the exact halving.
+    #[test]
+    fn the_default_need_and_the_deep_floor_are_where_they_say_they_are() {
+        assert_eq!(DEFAULT_SLEEP_NEED_HOURS, 8.0);
+        assert_eq!(DEEP_FLOOR_FACTOR, 0.5);
+
+        // Omitting the need must equal passing the default, and must NOT equal passing anything else.
+        let night = |need: Option<f64>| {
+            rest(7.0 * 3600.0, 0.90, 0.20 * 7.0 * 3600.0, 0.20 * 7.0 * 3600.0, need, Some(0.8)).unwrap()
+        };
+        assert_eq!(night(None), night(Some(DEFAULT_SLEEP_NEED_HOURS)), "None must take the default");
+        assert!((night(None) - night(Some(DEFAULT_SLEEP_NEED_HOURS * 1.1))).abs() > 1e-9,
+            "a different need must give a different score, or the default is unpinned");
+
+        // Deep at zero takes the restorative term to exactly DEEP_FLOOR_FACTOR of its deep-adequate
+        // value, so the gap between them pins the constant rather than merely its direction.
+        let rem_only = rest(8.0 * 3600.0, 0.95, 0.0, 0.50 * 8.0 * 3600.0, Some(8.0), Some(1.0)).unwrap();
+        let deep_ok = rest(
+            8.0 * 3600.0, 0.95, DEEP_SHARE_TARGET * 8.0 * 3600.0,
+            0.50 * 8.0 * 3600.0 - DEEP_SHARE_TARGET * 8.0 * 3600.0, Some(8.0), Some(1.0),
+        )
+        .unwrap();
+        let restorative_full = 100.0;
+        let expected_gap = W_RESTORATIVE * restorative_full * (1.0 - DEEP_FLOOR_FACTOR);
+        assert!((deep_ok - rem_only - expected_gap).abs() < 1e-9,
+            "zero deep must cost exactly (1 - DEEP_FLOOR_FACTOR) of the restorative weight:              {deep_ok} - {rem_only} != {expected_gap}");
+    }
+
     #[test]
     fn short_night_scores_low() {
         // 4h asleep, 80% efficiency, same stage proportions

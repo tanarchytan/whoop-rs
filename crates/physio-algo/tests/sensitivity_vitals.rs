@@ -3293,7 +3293,7 @@ fn m18c_windowed_avg_real(t: &mut Tally) {
 /// source so a gate added or removed there fails loudly here instead of silently shrinking or
 /// outgrowing what the control measures.
 const VITALS_COHORT: &[(&str, &str, usize)] = &[
-    ("src/respiratory_rate.rs", include_str!("../src/respiratory_rate.rs"), 8),
+    ("src/respiratory_rate.rs", include_str!("../src/respiratory_rate.rs"), 10),
     ("src/hrv_freq.rs", include_str!("../src/hrv_freq.rs"), 7),
     ("src/spo2.rs", include_str!("../src/spo2.rs"), 11),
     ("src/worn.rs", include_str!("../src/worn.rs"), 6),
