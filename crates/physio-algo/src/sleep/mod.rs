@@ -22,6 +22,7 @@ mod input;
 mod mainnight;
 pub mod metrics;
 pub mod params;
+pub mod posture;
 mod refine;
 mod v2;
 
