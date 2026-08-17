@@ -91,10 +91,10 @@ fn main() {
             .collect();
         assert!(!truth_spans.is_empty(), "{name}: truth.csv parsed to nothing");
         for (a, b, is_wake) in truth_spans {
-            for k in 0..n {
+            for (k, slot) in truth.iter_mut().enumerate() {
                 let mid = w0 + k as i64 * EPOCH + EPOCH / 2;
                 if mid >= a && mid < b {
-                    truth[k] = usize::from(is_wake != 1);
+                    *slot = usize::from(is_wake != 1);
                 }
             }
         }

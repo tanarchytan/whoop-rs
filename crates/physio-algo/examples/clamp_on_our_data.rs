@@ -14,8 +14,8 @@
 mod common;
 
 use common::{
-    band_asleep_secs, dirs_of, mean, night_id, pair_nearest, read_accel, read_band, read_export,
-    read_hr, read_meta, read_rr, read_steps, stage_idx, RefineCensus,
+    band_asleep_secs, dirs_of, mean, night_id, read_accel, read_band, read_hr, read_meta, read_rr,
+    read_steps, stage_idx, RefineCensus,
 };
 
 use physio_algo::sleep::{params::Params, prepare_v2, stage_v2_prepared, SleepInput, StageSegment};
@@ -46,7 +46,6 @@ fn main() {
     let (mut band_a, mut band_b) = (Vec::new(), Vec::new());
     let mut census = RefineCensus::default();
     let mut with_steps = 0usize;
-    let mut paired: Vec<((String, i64), [f64; 4])> = Vec::new();
 
     for set_name in ["ours", "whoop4", "strap", "killa5"] {
     for dir in dirs_of(set_name) {
@@ -80,9 +79,6 @@ fn main() {
         }
         let owner = night_id(&dir).0.split('_').next().unwrap_or("?").to_string();
         let _ = owner;
-        if set_name == "ours" {
-            paired.push((night_id(&dir), row));
-        }
         per_owner.entry(set_name.to_string()).or_default().push(row);
     }
     }
