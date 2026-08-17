@@ -68,11 +68,7 @@ fn auc(pos: &[f64], neg: &[f64]) -> Option<f64> {
             j += 1;
         }
         let r = (i + j) as f64 / 2.0 + 1.0;
-        for k in i..=j {
-            if all[k].1 {
-                rank_sum += r;
-            }
-        }
+        rank_sum += r * all[i..=j].iter().filter(|(_, p)| *p).count() as f64;
         i = j + 1;
     }
     let (np, nn) = (pos.len() as f64, neg.len() as f64);
