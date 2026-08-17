@@ -148,27 +148,7 @@ fn predict_epochs(segs: &[StageSegment], w0: i64, n_epochs: usize) -> Vec<i32> {
         .collect()
 }
 
-fn cohen_kappa(cm: &[[i64; 4]; 4]) -> f64 {
-    let tot: i64 = cm.iter().flatten().sum();
-    if tot == 0 {
-        return 0.0;
-    }
-    let tot = tot as f64;
-    let trace: i64 = (0..4).map(|i| cm[i][i]).sum();
-    let a4 = trace as f64 / tot;
-    let mut pe = 0.0;
-    for (j, row_j) in cm.iter().enumerate() {
-        let col: i64 = cm.iter().map(|r| r[j]).sum();
-        let row: i64 = row_j.iter().sum();
-        pe += (col as f64) * (row as f64);
-    }
-    pe /= tot * tot;
-    if pe >= 1.0 {
-        0.0
-    } else {
-        (a4 - pe) / (1.0 - pe)
-    }
-}
+use physio_algo::sleep::metrics::kappa4 as cohen_kappa;
 
 /// One cohort scored, with the two do-nothing arms beside it and the R-R reach the "cardiorespiratory"
 /// label depends on.

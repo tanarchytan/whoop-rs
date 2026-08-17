@@ -20,6 +20,7 @@ mod common;
 mod detect;
 mod input;
 mod mainnight;
+pub mod metrics;
 pub mod params;
 mod refine;
 mod v2;

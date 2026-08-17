@@ -10,7 +10,7 @@
 //! harnesses reach past it on purpose — `wake_refine` sweeps `refine_wake_with` under other params, which
 //! is its subject, and `sleep_to_charge` runs its own `motion_density` gate at load time.
 
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -342,21 +342,7 @@ pub fn stage_idx(s: SleepStage) -> usize {
 
 /// Cohen's kappa over a 4-class confusion matrix (rows = truth, cols = predicted). Print it beside any
 /// accuracy: these references call most epochs asleep, and raw accuracy rewards a config that says so.
-pub fn kappa4(cm: &[[i64; 4]; 4]) -> f64 {
-    let tot: f64 = cm.iter().flatten().sum::<i64>() as f64;
-    if tot == 0.0 {
-        return 0.0;
-    }
-    let po = (0..4).map(|i| cm[i][i]).sum::<i64>() as f64 / tot;
-    let mut pe = 0.0;
-    for j in 0..4 {
-        let col: i64 = cm.iter().map(|r| r[j]).sum();
-        let row: i64 = cm[j].iter().sum();
-        pe += col as f64 * row as f64;
-    }
-    pe /= tot * tot;
-    if pe >= 1.0 { 0.0 } else { (po - pe) / (1.0 - pe) }
-}
+pub use physio_algo::sleep::metrics::kappa4;
 
 /// The strap's own `sleep_state`, 1 Hz, as `(ts, code)`.
 pub fn read_band(dir: &Path) -> Vec<(i64, i32)> {
