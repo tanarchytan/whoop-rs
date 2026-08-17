@@ -92,11 +92,35 @@ fn shuffled(labels: &[usize], seed: u64) -> Vec<usize> {
 }
 
 /// The arms. `Recipe` mutates SHIPPED and re-stages; `Fixed` and `Shuffle` ignore the streams entirely
-/// and exist so no number below can be read without its do-nothing floor beside it.
+/// and exist so no number below can be read without its do-nothing floor beside it. `Rescue` is the
+/// calibration ladder — see [`rescued`].
 enum Arm {
     Recipe(Box<Params>),
     Fixed(usize),
     Shuffle,
+    Rescue(f64),
+}
+
+/// A perfect feature that recovers exactly `frac` of the wake we currently miss. Takes the epochs where
+/// truth is wake and we said sleep, and flips that fraction of them, spread evenly so a bout is thinned
+/// rather than its head taken.
+///
+/// This is the only honest positive control: its size is CHOSEN, not borrowed from a paper measured on
+/// another cohort with another model. It answers the one question a kill condition needs — how much of
+/// the missed wake must a real feature find before this harness can prove it found anything.
+fn rescued(pred: &[usize], truth: &[usize], frac: f64) -> Vec<usize> {
+    let missed: Vec<usize> =
+        (0..pred.len().min(truth.len())).filter(|i| truth[*i] == WAKE && pred[*i] != WAKE).collect();
+    let take = (missed.len() as f64 * frac).round() as usize;
+    let mut out = pred.to_vec();
+    if take == 0 || missed.is_empty() {
+        return out;
+    }
+    // Evenly spaced picks: taking a contiguous head would convert whole bouts and flatter the ladder.
+    for j in 0..take {
+        out[missed[j * missed.len() / take]] = WAKE;
+    }
+    out
 }
 
 /// Index into [`arms`] of the two paired references. `SMALL` is one threshold moved; `REAL` is the whole
@@ -105,16 +129,24 @@ const SHIPPED_ARM: usize = 0;
 const SMALL_ARM: usize = 1;
 const REAL_ARM: usize = 2;
 
+/// The rescue ladder, as a fraction of currently-missed wake recovered.
+const LADDER: [f64; 5] = [0.05, 0.10, 0.25, 0.50, 1.00];
+
 fn arms() -> Vec<(&'static str, Arm)> {
     let nudge = Params { deep_gate_thresh: Params::SHIPPED.deep_gate_thresh + 0.05, ..Params::SHIPPED };
-    vec![
+    let mut v: Vec<(&'static str, Arm)> = vec![
         ("shipped", Arm::Recipe(Box::new(Params::SHIPPED))),
         ("small: deep_gate +0.05", Arm::Recipe(Box::new(nudge))),
         ("real: the pre-retune recipe", Arm::Recipe(Box::new(pre_retune(&Params::SHIPPED)))),
         ("null: always wake", Arm::Fixed(WAKE)),
         ("null: always light", Arm::Fixed(LIGHT)),
         ("null: shuffled ours", Arm::Shuffle),
-    ]
+    ];
+    for (label, f) in ["rescue 5% of missed wake", "rescue 10%", "rescue 25%", "rescue 50%",
+        "rescue 100% (oracle)"].iter().zip(LADDER) {
+        v.push((label, Arm::Rescue(f)));
+    }
+    v
 }
 
 /// Every number for one subject under one arm. `None` where the subject cannot answer — a night with no
@@ -193,6 +225,11 @@ fn main() {
                         Arm::Shuffle => {
                             shuffled(&stage_labels(night, prep, &Params::SHIPPED), i as u64 + 1)
                         }
+                        Arm::Rescue(f) => rescued(
+                            &stage_labels(night, prep, &Params::SHIPPED),
+                            &night.truth,
+                            *f,
+                        ),
                     };
                     score_subject(&pred, &night.truth)
                 })
@@ -248,6 +285,28 @@ fn main() {
             sd(&bd),
             1.96 * sd(&bd) / (bd.len() as f64).sqrt()
         );
+
+        // The calibration ladder. Each rung recovers a KNOWN fraction of the wake we miss, so the first
+        // rung that clears its own bar is the smallest real improvement this cohort can prove.
+        println!("\n  the rescue ladder — how much missed wake must a feature find to be provable?");
+        println!("{:<24} {:>9} {:>13} {:>7}   {:>9} {:>13} {:>7}",
+            "  recovered", "d kappa", "resolvable ±", "seen?", "d bout", "resolvable ±", "seen?");
+        let first_rescue = arms.len() - LADDER.len();
+        for (r, frac) in (first_rescue..arms.len()).zip(LADDER) {
+            let dk: Vec<f64> =
+                per_arm[SHIPPED_ARM].iter().zip(&per_arm[r]).map(|(a, b)| b.kappa - a.kappa).collect();
+            let db: Vec<f64> = per_arm[SHIPPED_ARM]
+                .iter()
+                .zip(&per_arm[r])
+                .filter_map(|(a, b)| Some(b.bout.recall()? - a.bout.recall()?))
+                .collect();
+            let (rk, rb) =
+                (1.96 * sd(&dk) / (n as f64).sqrt(), 1.96 * sd(&db) / (db.len().max(1) as f64).sqrt());
+            println!("{:<24} {:>+9.4} {:>13.4} {:>7}   {:>+9.4} {:>13.4} {:>7}",
+                format!("  {:.0}% of missed wake", frac * 100.0),
+                mean(&dk), rk, if mean(&dk).abs() > rk { "yes" } else { "NO" },
+                mean(&db), rb, if mean(&db).abs() > rb { "yes" } else { "NO" });
+        }
 
         // Named, so a fix can be tried against the subjects it is supposed to help rather than the mean.
         let mut worst: Vec<(f64, &str, usize)> = nights
