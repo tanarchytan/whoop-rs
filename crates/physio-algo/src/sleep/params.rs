@@ -26,6 +26,20 @@ pub struct Params {
     /// which an epoch counts as quiescent.
     pub jerk_move_mult: f64,
     pub jerk_gate_mult: f64,
+
+    /// Heart-rate z above which the motion-quiescent clamp does NOT apply.
+    ///
+    /// The clamp silences the awake cardiac term whenever the wrist is still, which is right
+    /// mid-night (it stops cardiac noise inventing wake) and wrong before sleep onset (lying still
+    /// and awake is exactly the case it hides). Measured on PSG: with the clamp always on, DREAMT
+    /// onset lands 112 min early; with it almost never on, 22 min - and kappa falls 0.11 because
+    /// phantom wake returns.
+    ///
+    /// This is the middle: keep the clamp, but let a body whose heart rate sits well above ITS OWN
+    /// night mean speak anyway. `f64::INFINITY` reproduces the always-clamp behaviour exactly, and is
+    /// what SHIPPED still carries - 0.5 is measured better on two of three cohorts but moves all three
+    /// parity constants, so adopting it is a re-baseline and not a parameter edit.
+    pub quiescent_hr_z_max: f64,
     /// Added to the awake emission when peak jerk clears the gate multiple.
     pub motion_gate_boost: f64,
     /// Weight of the RSA respiration-regularity term (added to deep, subtracted from REM).
@@ -70,6 +84,7 @@ impl Params {
         deep_gate_slope: 5.0,
         jerk_move_mult: 75.0,
         jerk_gate_mult: 35.0,
+        quiescent_hr_z_max: f64::INFINITY,
         motion_gate_boost: 4.0,
         resp_weight: 0.6,
         base_rate: [0.15, 0.22, 0.50, 0.34],

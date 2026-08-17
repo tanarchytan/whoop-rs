@@ -88,20 +88,22 @@ struct Bucket {
     lfhf_s: Vec<f64>,
     hf_w: Vec<f64>,
     hf_s: Vec<f64>,
+    ton_w: Vec<f64>,
+    ton_s: Vec<f64>,
 }
 
 fn line(name: &str, b: &Bucket) {
     let f = |a: Option<f64>| a.map(|v| format!("{v:.3}")).unwrap_or_else(|| "  -  ".into());
     println!(
-        "  {name:<10} swing {:>6} turn {:>6} jerk {:>6} | LF:HF {:>6} HFpow {:>6} | n {:>6}/{:>6} rr {:>5}",
+        "  {name:<10} swing {:>6} turn {:>6} jerk {:>6} | LF:HF {:>6} HFpow {:>6} | t-o-n {:>6} | n {:>6}/{:>6}",
         f(auc(&b.swing_w, &b.swing_s)),
         f(auc(&b.turn_w, &b.turn_s)),
         f(auc(&b.jerk_w, &b.jerk_s)),
         f(auc(&b.lfhf_w, &b.lfhf_s)),
         f(auc(&b.hf_w, &b.hf_s)),
+        f(auc(&b.ton_w, &b.ton_s)),
         b.swing_w.len(),
-        b.swing_s.len(),
-        b.lfhf_w.len() + b.lfhf_s.len()
+        b.swing_s.len()
     );
 }
 
@@ -157,6 +159,8 @@ fn main() {
                 if let Some(v) = jerks[k] {
                     if wake { b.jerk_w.push(v) } else { b.jerk_s.push(v) }
                 }
+                let ton = k as f64 / post.len().max(1) as f64;
+                if wake { b.ton_w.push(ton) } else { b.ton_s.push(ton) }
                 if let Some(bd) = bands.get(k).and_then(|x| *x) {
                     if let Some(r) = bd.lf_hf {
                         if wake { b.lfhf_w.push(r) } else { b.lfhf_s.push(r) }

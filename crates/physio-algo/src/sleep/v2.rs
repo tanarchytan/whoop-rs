@@ -588,7 +588,10 @@ fn emissions(feats: &[Epoch], p: &Params, anchor: Anchor) -> Vec<[f64; 4]> {
         let zmvv = zmv.apply(f.move_frac);
         let gate = p.deep_gate_slope * (fpct(f.hr_flat11) - p.deep_gate_thresh).max(0.0);
         let awake_cardiac0 = p.awake_hrv * dz(zhvv, p.awake_deadzone) + p.awake_hr * dz(zhrv, p.awake_deadzone);
-        let awake_cardiac = if motion_quiescent(f, p) { awake_cardiac0.min(0.0) } else { awake_cardiac0 };
+        // Stillness silences the cardiac term - unless the heart is running well above this night's
+        // own mean, which is a wind-down and not sleep. INFINITY restores the unconditional clamp.
+        let clamped = motion_quiescent(f, p) && zhrv < p.quiescent_hr_z_max;
+        let awake_cardiac = if clamped { awake_cardiac0.min(0.0) } else { awake_cardiac0 };
 
         let mut em = [0.0f64; 4];
         em[DEEP] = p.deep_hrv * zhvv + p.deep_hr * zhrv + p.deep_motion * zmvv - gate + blp[DEEP];

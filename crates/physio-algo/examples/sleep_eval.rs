@@ -128,6 +128,7 @@ fn rescued(pred: &[usize], truth: &[usize], frac: f64) -> Vec<usize> {
 const SHIPPED_ARM: usize = 0;
 const SMALL_ARM: usize = 1;
 const REAL_ARM: usize = 2;
+const CAND_ARM: usize = 3;
 
 /// The rescue ladder, as a fraction of currently-missed wake recovered.
 const LADDER: [f64; 5] = [0.05, 0.10, 0.25, 0.50, 1.00];
@@ -138,6 +139,8 @@ fn arms() -> Vec<(&'static str, Arm)> {
         ("shipped", Arm::Recipe(Box::new(Params::SHIPPED))),
         ("small: deep_gate +0.05", Arm::Recipe(Box::new(nudge))),
         ("real: the pre-retune recipe", Arm::Recipe(Box::new(pre_retune(&Params::SHIPPED)))),
+        ("cand: quiescent_hr_z_max 0.5",
+            Arm::Recipe(Box::new(Params { quiescent_hr_z_max: 0.5, ..Params::SHIPPED }))),
         ("null: always wake", Arm::Fixed(WAKE)),
         ("null: always light", Arm::Fixed(LIGHT)),
         ("null: shuffled ours", Arm::Shuffle),
@@ -261,7 +264,7 @@ fn main() {
         let n = nights.len();
         println!("\n  paired against shipped, per subject (n={n}):");
         println!("{:<44} {:>9} {:>9} {:>13}", "  reference", "mean d", "sd d", "resolvable ±");
-        for i in [SMALL_ARM, REAL_ARM] {
+        for i in [SMALL_ARM, REAL_ARM, CAND_ARM] {
             let d: Vec<f64> =
                 per_arm[SHIPPED_ARM].iter().zip(&per_arm[i]).map(|(a, b)| b.kappa - a.kappa).collect();
             println!(
@@ -275,12 +278,12 @@ fn main() {
         // The headline moves on a different scale from kappa, so it needs its own bar.
         let bd: Vec<f64> = per_arm[SHIPPED_ARM]
             .iter()
-            .zip(&per_arm[REAL_ARM])
+            .zip(&per_arm[CAND_ARM])
             .filter_map(|(a, b)| Some(b.bout.recall()? - a.bout.recall()?))
             .collect();
         println!(
             "{:<44} {:>+9.4} {:>9.4} {:>13.4}",
-            format!("  {} (bout recall)", arms[REAL_ARM].0),
+            format!("  {} (bout recall)", arms[CAND_ARM].0),
             mean(&bd),
             sd(&bd),
             1.96 * sd(&bd) / (bd.len() as f64).sqrt()
