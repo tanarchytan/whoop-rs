@@ -634,6 +634,38 @@ mod tests {
         features(input.start, input.end, &grav, &input.hr, &[], &Params::SHIPPED)
     }
 
+    /// Pins `quiescent_hr_z_max`, which shipped ungated: it appears in `params.rs` and here and in no
+    /// test at all, and its INFINITY default means a mutation sweep that scales constants cannot move
+    /// it either. INFINITY must reproduce the unconditional clamp exactly; a finite value must let a
+    /// still epoch whose heart rate sits above the night mean keep its awake cardiac term.
+    #[test]
+    fn the_quiescent_hr_ceiling_decides_whether_a_still_epoch_keeps_its_cardiac_term() {
+        assert_eq!(Params::SHIPPED.quiescent_hr_z_max, f64::INFINITY, "shipped is the old behaviour");
+
+        // A still night whose second half runs hot: gravity flat throughout, HR stepping up, so the
+        // late epochs are motion-quiescent AND well above the night's own mean.
+        let start = 1_749_513_600i64;
+        let hr: Vec<HrSample> = (0..600)
+            .map(|i| HrSample { ts: start + i, bpm: if i < 300 { 50 } else { 90 } })
+            .collect();
+        let accel: Vec<AccelSample> =
+            (0..600).map(|i| AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 }).collect();
+        let input = SleepInput { start, end: start + 600, hr, rr: Vec::<RrRun>::new(), accel };
+
+        let awake_of = |z: f64| {
+            let p = Params { quiescent_hr_z_max: z, ..Params::SHIPPED };
+            let prep = prepare(&input, &p);
+            let em = emissions_prepared(&prep, &p);
+            // The last epoch: still, and at the top of the night's HR range.
+            em.last().map(|e| e[AWAKE]).expect("emissions for a 10-minute night")
+        };
+        let clamped = awake_of(f64::INFINITY);
+        let free = awake_of(0.0);
+        assert!(free > clamped,
+            "a hot still epoch must score MORE awake once the ceiling lets its cardiac term through:              {free} vs {clamped}");
+        assert_eq!(clamped, awake_of(f64::MAX), "any ceiling above the data clamps identically");
+    }
+
     #[test]
     fn an_epoch_without_gravity_reports_no_motion_reading() {
         let feats = half_blind_epochs();

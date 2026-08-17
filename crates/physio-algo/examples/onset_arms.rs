@@ -41,13 +41,18 @@ fn arms() -> Vec<(&'static str, Params)> {
         // The clamp cannot be switched off by a parameter, so this is the nearest reachable probe:
         // widen the jerk gate so `motion_quiescent` almost never fires, which is what letting the
         // cardiac term speak during still wake would look like.
-        ("jerk_gate_mult x0.1 (clamp rarely fires)", Params { jerk_gate_mult: s.jerk_gate_mult * 0.1, ..s }),
-        ("jerk_gate_mult x10 (clamp almost always)", Params { jerk_gate_mult: s.jerk_gate_mult * 10.0, ..s }),
+        // The CLEAN clamp-off arm. `jerk_gate_mult` was the earlier probe and it is confounded: the
+        // same constant also gates `motion_gate_boost`, so moving it changes two mechanisms at once.
+        ("quiescent_hr_z_max -inf (clamp NEVER)", Params { quiescent_hr_z_max: f64::NEG_INFINITY, ..s }),
         ("awake_hr 0.4 -> 1.2", Params { awake_hr: 1.2, ..s }),
         ("awake_deadzone -> 0", Params { awake_deadzone: 0.0, ..s }),
         ("base_rate awake 0.34 -> 0.55", Params { base_rate: [0.55, 0.50, 0.15, 0.22], ..s }),
         ("cycle_rem_onset_minutes x2", Params { cycle_rem_onset_minutes: s.cycle_rem_onset_minutes * 2.0, ..s }),
+        ("quiescent_hr_z_max 3.0", Params { quiescent_hr_z_max: 3.0, ..s }),
         ("quiescent_hr_z_max 2.0", Params { quiescent_hr_z_max: 2.0, ..s }),
+        ("quiescent_hr_z_max 0.75", Params { quiescent_hr_z_max: 0.75, ..s }),
+        ("quiescent_hr_z_max 0.25", Params { quiescent_hr_z_max: 0.25, ..s }),
+        ("quiescent_hr_z_max -0.5", Params { quiescent_hr_z_max: -0.5, ..s }),
         ("quiescent_hr_z_max 1.5", Params { quiescent_hr_z_max: 1.5, ..s }),
         ("quiescent_hr_z_max 1.0", Params { quiescent_hr_z_max: 1.0, ..s }),
         ("quiescent_hr_z_max 0.5", Params { quiescent_hr_z_max: 0.5, ..s }),
