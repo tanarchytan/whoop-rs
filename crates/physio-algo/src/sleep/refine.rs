@@ -470,7 +470,12 @@ mod tests {
         let one_under = SUSTAINED_WALK_TICKS_PER_MINUTE - 1;
         assert!(!has_locomotion(&[1, 2, 3], &ticks(one_under)),
             "a cadence under the sustained threshold is not locomotion however long it runs");
-        assert!(has_locomotion(&[1, 2, 3], &ticks(SUSTAINED_WALK_TICKS_PER_MINUTE)),
+        // EXACTLY the threshold number of minutes, not more: passing three left `>= 2` and `> 2`
+        // indistinguishable, so the consecutive rule was unguarded on the side that matters.
+        assert_eq!(
+            SUSTAINED_WALK_MIN_CONSECUTIVE_MINUTES as usize, 2,
+            "the run below is sized to the constant; resize it if this changes");
+        assert!(has_locomotion(&[1, 2], &ticks(SUSTAINED_WALK_TICKS_PER_MINUTE)),
             "at the threshold, two consecutive minutes are");
         assert!(!has_locomotion(&[1], &ticks(SUSTAINED_WALK_TICKS_PER_MINUTE)),
             "one minute at the threshold is not: the consecutive rule must hold too");

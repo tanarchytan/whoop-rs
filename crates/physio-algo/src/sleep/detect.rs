@@ -1268,6 +1268,26 @@ mod tests {
         assert!(session_epoch_motion(0, 1800, &[]).is_empty());
     }
 
+    /// A still night says nothing about WHERE motion lands, so the epoch index went unguarded: clamping
+    /// it the wrong way dumps every delta of the night into the final epoch and leaves the grid flat with
+    /// one terminal spike. The app persists this grid beside the hypnogram, so it would be wrong nightly.
+    #[test]
+    fn session_epoch_motion_places_movement_in_the_epoch_it_happened() {
+        let (start, dur) = (at_hour(2), 90 * 60);
+        let mut grav = still_gravity(start, dur);
+        grav[1000] = a(start + 1000, 0.5, 0.0, 1.0); // one displacement, out and straight back
+        let m = session_epoch_motion(start, start + dur, &grav);
+        assert_eq!(m.len(), 180);
+
+        let moved = 1000 / 30; // both the move and the return fall in this epoch
+        assert!(m[moved] > 0.9, "epoch {moved} should carry both deltas, got {}", m[moved]);
+        for (i, &v) in m.iter().enumerate() {
+            if i != moved {
+                assert_eq!(v, 0.0, "epoch {i} carries motion that did not happen in it");
+            }
+        }
+    }
+
     #[test]
     fn session_epoch_sleep_state_grids() {
         let start = 1_000_000i64;
