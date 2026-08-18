@@ -471,6 +471,43 @@ mod tests {
         assert_eq!(group, vec![0, 1]); // the two fragments, not the nap
     }
 
+    /// A bridged group is scored as `min(start)..max(end)` over its fragments. The biphasic test above
+    /// cannot see either collapse go wrong: its fragments are similar enough that the group still wins.
+    /// Here one fragment carries nearly all the span, so a wrong collapse hands the night to the nap.
+    #[test]
+    fn a_bridged_group_is_scored_over_its_whole_span() {
+        let base = 1_700_000_000i64 - 1_700_000_000 % SECONDS_PER_DAY;
+        let nap = nb(base + 13 * 3600, base + 17 * 3600);
+
+        // Long first fragment: taking the LATER start would shrink the group to 30 minutes.
+        let head = nb(base, base + 7 * 3600);
+        let tail = nb(base + 7 * 3600 + 30 * 60, base + 8 * 3600);
+        assert_eq!(main_night_group_indices(&[head, tail, nap], 0, None), Some(vec![0, 1]));
+
+        // Long second fragment: taking the EARLIER end would shrink it the same way.
+        let stub = nb(base, base + 30 * 60);
+        let bulk = nb(base + 3600, base + 8 * 3600);
+        assert_eq!(main_night_group_indices(&[stub, bulk, nap], 0, None), Some(vec![0, 1]));
+    }
+
+    /// The scored twin sums asleep and in-bed time but takes the EARLIEST onset, which places the
+    /// midpoint the alignment bonus is read from. A later onset moves it out of the aligned window.
+    #[test]
+    fn a_scored_group_takes_its_earliest_onset() {
+        let base = 1_700_000_000i64 - 1_700_000_000 % SECONDS_PER_DAY;
+        let sb = |onset: i64, asleep_min: f64, in_bed_h: f64| ScoredNightBlock {
+            onset,
+            asleep_s: asleep_min * 60.0,
+            in_bed_s: in_bed_h * 3600.0,
+        };
+        let blocks = [
+            sb(base, 420.0, 7.0),
+            sb(base + 7 * 3600 + 30 * 60, 0.0, 0.5),
+            sb(base + 13 * 3600, 450.0, 8.0),
+        ];
+        assert_eq!(main_night_group_indices_scored(&blocks, 0, None), Some(vec![0, 1]));
+    }
+
     #[test]
     fn circular_mean_of_symmetric_times_and_degenerate() {
         // 03:00 and 04:00 -> mean 03:30
