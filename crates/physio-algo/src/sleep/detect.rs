@@ -1258,6 +1258,52 @@ mod tests {
         assert!(!confirm_sleep_with_hr(p, &hot, Some(48.0), &still_gravity(start, dur), None)); // floor holds
     }
 
+    fn per(is_sleep: bool, start: i64, end: i64) -> Period {
+        Period { is_sleep, start, end }
+    }
+
+    /// Each of the four ways `merge_periods` disposes of a run shorter than `MERGE_MIN`.
+    #[test]
+    fn merge_periods_absorbs_short_runs_into_their_neighbours() {
+        let (long, short) = (40 * 60, 5 * 60);
+
+        let keep = vec![per(true, 0, long), per(false, long, 2 * long)];
+        assert_eq!(merge_periods(&keep), keep, "runs over the threshold pass through");
+
+        assert_eq!(
+            merge_periods(&[per(true, 0, long), per(false, long, long + short),
+                            per(true, long + short, 2 * long + short)]),
+            vec![per(true, 0, 2 * long + short)],
+            "a short run between two runs of the same class collapses all three");
+
+        assert_eq!(
+            merge_periods(&[per(true, 0, long), per(false, long, long + short),
+                            per(false, long + short, 2 * long + short)]),
+            vec![per(true, 0, long), per(false, long, 2 * long + short)],
+            "between different classes the next run absorbs it");
+
+        assert_eq!(
+            merge_periods(&[per(true, 0, long), per(false, long, long + short)]),
+            vec![per(true, 0, long + short)],
+            "a short tail is absorbed backwards");
+
+        assert_eq!(
+            merge_periods(&[per(false, 0, short), per(true, short, short + long)]),
+            vec![per(true, 0, short + long)],
+            "a short head has no previous run, so the next one absorbs it");
+    }
+
+    /// Two short runs in a row leave the accumulator empty at `i > 0`, the state both index guards
+    /// exist to survive. Nothing reached it before, so either guard could be dropped without failing.
+    #[test]
+    fn merge_periods_survives_consecutive_short_runs_before_anything_is_kept() {
+        let (long, short) = (40 * 60, 5 * 60);
+        assert_eq!(
+            merge_periods(&[per(false, 0, short), per(true, short, 2 * short),
+                            per(false, 2 * short, 2 * short + long)]),
+            vec![per(false, 0, 2 * short + long)]);
+    }
+
     #[test]
     fn session_epoch_motion_grids() {
         let (start, dur) = (at_hour(2), 90 * 60);
