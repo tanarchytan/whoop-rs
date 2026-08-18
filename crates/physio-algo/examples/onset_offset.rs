@@ -28,7 +28,7 @@ const EPOCH: i64 = 30;
 /// A boundary must open a run this long to count, so one stray epoch cannot define the night.
 const SUSTAINED_EPOCHS: usize = 10;
 /// The band the wearer-facing claim is stated in.
-const TOLERANCES_MIN: [i64; 4] = [5, 10, 15, 30];
+const TOLERANCES_MIN: [i64; 5] = [5, 10, 15, 30, 60];
 const COHORTS: [&str; 3] = ["dreamt", "aauwss", "sleep-accel"];
 /// PSG cohorts are lab recordings with no local clock, so no daytime guard can apply.
 const TZ_OFFSET_S: i64 = 0;
@@ -98,7 +98,7 @@ fn report(name: &str, n_total: usize, on: &[f64], off: &[f64]) {
         // Coverage-weighted: a night the arm skipped counts as a miss, or a selective arm scores high.
         let within: Vec<String> = TOLERANCES_MIN
             .iter()
-            .map(|t| format!("+-{t}m {:.0}%", pct(v, *t) * v.len() as f64 / n_total as f64))
+            .map(|t| format!("{t}m {:.0}%", pct(v, *t) * v.len() as f64 / n_total as f64))
             .collect();
         println!("    {label:<7} bias {:+6.1}m  |err| median {:5.1}m  of ALL nights: {}",
             mean(v), s[s.len() / 2], within.join("  "));

@@ -211,7 +211,7 @@ fn main() {
         println!("=== {cohort} ({role}), {} labelled subjects", nights.len());
         println!(
             "{:<28} {:>12} {:>12} {:>12} {:>12} {:>7}",
-            "arm", "kappa4", "wake recall", "wake spec", "bout recall", "bouts"
+            "arm", "kappa4", "wake recall", "wake spec", "bout COVERAGE", "bouts"
         );
 
         // Per-subject scores for every arm, kept so a paired delta can be taken below.
@@ -244,7 +244,7 @@ fn main() {
             let k: Vec<f64> = subs.iter().map(|s| s.kappa).collect();
             let wr = some(&subs.iter().map(|s| s.wake_recall).collect::<Vec<_>>());
             let ws = some(&subs.iter().map(|s| s.wake_spec).collect::<Vec<_>>());
-            let br = some(&subs.iter().map(|s| s.bout.recall()).collect::<Vec<_>>());
+            let br = some(&subs.iter().map(|s| s.bout.coverage()).collect::<Vec<_>>());
             let bouts: usize = subs.iter().map(|s| s.bout.truth_bouts).sum();
             println!(
                 "{:<28} {} {} {} {} {:>7}",
@@ -279,11 +279,11 @@ fn main() {
         let bd: Vec<f64> = per_arm[SHIPPED_ARM]
             .iter()
             .zip(&per_arm[CAND_ARM])
-            .filter_map(|(a, b)| Some(b.bout.recall()? - a.bout.recall()?))
+            .filter_map(|(a, b)| Some(b.bout.coverage()? - a.bout.coverage()?))
             .collect();
         println!(
             "{:<44} {:>+9.4} {:>9.4} {:>13.4}",
-            format!("  {} (bout recall)", arms[CAND_ARM].0),
+            format!("  {} (bout coverage)", arms[CAND_ARM].0),
             mean(&bd),
             sd(&bd),
             1.96 * sd(&bd) / (bd.len() as f64).sqrt()
@@ -301,7 +301,7 @@ fn main() {
             let db: Vec<f64> = per_arm[SHIPPED_ARM]
                 .iter()
                 .zip(&per_arm[r])
-                .filter_map(|(a, b)| Some(b.bout.recall()? - a.bout.recall()?))
+                .filter_map(|(a, b)| Some(b.bout.coverage()? - a.bout.coverage()?))
                 .collect();
             let (rk, rb) =
                 (1.96 * sd(&dk) / (n as f64).sqrt(), 1.96 * sd(&db) / (db.len().max(1) as f64).sqrt());

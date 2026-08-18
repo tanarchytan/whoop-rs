@@ -37,7 +37,7 @@ fn rows(p: &Path) -> Vec<Vec<f64>> {
 fn main() {
     let cand = Params { clamp_only_without_rr: true, ..Params::SHIPPED };
     println!("{:<18} {:<26} {:>9} {:>10} {:>11} {:>11}",
-        "night", "recipe", "wake rec", "wake spec", "bout rec", "we call");
+        "night", "recipe", "wake rec", "wake spec", "bout COV", "we call");
 
     for name in ["david-20260816", "reader-20260815"] {
         let d = Path::new(ROOT).join(name);
@@ -126,7 +126,7 @@ fn main() {
                 format!("{name} ({labelled})"),
                 recall(&cm, WAKE).map(|v| format!("{v:.3}")).unwrap_or("-".into()),
                 specificity(&cm, WAKE).map(|v| format!("{v:.3}")).unwrap_or("-".into()),
-                b.recall().map(|v| format!("{v:.3}")).unwrap_or("-".into()),
+                b.coverage().map(|v| format!("{v:.3}")).unwrap_or("-".into()),
                 called);
         }
     }

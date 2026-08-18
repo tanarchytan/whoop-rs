@@ -91,20 +91,37 @@ pub fn bouts(seq: &[usize], class: usize, min_len: usize) -> Vec<(usize, usize)>
 
 /// Bout-level agreement for one class, with the arm that stops it being gamed. Predicting the class
 /// everywhere detects every bout, so `spurious` and [`BoutScore::precision`] are reported beside it.
+///
+/// [`BoutScore::coverage`] is the number to read first. `detected` is BINARY at `min_overlap`, which
+/// makes a long bout all-or-nothing: a 409-minute wake bout found at 22% scores exactly the same as
+/// one found at 0%, and a change that lifted it to 27% was reported as "unchanged" for a whole
+/// session. Coverage is continuous and sees that.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoutScore {
     pub truth_bouts: usize,
-    /// Truth bouts covered by at least `min_overlap` of their epochs.
+    /// Truth bouts covered by at least `min_overlap` of their epochs. Binary - see the type note.
     pub detected: usize,
     pub pred_bouts: usize,
-    /// Predicted bouts overlapping no truth bout of the class at all.
+    /// Predicted bouts overlapping no truth bout of the class at all. A weak precision arm on
+    /// purpose: one overlapping epoch clears it, so it catches only wholly invented bouts.
     pub spurious: usize,
+    /// Epochs of truth bouts we called the class, and the total in them. The continuous read.
+    pub covered_epochs: usize,
+    pub truth_bout_epochs: usize,
 }
 
 impl BoutScore {
-    /// Detected over truth bouts. `None` when the class never occurs in truth.
+    /// Detected over truth bouts. `None` when the class never occurs in truth. BINARY at the overlap
+    /// floor, so prefer [`BoutScore::coverage`] when comparing two candidates.
     pub fn recall(&self) -> Option<f64> {
         (self.truth_bouts > 0).then(|| self.detected as f64 / self.truth_bouts as f64)
+    }
+
+    /// Share of all truth-bout epochs we called the class. Continuous, so partial progress on a long
+    /// bout is visible where [`BoutScore::recall`] rounds it to zero.
+    pub fn coverage(&self) -> Option<f64> {
+        (self.truth_bout_epochs > 0)
+            .then(|| self.covered_epochs as f64 / self.truth_bout_epochs as f64)
     }
 
     /// Non-spurious over predicted bouts. `None` when the class is never predicted as a bout.
@@ -121,18 +138,27 @@ pub fn bout_score(
     let n = pred.len().min(truth.len());
     let (pred, truth) = (&pred[..n], &truth[..n]);
     let (tb, pb) = (bouts(truth, class, min_len), bouts(pred, class, min_len));
+    let hits: Vec<usize> =
+        tb.iter().map(|(s, l)| pred[*s..*s + *l].iter().filter(|p| **p == class).count()).collect();
     let detected = tb
         .iter()
-        .filter(|(s, l)| {
-            let hit = pred[*s..*s + *l].iter().filter(|p| **p == class).count();
-            hit as f64 >= min_overlap * *l as f64
-        })
+        .zip(&hits)
+        .filter(|((_, l), hit)| **hit as f64 >= min_overlap * *l as f64)
         .count();
+    let covered_epochs: usize = hits.iter().sum();
+    let truth_bout_epochs: usize = tb.iter().map(|(_, l)| *l).sum();
     let spurious = pb
         .iter()
         .filter(|(s, l)| !truth[*s..*s + *l].contains(&class))
         .count();
-    BoutScore { truth_bouts: tb.len(), detected, pred_bouts: pb.len(), spurious }
+    BoutScore {
+        truth_bouts: tb.len(),
+        detected,
+        pred_bouts: pb.len(),
+        spurious,
+        covered_epochs,
+        truth_bout_epochs,
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +192,29 @@ mod tests {
         assert_eq!(recall(&cm, WAKE), Some(1.0));
         assert_eq!(specificity(&cm, WAKE), Some(0.0));
         assert_eq!(precision(&cm, WAKE), Some(2.0 / 6.0));
+    }
+
+    /// The `< 4` guard is load-bearing and was unguarded: `sleep_eval` uses index 4 as its UNLABELLED
+    /// sentinel and feeds it straight in, so dropping the check indexes a [[i64;4];4] out of bounds and
+    /// panics on real input. Found by a mutation sweep, not by anything failing.
+    #[test]
+    fn an_out_of_range_index_is_ignored_rather_than_indexed() {
+        const UNLABELLED: usize = 4;
+        let cm = confusion4(&[UNLABELLED, 1, UNLABELLED], &[0, 1, UNLABELLED]);
+        assert_eq!(cm.iter().flatten().sum::<i64>(), 1, "only the one in-range pair is scored");
+        assert_eq!(cm[1][1], 1);
+    }
+
+    /// Specificity must exclude the class's OWN row: everything in it is a positive, so counting it as
+    /// a negative inflates the score. A mutation removing the skip went unnoticed because the existing
+    /// case had an all-diagonal class row, where including it changes nothing.
+    #[test]
+    fn specificity_excludes_the_class_row_even_when_that_row_is_mixed() {
+        // Three truth-wake epochs, one called wake and two called light; plus one true light.
+        let cm = confusion4(&[WAKE, 1, 1, 1], &[WAKE, WAKE, WAKE, 1]);
+        assert_eq!((cm[0][0], cm[0][1], cm[1][1]), (1, 2, 1), "the class row must be MIXED here");
+        // Only the single true-light epoch is a negative, and it was not called wake.
+        assert_eq!(specificity(&cm, WAKE), Some(1.0));
     }
 
     #[test]
@@ -207,6 +256,37 @@ mod tests {
         assert_eq!(s.recall(), None, "no true wake bout to find");
         assert_eq!((s.pred_bouts, s.spurious), (1, 1));
         assert_eq!(s.precision(), Some(0.0));
+    }
+
+    /// The flaw `coverage` exists for, as a test. Two predictions of a long bout, 20% and 45% found:
+    /// `recall` calls both a total miss and cannot tell them apart, while coverage sees the gap. A
+    /// real 409-minute reading bout sat at 22% and a change lifting it to 27% was reported as
+    /// "unchanged" for a whole session because of exactly this.
+    #[test]
+    fn coverage_separates_partial_finds_that_binary_recall_rounds_to_zero() {
+        let truth = vec![WAKE; 100];
+        let part = |found: usize| {
+            let mut p = vec![1usize; 100];
+            for (j, slot) in p.iter_mut().enumerate() {
+                if j % 2 == 0 && j / 2 < found {
+                    *slot = WAKE;
+                }
+            }
+            bout_score(&p, &truth, WAKE, 10, 0.5)
+        };
+        let (weak, better) = (part(20), part(45));
+        assert_eq!(weak.recall(), Some(0.0), "20% of a long bout is a miss to binary recall");
+        assert_eq!(better.recall(), Some(0.0), "and so is 45% - recall cannot separate them");
+        assert!((weak.coverage().unwrap() - 0.20).abs() < 1e-9, "{:?}", weak.coverage());
+        assert!((better.coverage().unwrap() - 0.45).abs() < 1e-9, "{:?}", better.coverage());
+        assert!(better.coverage() > weak.coverage(), "coverage MUST see what recall cannot");
+    }
+
+    #[test]
+    fn coverage_is_none_where_no_bout_exists_rather_than_zero() {
+        let s = bout_score(&[WAKE; 8], &[1usize; 8], WAKE, 10, 0.5);
+        assert_eq!(s.truth_bouts, 0);
+        assert_eq!(s.coverage(), None, "no truth bout is not zero coverage");
     }
 
     #[test]
