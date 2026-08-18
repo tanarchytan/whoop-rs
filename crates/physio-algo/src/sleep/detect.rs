@@ -1258,6 +1258,35 @@ mod tests {
         assert!(!confirm_sleep_with_hr(p, &hot, Some(48.0), &still_gravity(start, dur), None)); // floor holds
     }
 
+    /// The sparse clause forgives a gravity gap inside a sleep run only when all of its conditions
+    /// hold. Every row below drops exactly one and must split the run instead.
+    #[test]
+    fn the_sparse_gap_is_forgiven_only_when_every_condition_holds() {
+        let gap = (MAX_GAP_MIN + 10) * 60;
+        let times: Vec<i64> = (0..10).map(|i| i * 60).chain((0..10).map(|i| 9 * 60 + gap + i * 60)).collect();
+        let grav: Vec<AccelSample> = times.iter().map(|&t| a(t, 0.0, 0.0, 1.0)).collect();
+        let asleep = vec![true; times.len()];
+        let baseline = Some(60.0);
+        let calm: Vec<HrSample> = (0..40).map(|i| h(9 * 60 + i * 60, 58)).collect();
+
+        let runs = |flags: &[bool], sparse: bool, hr: &[HrSample], base: Option<f64>| {
+            build_runs(&grav, flags, sparse, hr, base).len()
+        };
+
+        assert_eq!(runs(&asleep, true, &calm, baseline), 1, "every condition holds: the gap is bridged");
+        assert_eq!(runs(&asleep, false, &calm, baseline), 2, "not a sparse stream");
+        assert_eq!(runs(&vec![false; times.len()], true, &calm, baseline), 2, "a wake run is never bridged");
+        assert_eq!(runs(&asleep, true, &[], baseline), 2, "no heart rate across the gap");
+        assert_eq!(runs(&asleep, true, &calm, None), 2, "no resting baseline to judge against");
+
+        let hot: Vec<HrSample> = (0..40).map(|i| h(9 * 60 + i * 60, 90)).collect();
+        assert_eq!(runs(&asleep, true, &hot, baseline), 2, "heart rate above the sleep band across the gap");
+
+        let mut woke: Vec<bool> = asleep.clone();
+        woke[10..].fill(false);
+        assert_eq!(runs(&woke, true, &calm, baseline), 2, "the class changed across the gap");
+    }
+
     fn per(is_sleep: bool, start: i64, end: i64) -> Period {
         Period { is_sleep, start, end }
     }
