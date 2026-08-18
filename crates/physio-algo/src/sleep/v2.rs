@@ -729,6 +729,12 @@ mod tests {
             "rebased onto the onset epoch's own fraction"
         );
         assert_eq!(0.0, cycle_clock(0.0, &feats, Anchor::Onset(1), &from_onset), "clamped below onset");
+
+        // An onset at the very end of the window leaves nothing to rebase onto. The guard returns the
+        // clock untouched; without it the divisor is zero and the epoch's prior collapses to 0.0.
+        let mut degenerate = half_blind_epochs();
+        degenerate[0].clock = 1.0;
+        assert_eq!(0.75, cycle_clock(0.75, &degenerate, Anchor::Onset(0), &from_onset));
     }
 
     // ── the decoder, isolated from the emissions feeding it ───────────────────────────────────────
