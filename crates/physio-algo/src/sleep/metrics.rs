@@ -165,6 +165,34 @@ pub fn bout_score(
 mod tests {
     use super::*;
 
+    /// The overlap floor is inclusive, and it is the boundary `recall` turns on. Nothing sat exactly
+    /// on it before, so the comparison could be tightened without a failure.
+    #[test]
+    fn a_truth_bout_at_exactly_the_overlap_floor_counts_as_detected() {
+        let truth = vec![1usize; 10];
+        let at_floor: Vec<usize> = (0..10).map(|i| usize::from(i < 5)).collect();
+        let below: Vec<usize> = (0..10).map(|i| usize::from(i < 4)).collect();
+
+        assert_eq!(bout_score(&at_floor, &truth, 1, 2, 0.5).detected, 1, "5 of 10 is the floor");
+        assert_eq!(bout_score(&below, &truth, 1, 2, 0.5).detected, 0, "4 of 10 is below it");
+    }
+
+    /// Ragged input is expected: a hypnogram and its reference can differ by an epoch. Both series are
+    /// truncated to the shorter, and taking the longer would index past the end of one of them.
+    #[test]
+    fn bout_score_truncates_to_the_shorter_series() {
+        let long = vec![1usize; 10];
+        let short = vec![1usize; 4];
+
+        let pred_short = bout_score(&short, &long, 1, 2, 0.5);
+        assert_eq!((pred_short.truth_bouts, pred_short.detected), (1, 1));
+        assert_eq!(pred_short.truth_bout_epochs, 4, "truth is cut to the prediction's length");
+
+        let truth_short = bout_score(&long, &short, 1, 2, 0.5);
+        assert_eq!((truth_short.truth_bouts, truth_short.detected), (1, 1));
+        assert_eq!(truth_short.truth_bout_epochs, 4);
+    }
+
     #[test]
     fn kappa_reproduces_a_hand_computed_matrix() {
         let cm = [[8, 2, 0, 0], [2, 8, 0, 0], [0, 0, 8, 2], [0, 0, 2, 8]];
