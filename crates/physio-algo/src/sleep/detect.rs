@@ -231,7 +231,7 @@ pub(super) fn merge_periods(periods: &[Period]) -> Vec<Period> {
     let mut i = 0usize;
     while i < pending.len() {
         let current = pending[i];
-        if (current.end - current.start) >= threshold {
+        if (current.end - current.start) > threshold {
             merged.push(current);
             i += 1;
             continue;
@@ -532,6 +532,73 @@ pub struct DetectedSpan {
     pub resting_hr: Option<i32>,
 }
 
+/// The band's own activity ladder, one code per second. We read `ASLEEP` and nothing else, which
+/// throws away the two codes that mark the BOUNDARIES of a night.
+///
+/// Measured over two wearers' whole stores, 2026-08-18:
+///
+/// | code | HR | walking | when |
+/// |---|---|---|---|
+/// | `AWAKE` 0 | highest | 11-22% | 80% of daylight, peaks 13:00 |
+/// | `SETTLED` 1 | above sleep | 0.4-0.6% | peaks 23:00, ends AT sleep onset |
+/// | `ASLEEP` 2 | lowest | 0.2% | the sleep PERIOD - half to three quarters of it is truly awake |
+/// | `EMERGING` 3 | above sleep | 4-10% | never before sleep; 60-80% after the last asleep second |
+///
+/// `ASLEEP` is a period marker, NOT evidence of sleep: on the two nights with wearer truth it is 50%
+/// and 75% truly awake. These codes may feed a window; they may never score one.
+pub const BAND_STATE_AWAKE: i32 = 0;
+pub const BAND_STATE_SETTLED: i32 = 1;
+pub const BAND_STATE_EMERGING: i32 = 3;
+
+/// Shortest run of a boundary code that counts, so one stray second cannot move a window.
+const BAND_BOUNDARY_MIN_S: i64 = 5 * 60;
+/// How far either side of a detected span to look for one.
+const BAND_BOUNDARY_LOOKAROUND_S: i64 = 4 * 3600;
+
+/// The in-bed window around a detected sleep span, from the band's own boundary codes.
+///
+/// Opens at the start of the `SETTLED` run that runs up to `start`, and closes at the end of the
+/// `EMERGING` run that follows `end`. Returns the span unchanged where the band does not say - half
+/// our stores bank no sleep state at all, so absence is ordinary and must cost nothing.
+///
+/// This is the in-bed window, not the sleep window: `start`/`end` stay where staging put them.
+pub fn band_in_bed_window(start: i64, end: i64, band: &[(i64, i32)]) -> (i64, i64) {
+    (
+        run_back(start, band, BAND_STATE_SETTLED).unwrap_or(start),
+        run_forward(end, band, BAND_STATE_EMERGING).unwrap_or(end),
+    )
+}
+
+/// Earliest second of the contiguous `code` run ending at or just before `at`. `None` when there is
+/// no such run, or it is shorter than [`BAND_BOUNDARY_MIN_S`].
+fn run_back(at: i64, band: &[(i64, i32)], code: i32) -> Option<i64> {
+    let lo = at - BAND_BOUNDARY_LOOKAROUND_S;
+    let mut earliest = None;
+    // Walk backwards from `at`, allowing the run to be interrupted by nothing at all.
+    for (ts, st) in band.iter().rev().filter(|(t, _)| *t < at && *t >= lo) {
+        if *st == code {
+            earliest = Some(*ts);
+        } else {
+            break;
+        }
+    }
+    earliest.filter(|e| at - e >= BAND_BOUNDARY_MIN_S)
+}
+
+/// Last second of the contiguous `code` run starting at or just after `at`.
+fn run_forward(at: i64, band: &[(i64, i32)], code: i32) -> Option<i64> {
+    let hi = at + BAND_BOUNDARY_LOOKAROUND_S;
+    let mut latest = None;
+    for (ts, st) in band.iter().filter(|(t, _)| *t > at && *t <= hi) {
+        if *st == code {
+            latest = Some(*ts);
+        } else {
+            break;
+        }
+    }
+    latest.filter(|l| l - at >= BAND_BOUNDARY_MIN_S)
+}
+
 /// [`detect_sessions_with`] under [`DetectParams::SHIPPED`] — the path the app runs.
 pub fn detect_sessions(
     hr: &[HrSample],
@@ -704,6 +771,40 @@ mod tests {
         let over = GRAVITY_STILL_THRESHOLD_G * 1.5;
         assert!(run(under) > 0, "movement under the threshold must read as still");
         assert_eq!(run(over), 0, "movement over it must not");
+    }
+
+    /// Band codes as a per-second stream over `[a, b)`.
+    fn band(runs: &[(i64, i64, i32)]) -> Vec<(i64, i32)> {
+        let mut v = Vec::new();
+        for (a, b, code) in runs {
+            for t in *a..*b {
+                v.push((t, *code));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn the_in_bed_window_opens_on_settled_and_closes_on_emerging() {
+        let b = band(&[(0, 600, BAND_STATE_SETTLED), (600, 3600, 2), (3600, 4200, BAND_STATE_EMERGING)]);
+        assert_eq!(band_in_bed_window(600, 3600, &b), (0, 4199));
+    }
+
+    /// Absence must cost nothing: half our stores bank no sleep state at all, and a short run is not
+    /// a boundary. Both return the span untouched rather than guessing.
+    #[test]
+    fn the_in_bed_window_is_unchanged_without_a_qualifying_run() {
+        assert_eq!(band_in_bed_window(600, 3600, &[]), (600, 3600), "no band data");
+        let short = band(&[(540, 600, BAND_STATE_SETTLED), (600, 3600, 2)]);
+        assert_eq!(band_in_bed_window(600, 3600, &short), (600, 3600), "a 1-min run is not bed entry");
+    }
+
+    /// The run must REACH the boundary. A settled stretch with waking time between it and sleep is
+    /// somebody sitting down earlier in the evening, not getting into bed.
+    #[test]
+    fn a_settled_run_interrupted_by_waking_does_not_open_the_window() {
+        let b = band(&[(0, 900, BAND_STATE_SETTLED), (900, 1200, BAND_STATE_AWAKE), (1200, 3600, 2)]);
+        assert_eq!(band_in_bed_window(1200, 3600, &b).0, 1200, "the awake stretch breaks the run");
     }
 
     #[test]
