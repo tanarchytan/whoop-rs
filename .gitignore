@@ -27,3 +27,6 @@ __pycache__/
 # DREAMT-derived fixture may be committed at any size — it is regenerated locally from the download.
 /crates/*/tests/fixtures/restricted/
 /crates/*/tests/fixtures/dreamt*/
+
+# Left by dev-notes/mutate_*.py while they rewrite source in place. Its presence means DO NOT COMMIT.
+.mutation-in-progress
