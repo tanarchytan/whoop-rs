@@ -45,7 +45,8 @@ use common::{
 };
 use physio_algo::sleep::features::{extract, Cardiac, Features};
 use physio_algo::sleep::metrics::{confusion4, kappa4, recall, specificity, WAKE};
-use physio_algo::sleep::{decode_v2, params::Params, stage_v2, SleepInput, STAGE_ORDER};
+use physio_algo::sleep::{decode_v2, flatten_rr, params::Params, resp_regularity, stage_v2,
+    SleepInput, STAGE_ORDER};
 use std::collections::BTreeMap;
 
 const EPOCH: i64 = 30;
@@ -179,18 +180,39 @@ fn load(sets: &[&str]) -> Set {
                 starts.iter().map(|e| std_of_seconds(&sec, e - 330, e + EPOCH + 360)).collect();
             let flat_pct = rank_pct(&flat);
 
+            // RSA regularity over the same beat window the shipped recipe uses, through the SAME
+            // function. It is the only quantity beats reach, and without it the fit is denied a
+            // channel v2 weights into DEEP and out of REM.
+            let rr = read_rr(dir);
+            let mut beats_by: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
+            for (ts, ms) in flatten_rr(&rr) {
+                beats_by.entry(ts).or_default().push(ms);
+            }
+            let resp: Vec<Option<f64>> = starts
+                .iter()
+                .map(|e| {
+                    let mut beats: Vec<(f64, f64)> = beats_by
+                        .range(e - 90..e + 120)
+                        .flat_map(|(t, vs)| vs.iter().map(|v| (*t as f64, v.clamp(300.0, 2000.0))))
+                        .collect();
+                    beats.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.partial_cmp(&b.1).unwrap()));
+                    resp_regularity(&beats)
+                })
+                .collect();
+            let resp_z = zscore(&resp);
+
             let card: Vec<Cardiac> = (0..n)
                 .map(|k| Cardiac {
                     hr_z: hr_z[k],
                     hr_var_z: hr_var_z[k],
                     hr_flat_pct: flat_pct[k],
+                    resp_z: resp_z[k],
                 })
                 .collect();
             let f: Vec<Features> = extract(&grav, w0, w1, &card);
 
             // The shipped recipe on the SAME night, so its score comes out of the same function.
-            let input =
-                SleepInput { start: w0, end: w1, hr, rr: read_rr(dir), accel: grav.clone() };
+            let input = SleepInput { start: w0, end: w1, hr, rr, accel: grav.clone() };
             let base = labels_at(&stage_v2(&input), w0, n, EPOCH);
 
             // `n` comes from the meta window; `extract` derives its own count from `[w0, w1)`. If a
@@ -359,7 +381,7 @@ fn subset(s: &Set, keep: impl Fn(usize) -> bool) -> Set {
 /// Choose the class-weight exponent INSIDE the fit cohort: fit on its even-numbered nights, score on
 /// its odd ones. Choosing on held-out spends researcher freedom against the only clean estimate
 /// there is, and here the two disagree - the fit cohort prefers a different exponent.
-fn select_power(train: &Set) -> f64 {
+fn select_power(train: &Set, decoded: bool) -> f64 {
     if let Some(p) = power_override() {
         println!("class weight power {p:.2} (fixed by environment, not selected)");
         return p;
@@ -372,13 +394,21 @@ fn select_power(train: &Set) -> f64 {
     let (m, sd) = standardiser(&ix);
     let dx: Vec<Vec<f64>> = ix.iter().map(|r| design(r, &m, &sd, &[])).collect();
 
-    println!("SELECT class weight power on the fit cohort alone: {} nights fit, {} scored",
+    println!("SELECT class weight power for {} on the fit cohort alone: {} nights fit, {} scored",
+             if decoded { "VITERBI-decoded" } else { "per-epoch" },
              inner_fit.night.iter().max().map_or(0, |v| v + 1),
              inner_val.night.iter().max().map_or(0, |v| v + 1));
     let mut best = (POWERS[0], f64::MIN);
     for p in POWERS {
         let w = fit(&dx, &iy, p);
-        let k = score_decoded(&w, &inner_val, &m, &sd, &[]).kappa;
+        // Selected against the statistic it will be REPORTED against. Optimising one decode and
+        // reporting the other tunes a hyperparameter for a different objective, and the winner
+        // genuinely differs between the two.
+        let k = if decoded {
+            score_decoded(&w, &inner_val, &m, &sd, &[]).kappa
+        } else {
+            score(&w, &inner_val, &m, &sd, &[]).kappa
+        };
         println!("  power {p:.2}  inner-val kappa {k:.4}");
         if k > best.1 {
             best = (p, k);
@@ -522,9 +552,22 @@ struct Scored {
     per_night: Vec<f64>,
 }
 
-/// Mean paired difference and the delta this cohort can resolve, `1.96 * sd / sqrt(n)`. Anything
-/// inside the bar is noise, whatever the two medians say.
+/// Two-sided 95% critical value at `n-1` degrees of freedom. The normal 1.96 is ~11% too narrow at
+/// n=13 and inflates apparent significance exactly where the cohorts are smallest.
+fn t95(n: usize) -> f64 {
+    const T: [(usize, f64); 9] =
+        [(2, 12.706), (5, 2.776), (10, 2.262), (13, 2.179), (20, 2.093), (31, 2.042), (40, 2.021),
+         (60, 2.000), (120, 1.980)];
+    let df = n.saturating_sub(1).max(1);
+    T.iter().find(|(k, _)| df <= *k).map_or(1.96, |(_, v)| *v)
+}
+
+/// Mean paired difference and the delta this cohort can resolve, `t * sd / sqrt(n)`. Anything inside
+/// the bar is noise, whatever the two medians say.
 fn paired(a: &Scored, b: &Scored) -> (f64, f64, usize) {
+    // Positional pairing is only meaningful if both arms scored the same nights in the same order.
+    assert_eq!(a.per_night.len(), b.per_night.len(),
+               "paired arms scored different night counts - the zip would misalign every pair");
     let d: Vec<f64> =
         a.per_night.iter().zip(&b.per_night).map(|(x, y)| y - x).collect();
     let n = d.len();
@@ -533,7 +576,18 @@ fn paired(a: &Scored, b: &Scored) -> (f64, f64, usize) {
     }
     let m = d.iter().sum::<f64>() / n as f64;
     let sd = (d.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
-    (m, 1.96 * sd / (n as f64).sqrt(), n)
+    (m, t95(n) * sd / (n as f64).sqrt(), n)
+}
+
+/// One paired row: mean difference, the bar, and whether the difference clears it.
+fn paired_row(name: &str, a: &Scored, b: &Scored) {
+    let (mean, bar, n) = paired(a, b);
+    let verdict = if mean.abs() > bar {
+        format!("RESOLVED ({:.2}x the bar)", mean.abs() / bar)
+    } else {
+        "inside the bar - noise".to_string()
+    };
+    println!("  {name:<18} {mean:>+10.4} {bar:>10.4} {n:>6}   {verdict}");
 }
 
 fn header() {
@@ -585,7 +639,8 @@ fn main() {
     let fit_y: Vec<usize> = fit_rows.iter().map(|i| train.y[*i]).collect();
     let (m, sd) = standardiser(&fit_x);
     println!("{} labelled of {} rows\n", fit_x.len(), train.x.len());
-    let power = select_power(&train);
+    // One exponent per decode, each chosen against the statistic it is reported against.
+    let powers = [select_power(&train, false), select_power(&train, true)];
 
     // The SHIPPED recipe, on these rows, through this file's own statistic. Every published v2 kappa
     // elsewhere in the project is a different formula - pooled across all epochs, or a mean rather
@@ -614,12 +669,16 @@ fn main() {
 
     // Kept per arm and per decode so the interaction is judged by a PAIRED per-night difference.
     let mut by_arm: Vec<[Vec<Scored>; 2]> = Vec::new();
+    let names: Vec<String> = std::iter::once("dreamt (FIT)".to_string())
+        .chain(held.iter().map(|(n, _)| format!("{n} (HELD)")))
+        .collect();
+
     for (label, drop) in arms {
         let dx: Vec<Vec<f64>> = fit_x.iter().map(|r| design(r, &m, &sd, drop)).collect();
-        let w = fit(&dx, &fit_y, power);
         let mut both: [Vec<Scored>; 2] = [Vec::new(), Vec::new()];
         for (d, (how, decoded)) in [("per-epoch", false), ("VITERBI-decoded", true)].iter().enumerate() {
-            println!("=== {label}, {how}");
+            let w = fit(&dx, &fit_y, powers[d]);
+            println!("=== {label}, {how} (power {:.2})", powers[d]);
             header();
             let run = |s: &Set| {
                 if *decoded {
@@ -632,9 +691,13 @@ fn main() {
             for (_, h) in &held {
                 both[d].push(run(h));
             }
-            show("dreamt (FIT)", &both[d][0]);
-            for ((name, _), sc) in held.iter().zip(&both[d][1..]) {
-                show(&format!("{name} (HELD)"), sc);
+            for (name, sc) in names.iter().zip(&both[d]) {
+                show(name, sc);
+            }
+            // The headline is a difference too, and a difference of medians is not a result.
+            println!("  vs BASELINE, paired per night:");
+            for (i, name) in names.iter().enumerate() {
+                paired_row(name, &base[i], &both[d][i]);
             }
             println!();
         }
@@ -645,15 +708,10 @@ fn main() {
     // are separate order statistics and their difference moves when ONE night changes rank.
     println!("=== THE INTERACTION, as a paired per-night difference (MAIN+INT minus MAIN)");
     println!("  {:<18} {:>10} {:>10} {:>6}   verdict", "cohort", "mean d", "bar +/-", "n");
-    let names: Vec<String> = std::iter::once("dreamt (FIT)".to_string())
-        .chain(held.iter().map(|(n, _)| format!("{n} (HELD)")))
-        .collect();
     for (d, how) in ["per-epoch", "VITERBI-decoded"].iter().enumerate() {
         println!("  {how}");
         for (i, name) in names.iter().enumerate() {
-            let (mean, bar, n) = paired(&by_arm[0][d][i], &by_arm[1][d][i]);
-            let verdict = if mean.abs() > bar { "RESOLVED" } else { "inside the bar - noise" };
-            println!("  {name:<18} {mean:>+10.4} {bar:>10.4} {n:>6}   {verdict}");
+            paired_row(name, &by_arm[0][d][i], &by_arm[1][d][i]);
         }
     }
     println!("\nThe paired row is the interaction's contribution. A difference of medians is not:");

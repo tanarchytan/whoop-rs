@@ -39,6 +39,9 @@ pub struct Cardiac {
     pub hr_var_z: Option<f64>,
     /// Rank in 0..1 of this epoch's ~12-minute HR standard deviation among the night's own epochs.
     pub hr_flat_pct: Option<f64>,
+    /// Per-night z-score of RSA respiration regularity. The ONLY R-R-fed quantity: `hr_var_z` is a
+    /// per-second heart-rate spread and is present with or without beats, so it cannot stand in.
+    pub resp_z: Option<f64>,
 }
 
 /// One epoch, fully described. `None` is "not measurable here", which a fitted model must be handed
@@ -66,6 +69,9 @@ pub struct Features {
     pub hr_var_z: Option<f64>,
     /// Within-night rank of the long-window HR standard deviation. The deep-separating quantity.
     pub hr_flat_pct: Option<f64>,
+    /// RSA respiration regularity, z-scored within the night. v2 weights this into DEEP and out of
+    /// REM, and it is the only place beats reach either recipe.
+    pub resp_z: Option<f64>,
     /// Elapsed fraction of the span, 0..1. v2 builds a temporal prior off exactly this quantity and
     /// the same span, so a design matrix without it cannot see what the shipped recipe sees.
     /// Anchored to the SPAN, not to sleep onset - see the note on [`extract`].
@@ -84,13 +90,13 @@ impl Features {
         "motion_frac_30", "motion_frac_120", "motion_frac_300", "motion_frac_600",
         "turn_sum_30", "turn_sum_120", "turn_sum_300", "turn_sum_600",
         "turn_max_30", "turn_max_120", "turn_max_300", "turn_max_600",
-        "swing", "still_x_cardiac", "still_x_hrvar", "hr_z", "hr_var_z", "hr_flat_pct",
+        "swing", "still_x_cardiac", "still_x_hrvar", "hr_z", "hr_var_z", "hr_flat_pct", "resp_z",
         "clock", "win_cov_600",
     ];
 
     /// Column count. One constant so a consumer sizes its design matrix from here rather than
     /// repeating the number and drifting when a column is added.
-    pub const N: usize = 28;
+    pub const N: usize = 29;
 
     /// The vector, in [`Features::NAMES`] order. `None` becomes `f64::NAN` so a caller must decide
     /// what missing means rather than inheriting a silent zero.
@@ -103,7 +109,7 @@ impl Features {
             n(self.turn_sum[0]), n(self.turn_sum[1]), n(self.turn_sum[2]), n(self.turn_sum[3]),
             n(self.turn_max[0]), n(self.turn_max[1]), n(self.turn_max[2]), n(self.turn_max[3]),
             n(self.swing), n(self.still_x_cardiac), n(self.still_x_hrvar), n(self.hr_z),
-            n(self.hr_var_z), n(self.hr_flat_pct),
+            n(self.hr_var_z), n(self.hr_flat_pct), n(self.resp_z),
             n(self.clock), n(self.win_cov_600),
         ]
     }
@@ -185,6 +191,7 @@ pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> 
                 hr_z: c.hr_z,
                 hr_var_z: c.hr_var_z,
                 hr_flat_pct: c.hr_flat_pct,
+                resp_z: c.resp_z,
                 clock: Some(elapsed / (end - start) as f64),
                 ..Default::default()
             };
@@ -261,6 +268,7 @@ mod tests {
         f.hr_z = Some(800.0);
         f.hr_var_z = Some(900.0);
         f.hr_flat_pct = Some(950.0);
+        f.resp_z = Some(955.0);
         f.clock = Some(960.0);
         f.win_cov_600 = Some(1000.0);
 
@@ -279,7 +287,7 @@ mod tests {
             ("turn_max_30", 500.0), ("turn_max_120", 501.0),
             ("turn_max_300", 502.0), ("turn_max_600", 503.0),
             ("swing", 600.0), ("still_x_cardiac", 700.0), ("still_x_hrvar", 750.0),
-            ("hr_z", 800.0), ("hr_var_z", 900.0), ("hr_flat_pct", 950.0),
+            ("hr_z", 800.0), ("hr_var_z", 900.0), ("hr_flat_pct", 950.0), ("resp_z", 955.0),
             ("clock", 960.0), ("win_cov_600", 1000.0),
         ];
         for (i, (name, want)) in expect.iter().enumerate() {
@@ -350,7 +358,7 @@ mod tests {
             g[i as usize] = s(i, a, 0.0, (1.0f64 - a * a).sqrt());
         }
         let card: Vec<Cardiac> = (0..40)
-            .map(|_| Cardiac { hr_z: Some(2.0), hr_var_z: Some(3.0), hr_flat_pct: None })
+            .map(|_| Cardiac { hr_z: Some(2.0), hr_var_z: Some(3.0), ..Default::default() })
             .collect();
         let f = extract(&g, 0, 1200, &card);
         let moving = f[20].still_x_cardiac.expect("moving epoch");
