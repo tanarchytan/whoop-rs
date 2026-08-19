@@ -14,7 +14,7 @@
 //!              as one branch. Withholding only one leaves half the branch in the "withheld" arm.
 //! The difference between them IS the interaction's contribution, on identical data and optimiser.
 //!
-//! Discipline, all five from the plan's rules:
+//! Discipline, all six from the plan's rules:
 //!   - Fit on DREAMT. Report HELD-OUT on aauwss and sleep-accel. A train number is never a result.
 //!   - DREAMT is CLINICAL: per-epoch stage labels only, never onset/offset. Nothing here reads a
 //!     boundary.
@@ -22,15 +22,19 @@
 //!   - The rate-matched null is the floor: a fit that only calls more wake has done nothing.
 //!   - Both arms must CONVERGE. Two fits stopped at a shared iteration cap sit at unequal distances
 //!     from their own optima, and the whole result here is a small delta between them.
+//!   - EVERY hyperparameter is chosen inside the fit cohort. Picking one on held-out kappa spends
+//!     researcher freedom against the only clean estimate there is.
 //!
 //! The shipped recipe is scored FIRST, on the same rows through the same function, and both are
 //! reported per-epoch and Viterbi-decoded. This project carries three incompatible kappa formulas,
 //! so a number from here read against a published one compares different statistics.
 //!
-//! One asymmetry is NOT closed and qualifies every number: the class weighting rebalances the loss
-//! but `predict` takes a plain argmax, so the printed call rates are not calibrated probabilities.
-//! Undoing it post hoc bakes in DREAMT's own prevalence and makes held-out kappa worse, so it is
-//! named rather than applied.
+//! Two caveats are NOT closed and qualify every number. The class weighting rebalances the loss but
+//! `predict` takes a plain argmax, so the printed call rates are not calibrated probabilities;
+//! undoing it post hoc bakes in DREAMT's own prevalence and makes held-out kappa worse. And `clock`
+//! is a fraction of the fixture window, whose labelled part starts ~24% in on DREAMT and at zero on
+//! both held-out cohorts - so its coefficient is extrapolated over every held-out sleep onset. v2
+//! reads the same quantity off the same span, so the comparison is fair; the transfer claim is not.
 //!
 //! The output is weights. Nothing is wired and `Params::SHIPPED` is untouched.
 
@@ -66,15 +70,14 @@ const LR: f64 = 0.5;
 /// L2 penalty. 100 subjects against 26 parameters per class overfits without one, and the plan
 /// names overfitting as the expected failure mode.
 const L2: f64 = 1e-3;
-/// Exponent on the inverse-frequency class weight, 0 = unweighted, 1 = full inverse frequency.
-/// Swept over 0/0.25/0.5/0.75/1.0; this wins on held-out kappa and is the only setting that trips no
-/// calibration flag. Unweighted collapses deep and REM entirely.
-const WEIGHT_POWER: f64 = 0.75;
+/// Candidate exponents on the inverse-frequency class weight. 0 = unweighted, which collapses deep
+/// and REM entirely; 1 = full inverse frequency, which over-calls them. Chosen by [`select_power`]
+/// INSIDE the fit cohort, never against held-out.
+const POWERS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 
-/// `WEIGHT_POWER`, overridable by `TANV1_WEIGHT_POWER` so the sweep that chose it is reproducible
-/// without editing the file.
-fn weight_power() -> f64 {
-    std::env::var("TANV1_WEIGHT_POWER").ok().and_then(|v| v.parse().ok()).unwrap_or(WEIGHT_POWER)
+/// Fixes the exponent instead of selecting it, for reproducing one setting by hand.
+fn power_override() -> Option<f64> {
+    std::env::var("TANV1_WEIGHT_POWER").ok().and_then(|v| v.parse().ok())
 }
 
 struct Set {
@@ -242,7 +245,7 @@ fn design(r: &[f64; NCOL], m: &[f64; NCOL], s: &[f64; NCOL], drop: &[usize]) -> 
 /// at every `WEIGHT_POWER`. The divisor is the SAMPLE-weighted mean; the arithmetic mean across four
 /// classes is dominated by the rare ones and rescales total mass differently at every power, which
 /// would change the data-fit-versus-L2 balance between the settings a sweep compares.
-fn class_weights(y: &[usize]) -> [f64; CLASSES] {
+fn class_weights(y: &[usize], power: f64) -> [f64; CLASSES] {
     let mut n = [0usize; CLASSES];
     for &c in y {
         n[c] += 1;
@@ -250,7 +253,7 @@ fn class_weights(y: &[usize]) -> [f64; CLASSES] {
     let mut w = [1.0f64; CLASSES];
     for c in 0..CLASSES {
         w[c] = if n[c] > 0 {
-            (y.len() as f64 / (CLASSES as f64 * n[c] as f64)).powf(weight_power())
+            (y.len() as f64 / (CLASSES as f64 * n[c] as f64)).powf(power)
         } else {
             0.0
         };
@@ -266,9 +269,9 @@ fn class_weights(y: &[usize]) -> [f64; CLASSES] {
 
 /// Multinomial logistic regression by full-batch gradient descent. Deterministic: no shuffling, no
 /// randomness, fixed iteration count - two runs give identical weights.
-fn fit(x: &[Vec<f64>], y: &[usize]) -> Vec<Vec<f64>> {
+fn fit(x: &[Vec<f64>], y: &[usize], power: f64) -> Vec<Vec<f64>> {
     let p = x[0].len();
-    let cw = class_weights(y);
+    let cw = class_weights(y, power);
     let mut w = vec![vec![0.0f64; p]; CLASSES];
     let mut last_nll = f64::MAX;
     let mut converged = false;
@@ -331,6 +334,57 @@ fn predict(w: &[Vec<f64>], row: &[f64]) -> usize {
             best = (c, z);
         }
     }
+    best.0
+}
+
+/// The nights of `s` that `keep` accepts, renumbered from zero. Row order and alignment are
+/// preserved, so a decode over the subset still sees each night contiguous.
+fn subset(s: &Set, keep: impl Fn(usize) -> bool) -> Set {
+    let (mut x, mut y, mut night, mut v2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut map = std::collections::BTreeMap::new();
+    for i in 0..s.x.len() {
+        if !keep(s.night[i]) {
+            continue;
+        }
+        let next = map.len();
+        let nid = *map.entry(s.night[i]).or_insert(next);
+        x.push(s.x[i]);
+        y.push(s.y[i]);
+        v2.push(s.v2[i]);
+        night.push(nid);
+    }
+    Set { x, y, night, v2 }
+}
+
+/// Choose the class-weight exponent INSIDE the fit cohort: fit on its even-numbered nights, score on
+/// its odd ones. Choosing on held-out spends researcher freedom against the only clean estimate
+/// there is, and here the two disagree - the fit cohort prefers a different exponent.
+fn select_power(train: &Set) -> f64 {
+    if let Some(p) = power_override() {
+        println!("class weight power {p:.2} (fixed by environment, not selected)");
+        return p;
+    }
+    let inner_fit = subset(train, |n| n % 2 == 0);
+    let inner_val = subset(train, |n| n % 2 == 1);
+    let rows: Vec<usize> = (0..inner_fit.x.len()).filter(|i| inner_fit.y[*i] != UNLABELLED).collect();
+    let ix: Vec<[f64; NCOL]> = rows.iter().map(|i| inner_fit.x[*i]).collect();
+    let iy: Vec<usize> = rows.iter().map(|i| inner_fit.y[*i]).collect();
+    let (m, sd) = standardiser(&ix);
+    let dx: Vec<Vec<f64>> = ix.iter().map(|r| design(r, &m, &sd, &[])).collect();
+
+    println!("SELECT class weight power on the fit cohort alone: {} nights fit, {} scored",
+             inner_fit.night.iter().max().map_or(0, |v| v + 1),
+             inner_val.night.iter().max().map_or(0, |v| v + 1));
+    let mut best = (POWERS[0], f64::MIN);
+    for p in POWERS {
+        let w = fit(&dx, &iy, p);
+        let k = score_decoded(&w, &inner_val, &m, &sd, &[]).0;
+        println!("  power {p:.2}  inner-val kappa {k:.4}");
+        if k > best.1 {
+            best = (p, k);
+        }
+    }
+    println!("  -> {:.2}\n", best.0);
     best.0
 }
 
@@ -501,8 +555,8 @@ fn main() {
     let fit_x: Vec<[f64; NCOL]> = fit_rows.iter().map(|i| train.x[*i]).collect();
     let fit_y: Vec<usize> = fit_rows.iter().map(|i| train.y[*i]).collect();
     let (m, sd) = standardiser(&fit_x);
-    println!("class weight power {:.2}, {} labelled of {} rows\n",
-             weight_power(), fit_x.len(), train.x.len());
+    println!("{} labelled of {} rows\n", fit_x.len(), train.x.len());
+    let power = select_power(&train);
 
     // The SHIPPED recipe, on these rows, through this file's own statistic. Every published v2 kappa
     // elsewhere in the project is a different formula - pooled across all epochs, or a mean rather
@@ -526,7 +580,7 @@ fn main() {
 
     for (label, drop) in arms {
         let dx: Vec<Vec<f64>> = fit_x.iter().map(|r| design(r, &m, &sd, drop)).collect();
-        let w = fit(&dx, &fit_y);
+        let w = fit(&dx, &fit_y, power);
         for (how, decoded) in [("per-epoch", false), ("VITERBI-decoded", true)] {
             println!("=== {label}, {how}");
             header();

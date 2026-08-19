@@ -29,9 +29,6 @@ pub const MIN_SCALE_DELTAS: usize = 120;
 /// end is the epoch itself, the long end is where the benchmark's actigraphy features stop.
 pub const WINDOWS_S: [i64; 4] = [30, 120, 300, 600];
 
-/// The NREM-REM cycle period in seconds, for the phase columns. A fixed physiological constant, not
-/// a fitted one: the shipped recipe derives its own temporal prior from the same elapsed clock.
-pub const CYCLE_S: f64 = 5400.0;
 
 /// The cardiac quantities per epoch, computed by the caller so this module stays motion-only.
 /// `hr_flat_pct` is the transform the shipped recipe's deep gate reads; without it no column here can
@@ -69,11 +66,10 @@ pub struct Features {
     pub hr_var_z: Option<f64>,
     /// Within-night rank of the long-window HR standard deviation. The deep-separating quantity.
     pub hr_flat_pct: Option<f64>,
-    /// Elapsed fraction of the span, 0..1, and the phase of a [`CYCLE_S`] cycle over the same clock.
-    /// v2 builds a temporal prior from this and a design matrix without it cannot see time at all.
+    /// Elapsed fraction of the span, 0..1. v2 builds a temporal prior off exactly this quantity and
+    /// the same span, so a design matrix without it cannot see what the shipped recipe sees.
+    /// Anchored to the SPAN, not to sleep onset - see the note on [`extract`].
     pub clock: Option<f64>,
-    pub cycle_sin: Option<f64>,
-    pub cycle_cos: Option<f64>,
     /// Fraction of the LONGEST window that lies inside the span, 0..1. The first and last ~10 epochs
     /// cannot have a full centred window, and without this column a fitted model reads that
     /// systematic edge bias as signal.
@@ -89,12 +85,12 @@ impl Features {
         "turn_sum_30", "turn_sum_120", "turn_sum_300", "turn_sum_600",
         "turn_max_30", "turn_max_120", "turn_max_300", "turn_max_600",
         "swing", "still_x_cardiac", "still_x_hrvar", "hr_z", "hr_var_z", "hr_flat_pct",
-        "clock", "cycle_sin", "cycle_cos", "win_cov_600",
+        "clock", "win_cov_600",
     ];
 
     /// Column count. One constant so a consumer sizes its design matrix from here rather than
     /// repeating the number and drifting when a column is added.
-    pub const N: usize = 30;
+    pub const N: usize = 28;
 
     /// The vector, in [`Features::NAMES`] order. `None` becomes `f64::NAN` so a caller must decide
     /// what missing means rather than inheriting a silent zero.
@@ -108,17 +104,14 @@ impl Features {
             n(self.turn_max[0]), n(self.turn_max[1]), n(self.turn_max[2]), n(self.turn_max[3]),
             n(self.swing), n(self.still_x_cardiac), n(self.still_x_hrvar), n(self.hr_z),
             n(self.hr_var_z), n(self.hr_flat_pct),
-            n(self.clock), n(self.cycle_sin), n(self.cycle_cos), n(self.win_cov_600),
+            n(self.clock), n(self.win_cov_600),
         ]
     }
 }
 
-/// Per-second gravity means over `[a, b)`, and the deltas between them.
-///
-/// `grav` must be sorted by `ts` - the same contract `posture_series` states. The range is found by
-/// binary search rather than by filtering the whole slice: this is called once per epoch per window,
-/// so a full rescan makes the cost quadratic in night length and multi-day bridged sessions much
-/// worse than a linear extrapolation suggests.
+/// Per-second gravity means over `[a, b)`, and the deltas between them. `grav` must be sorted by
+/// `ts`. Found by binary search, not by filtering the slice: this runs once per epoch per window, so
+/// a full rescan is quadratic in night length.
 fn deltas(grav: &[AccelSample], a: i64, b: i64) -> Vec<f64> {
     let lo = grav.partition_point(|g| g.ts < a);
     let hi = grav.partition_point(|g| g.ts < b);
@@ -145,14 +138,17 @@ fn deltas(grav: &[AccelSample], a: i64, b: i64) -> Vec<f64> {
 
 /// Per-epoch features over `[start, end)`. `card` is the caller's per-night cardiac series, one entry
 /// per epoch; a short slice leaves the tail's cardiac columns missing rather than shifting them.
+///
+/// `clock` is a fraction of THIS span, so what it means depends entirely on where the caller puts
+/// the boundaries. A span that opens well before sleep and one that opens at sleep give the same
+/// epoch different values, and a model fitted on one distribution extrapolates on the other.
 pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> Vec<Features> {
     if end <= start {
         return Vec::new();
     }
-    // Sorted DEFENSIVELY, the way `v2::prepare` does, rather than trusting a doc comment. `deltas`
-    // binary-searches and `posture_series` walks a forward cursor, so both silently return the wrong
-    // range on unsorted input - no panic, no NaN, just wrong numbers. A caller merging two accel
-    // sources would hit that, and nothing downstream could tell.
+    // Sorted DEFENSIVELY rather than trusting the contract: `deltas` binary-searches and
+    // `posture_series` walks a forward cursor, so unsorted input returns a wrong range silently -
+    // no panic, no NaN, just wrong numbers.
     let owned: Vec<AccelSample>;
     let grav = if grav.windows(2).all(|w| w[0].ts <= w[1].ts) {
         grav
@@ -183,7 +179,6 @@ pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> 
             let mid = start + k as i64 * EPOCH_S + EPOCH_S / 2;
             let c = card.get(k).copied().unwrap_or_default();
             let elapsed = (mid - start) as f64;
-            let phase = std::f64::consts::TAU * elapsed / CYCLE_S;
             let mut f = Features {
                 start: start + k as i64 * EPOCH_S,
                 swing: post.get(k).and_then(|p| p.map(|p| p.swing)),
@@ -191,8 +186,6 @@ pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> 
                 hr_var_z: c.hr_var_z,
                 hr_flat_pct: c.hr_flat_pct,
                 clock: Some(elapsed / (end - start) as f64),
-                cycle_sin: Some(phase.sin()),
-                cycle_cos: Some(phase.cos()),
                 ..Default::default()
             };
             for (w, width) in WINDOWS_S.iter().enumerate() {
@@ -221,10 +214,9 @@ pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> 
                     f.turn_max[w] = Some(seg.iter().cloned().fold(f64::MIN, f64::max));
                 }
             }
-            // Stillness x cardiac, as products rather than a branch. Stillness ramps linearly from
-            // 1 at zero motion to 0 at `night_scale` (the floored p75), so a term is the cardiac
-            // evidence that survives being still - what v2's clamp decides with an `if`. Both cardiac
-            // terms get one, because v2's clamp reads both.
+            // Stillness ramps linearly from 1 at zero motion to 0 at `night_scale`, so each product
+            // is the cardiac evidence that survives being still - what v2's clamp decides with an
+            // `if`. Both terms get one, because that clamp reads both.
             if let Some(m) = f.motion_mean[0] {
                 let still = (1.0 - m / night_scale).clamp(0.0, 1.0);
                 f.still_x_cardiac = f.hr_z.map(|h| still * h);
@@ -250,8 +242,8 @@ mod tests {
 
     /// The failure this prevents: a fitted weight vector silently transposed against the wrong
     /// column, which no test of the model's accuracy would ever catch.
-    /// A width-only assertion would pass with two fields swapped or one omitted and a wrong one
-    /// appended, so every field carries a UNIQUE marker and is asserted against its own name.
+    /// A width-only assertion passes with two fields swapped, so every field carries a UNIQUE
+    /// marker and is asserted against its own name.
     #[test]
     fn every_value_lands_in_the_column_its_name_claims() {
         let mut f = Features::default();
@@ -270,8 +262,6 @@ mod tests {
         f.hr_var_z = Some(900.0);
         f.hr_flat_pct = Some(950.0);
         f.clock = Some(960.0);
-        f.cycle_sin = Some(970.0);
-        f.cycle_cos = Some(980.0);
         f.win_cov_600 = Some(1000.0);
 
         let v = f.values();
@@ -290,8 +280,7 @@ mod tests {
             ("turn_max_300", 502.0), ("turn_max_600", 503.0),
             ("swing", 600.0), ("still_x_cardiac", 700.0), ("still_x_hrvar", 750.0),
             ("hr_z", 800.0), ("hr_var_z", 900.0), ("hr_flat_pct", 950.0),
-            ("clock", 960.0), ("cycle_sin", 970.0), ("cycle_cos", 980.0),
-            ("win_cov_600", 1000.0),
+            ("clock", 960.0), ("win_cov_600", 1000.0),
         ];
         for (i, (name, want)) in expect.iter().enumerate() {
             assert_eq!(Features::NAMES[i], *name, "column {i} is misnamed");
@@ -376,27 +365,21 @@ mod tests {
     }
 
     /// v2 builds a temporal prior from the elapsed clock, so a design matrix without one cannot see
-    /// time at all. The fraction must span 0..1 across the night and the phase must be periodic.
+    /// what the shipped recipe sees. It must span 0..1 across the span and rise monotonically.
     #[test]
-    fn the_clock_spans_the_night_and_the_cycle_phase_turns_over() {
-        let span: i64 = 4 * 5400; // exactly four cycles
+    fn the_clock_spans_the_span_and_rises_monotonically() {
+        let span: i64 = 4 * 5400;
         let f = extract(&still(span), 0, span, &[]);
         let first = f.first().expect("epochs").clock.expect("clock");
         let last = f.last().expect("epochs").clock.expect("clock");
         assert!(first < 0.01 && last > 0.99, "the clock must span the night: {first} to {last}");
         assert!(f.windows(2).all(|w| w[0].clock < w[1].clock), "and it must be monotonic");
 
-        // One cycle apart must land at the same phase; a quarter cycle apart must not.
-        let per = (CYCLE_S as i64 / EPOCH_S) as usize;
-        let (a, b) = (f[3].cycle_sin.unwrap(), f[3 + per].cycle_sin.unwrap());
-        assert!((a - b).abs() < 1e-9, "one period apart is the same phase: {a} vs {b}");
-        let q = f[3 + per / 4].cycle_sin.unwrap();
-        assert!((a - q).abs() > 0.5, "a quarter period apart is not: {a} vs {q}");
-        // sin and cos together disambiguate the half of the cycle a single term cannot.
-        assert!(f.iter().all(|x| {
-            let (s, c) = (x.cycle_sin.unwrap(), x.cycle_cos.unwrap());
-            (s * s + c * c - 1.0).abs() < 1e-9
-        }));
+        // Anchored to the SPAN, so a span that starts an hour early shifts every value.
+        let shifted = extract(&still(span + 3600), -3600, span, &[]);
+        let same_epoch = shifted[(3600 / EPOCH_S) as usize].clock.expect("clock");
+        assert!(same_epoch > first + 0.1,
+            "the same wall-clock epoch reads later in a span that starts earlier: {same_epoch}");
     }
 
     /// The deep-separating quantity is CARRIED, not invented here: a caller that supplies it must see
