@@ -41,13 +41,12 @@
 mod common;
 
 use common::{
-    dirs_of, labels_at, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
+    cardiac_series, dirs_of, labels_at, read_accel, read_hr, read_meta, read_rr, read_truth,
+    stage_idx,
 };
-use physio_algo::sleep::features::{extract, Cardiac, Features};
+use physio_algo::sleep::features::{extract, Features};
 use physio_algo::sleep::metrics::{confusion4, kappa4, recall, specificity, WAKE};
-use physio_algo::sleep::{decode_v2, flatten_rr, params::Params, resp_regularity, stage_v2,
-    SleepInput, STAGE_ORDER};
-use std::collections::BTreeMap;
+use physio_algo::sleep::{decode_v2, params::Params, stage_v2, SleepInput, STAGE_ORDER};
 
 const EPOCH: i64 = 30;
 const FIT: [&str; 1] = ["dreamt"];
@@ -92,57 +91,6 @@ struct Set {
     v2: Vec<usize>,
 }
 
-/// Per-night z-score of a per-epoch series, missing where the series is.
-fn zscore(v: &[Option<f64>]) -> Vec<Option<f64>> {
-    let present: Vec<f64> = v.iter().flatten().copied().collect();
-    if present.len() < 2 {
-        return vec![None; v.len()];
-    }
-    let m = present.iter().sum::<f64>() / present.len() as f64;
-    let sd = (present.iter().map(|x| (x - m).powi(2)).sum::<f64>() / present.len() as f64).sqrt();
-    if sd <= 0.0 {
-        return vec![None; v.len()];
-    }
-    v.iter().map(|o| o.map(|x| (x - m) / sd)).collect()
-}
-
-/// One heart rate per second, averaged where a second carries several samples.
-fn per_second_hr(hr: &[physio_algo::sleep::HrSample]) -> BTreeMap<i64, f64> {
-    let mut acc: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
-    for s in hr {
-        let e = acc.entry(s.ts).or_insert((0.0, 0.0));
-        e.0 += s.bpm as f64;
-        e.1 += 1.0;
-    }
-    acc.into_iter().map(|(t, (a, c))| (t, a / c)).collect()
-}
-
-/// Population sd of PER-SECOND heart rate over `[lo, hi)`, the statistic the shipped recipe reads.
-/// Averaging to per-epoch means first and taking the spread of THOSE is a much smoother quantity -
-/// eleven already-averaged points instead of ~330 raw ones.
-fn std_of_seconds(sec: &BTreeMap<i64, f64>, lo: i64, hi: i64) -> Option<f64> {
-    let v: Vec<f64> = sec.range(lo..hi).map(|(_, b)| *b).collect();
-    if v.len() < 2 {
-        return None;
-    }
-    let m = v.iter().sum::<f64>() / v.len() as f64;
-    Some((v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64).sqrt().max(0.0))
-}
-
-/// Within-night percentile rank in 0..1, by `bisect_right / n` over the present values - the same
-/// transform v2's deep gate applies to `hr_flat11`. Missing stays missing rather than becoming 0.5,
-/// so the model is handed a missing indicator instead of a manufactured median.
-fn rank_pct(v: &[Option<f64>]) -> Vec<Option<f64>> {
-    let mut sorted: Vec<f64> = v.iter().flatten().copied().collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    if sorted.is_empty() {
-        return vec![None; v.len()];
-    }
-    v.iter()
-        .map(|o| o.map(|x| sorted.partition_point(|s| *s <= x) as f64 / sorted.len() as f64))
-        .collect()
-}
-
 fn load(sets: &[&str]) -> Set {
     let (mut x, mut y, mut night) = (Vec::new(), Vec::new(), Vec::new());
     let mut v2 = Vec::new();
@@ -158,57 +106,8 @@ fn load(sets: &[&str]) -> Set {
             let n = n_meta.max(truth.keys().max().copied().unwrap_or(0) + 1);
 
             let hr = read_hr(dir);
-            let sec = per_second_hr(&hr);
-            // Per-epoch mean HR, then this night's own z-score - the same shape v2 uses.
-            let mut sum = vec![(0.0f64, 0.0f64); n];
-            for s in &hr {
-                let k = ((s.ts - w0) / EPOCH).max(0) as usize;
-                if k < n {
-                    sum[k].0 += s.bpm as f64;
-                    sum[k].1 += 1.0;
-                }
-            }
-            let raw: Vec<Option<f64>> =
-                sum.iter().map(|(a, c)| (*c > 0.0).then(|| a / c)).collect();
-            let hr_z = zscore(&raw);
-            // Both cardiac spreads over the windows and the resolution the shipped recipe uses.
-            let starts: Vec<i64> = (0..n).map(|k| w0 + k as i64 * EPOCH).collect();
-            let hv: Vec<Option<f64>> =
-                starts.iter().map(|e| std_of_seconds(&sec, e - 150, e + EPOCH + 150)).collect();
-            let hr_var_z = zscore(&hv);
-            let flat: Vec<Option<f64>> =
-                starts.iter().map(|e| std_of_seconds(&sec, e - 330, e + EPOCH + 360)).collect();
-            let flat_pct = rank_pct(&flat);
-
-            // RSA regularity over the same beat window the shipped recipe uses, through the SAME
-            // function. It is the only quantity beats reach, and without it the fit is denied a
-            // channel v2 weights into DEEP and out of REM.
             let rr = read_rr(dir);
-            let mut beats_by: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
-            for (ts, ms) in flatten_rr(&rr) {
-                beats_by.entry(ts).or_default().push(ms);
-            }
-            let resp: Vec<Option<f64>> = starts
-                .iter()
-                .map(|e| {
-                    let mut beats: Vec<(f64, f64)> = beats_by
-                        .range(e - 90..e + 120)
-                        .flat_map(|(t, vs)| vs.iter().map(|v| (*t as f64, v.clamp(300.0, 2000.0))))
-                        .collect();
-                    beats.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.partial_cmp(&b.1).unwrap()));
-                    resp_regularity(&beats)
-                })
-                .collect();
-            let resp_z = zscore(&resp);
-
-            let card: Vec<Cardiac> = (0..n)
-                .map(|k| Cardiac {
-                    hr_z: hr_z[k],
-                    hr_var_z: hr_var_z[k],
-                    hr_flat_pct: flat_pct[k],
-                    resp_z: resp_z[k],
-                })
-                .collect();
+            let card = cardiac_series(w0, n, EPOCH, &hr, &rr);
             let f: Vec<Features> = extract(&grav, w0, w1, &card);
 
             // The shipped recipe on the SAME night, so its score comes out of the same function.
@@ -664,8 +563,14 @@ fn main() {
     println!("\ninteraction columns {:?} at indices {int_cols:?}",
              int_cols.map(|c| Features::NAMES[c]));
 
-    let arms: [(&str, &[usize]); 2] =
-        [("MAIN (interaction withheld)", &int_cols), ("MAIN + INTERACTION", &[])];
+    // A third arm isolates R-R. Its gain was first read off a delta between two commits that also
+    // changed how the class weight is selected, which is an attribution rather than a measurement.
+    let rr_col = [col("resp_z")];
+    let arms: [(&str, &[usize]); 3] = [
+        ("MAIN (interaction withheld)", &int_cols),
+        ("MAIN + INTERACTION", &[]),
+        ("NO R-R (resp_z withheld)", &rr_col),
+    ];
 
     // Kept per arm and per decode so the interaction is judged by a PAIRED per-night difference.
     let mut by_arm: Vec<[Vec<Scored>; 2]> = Vec::new();
@@ -712,6 +617,16 @@ fn main() {
         println!("  {how}");
         for (i, name) in names.iter().enumerate() {
             paired_row(name, &by_arm[0][d][i], &by_arm[1][d][i]);
+        }
+    }
+
+    println!("
+=== THE R-R CHANNEL, paired per night (MAIN+INT minus the same fit without resp_z)");
+    println!("  {:<18} {:>10} {:>10} {:>6}   verdict", "cohort", "mean d", "bar +/-", "n");
+    for (d, how) in ["per-epoch", "VITERBI-decoded"].iter().enumerate() {
+        println!("  {how}");
+        for (i, name) in names.iter().enumerate() {
+            paired_row(name, &by_arm[2][d][i], &by_arm[1][d][i]);
         }
     }
     println!("\nThe paired row is the interaction's contribution. A difference of medians is not:");
