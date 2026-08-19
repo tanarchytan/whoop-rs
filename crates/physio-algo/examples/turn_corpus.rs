@@ -52,25 +52,40 @@ fn pct(v: &[f64], q: f64) -> f64 {
     s[((q * s.len() as f64) as usize).min(s.len() - 1)]
 }
 
-/// Peak within-epoch gravity delta, the shipped scalar, for the side-by-side comparison.
-fn jerk_series(grav: &[AccelSample], w0: i64, n: usize) -> Vec<Option<f64>> {
-    let mut out = vec![None; n];
+/// Peak within-epoch delta per axis plus the norm, so all four read off identical epochs.
+/// Index 0..2 are x/y/z, index 3 is the shipped norm.
+fn jerk_axes(grav: &[AccelSample], w0: i64, n: usize) -> [Vec<Option<f64>>; 4] {
+    let mut out = [vec![None; n], vec![None; n], vec![None; n], vec![None; n]];
     let mut i = 0usize;
-    for (k, slot) in out.iter_mut().enumerate() {
+    for k in 0..n {
         let (a, b) = (w0 + k as i64 * EPOCH, w0 + (k as i64 + 1) * EPOCH);
         while i < grav.len() && grav[i].ts < a {
             i += 1;
         }
         let j = i + grav[i..].iter().take_while(|s| s.ts < b).count();
         let seg = &grav[i..j];
-        let mut peak: Option<f64> = None;
+        let mut peak = [0.0f64; 4];
+        let mut seen = false;
         for (p, q) in seg.iter().zip(seg.iter().skip(1)) {
-            let d = ((p.x - q.x).powi(2) + (p.y - q.y).powi(2) + (p.z - q.z).powi(2)).sqrt();
-            peak = Some(peak.map_or(d, |m: f64| m.max(d)));
+            let d = [(p.x - q.x).abs(), (p.y - q.y).abs(), (p.z - q.z).abs()];
+            for t in 0..3 {
+                peak[t] = peak[t].max(d[t]);
+            }
+            peak[3] = peak[3].max((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
+            seen = true;
         }
-        *slot = peak;
+        if seen {
+            for t in 0..4 {
+                out[t][k] = Some(peak[t]);
+            }
+        }
     }
     out
+}
+
+fn jerk_series(grav: &[AccelSample], w0: i64, n: usize) -> Vec<Option<f64>> {
+    let [_, _, _, norm] = jerk_axes(grav, w0, n);
+    norm
 }
 
 const LABELLED: &str = "C:/Users/DavidGillot/Projects/whoop/whoop-data/harnesses/labelled-nights";
@@ -169,6 +184,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut turn_aucs, mut jerk_aucs) = (Vec::new(), Vec::new());
     let (mut wins, mut scored, mut skipped) = (0usize, 0usize, 0usize);
+    // Per-axis, to ask on OUR sensor what the PSG cohorts said: is the device frame stable enough
+    // for one axis to carry its own weight, or is the winner random?
+    let mut ax: [Vec<f64>; 3] = Default::default();
+    let mut ax_win = [0usize; 3];
 
     for (s, e, stages_json) in &sessions {
         let n = ((e - s) / EPOCH).max(0) as usize;
@@ -213,7 +232,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let post = posture_series(&grav, *s, s + n as i64 * EPOCH, EPOCH);
-        let jerks = jerk_series(&grav, *s, n);
+        let axes = jerk_axes(&grav, *s, n);
+        let jerks = axes[3].clone();
+        {
+            let mut got = [f64::NAN; 3];
+            let mut ok = true;
+            for t in 0..3 {
+                let (mut p, mut q) = (Vec::new(), Vec::new());
+                for k in 0..n {
+                    let (Some(w), Some(v)) = (is_wake[k], axes[t][k]) else { continue };
+                    if w { p.push(v) } else { q.push(v) }
+                }
+                match auc(&p, &q) {
+                    Some(a) => got[t] = a,
+                    None => ok = false,
+                }
+            }
+            if ok {
+                for t in 0..3 {
+                    ax[t].push(got[t]);
+                }
+                let mut best = 0usize;
+                for t in 1..3 {
+                    if got[t] > got[best] {
+                        best = t;
+                    }
+                }
+                ax_win[best] += 1;
+            }
+        }
         let (mut tp, mut tn, mut jp, mut jn) = (vec![], vec![], vec![], vec![]);
         for k in 0..n {
             let Some(w) = is_wake[k] else { continue };
@@ -258,6 +305,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              100.0 * wins as f64 / scored as f64);
     println!("paired delta: mean {mean_d:+.4}, sd {sd:.4}, resolvable +/-{:.4}",
              1.96 * sd / (deltas.len() as f64).sqrt());
+    let axn: usize = ax_win.iter().sum();
+    if axn > 0 {
+        println!("
+per-axis on this store ({axn} nights) - is the device frame stable?");
+        for (t, name) in ["x", "y", "z"].iter().enumerate() {
+            println!("  axis {name}   AUC {:.3}   best on {:>3} of {axn} nights ({:.0}%)",
+                     pct(&ax[t], 0.50), ax_win[t], 100.0 * ax_win[t] as f64 / axn as f64);
+        }
+        println!("  norm     AUC {:.3}   <- what we ship", pct(&jerk_aucs, 0.50));
+    }
     labelled_nights();
     println!("\nThe corpus labels above are OUR hypnogram, not truth. turn feeds nothing in the shipped");
     println!("engine, so agreement was not built in - but only the labelled nights can falsify.");

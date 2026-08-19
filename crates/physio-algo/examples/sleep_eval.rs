@@ -141,6 +141,14 @@ fn arms() -> Vec<(&'static str, Arm)> {
         ("real: the pre-retune recipe", Arm::Recipe(Box::new(pre_retune(&Params::SHIPPED)))),
         ("cand: clamp_only_without_rr",
             Arm::Recipe(Box::new(Params { clamp_only_without_rr: true, ..Params::SHIPPED }))),
+        // The turn port, at three candidate weights. SHIPPED is 0.0, so the first row of this
+        // family must reproduce shipped exactly; the others say what a fitted value could buy.
+        ("cand: awake_turn 0.25",
+            Arm::Recipe(Box::new(Params { awake_turn: 0.25, ..Params::SHIPPED }))),
+        ("cand: awake_turn 0.50",
+            Arm::Recipe(Box::new(Params { awake_turn: 0.50, ..Params::SHIPPED }))),
+        ("cand: awake_turn 1.00",
+            Arm::Recipe(Box::new(Params { awake_turn: 1.00, ..Params::SHIPPED }))),
         ("null: always wake", Arm::Fixed(WAKE)),
         ("null: always light", Arm::Fixed(LIGHT)),
         ("null: shuffled ours", Arm::Shuffle),

@@ -41,6 +41,8 @@ struct Epoch {
     move_frac: Option<f64>,
     jerk_max: f64,
     resp_reg: Option<f64>,
+    /// Inter-epoch rotation in degrees. Frame-invariant, so it survives the strap being re-donned.
+    turn: Option<f64>,
     clock: f64,
     jerk_scale: f64,
 }
@@ -308,12 +310,22 @@ fn features(
         e += 30;
     }
 
+    // Rotation between consecutive epochs, from the same gravity the jerk features read.
+    let turns = {
+        let n = raws.len();
+        let end = raws.last().map_or(start, |r| r.start + 30);
+        let post = super::posture::posture_series(grav, start, end, 30);
+        let t = super::posture::turn_series(&post);
+        (0..n).map(|i| t.get(i).copied().flatten()).collect::<Vec<_>>()
+    };
+
     let jerk_scale = if all_jerks.is_empty() { 1e-6 } else { median(&all_jerks) };
     let move_thr = jerk_scale * p.jerk_move_mult;
 
     // PASS 2 — move fraction against the night-relative threshold.
     raws.into_iter()
-        .map(|r| {
+        .enumerate()
+        .map(|(idx, r)| {
             // No gravity in the epoch = no motion evidence; absent, not "perfectly still".
             let observed = !r.jerks.is_empty();
             let moves = r.jerks.iter().filter(|&&j| j > move_thr).count();
@@ -325,6 +337,7 @@ fn features(
                 move_frac: observed.then(|| moves as f64 / r.gap_sec as f64),
                 jerk_max: r.jerk_max,
                 resp_reg: r.resp_reg,
+                turn: turns.get(idx).copied().flatten(),
                 clock: r.clock,
                 jerk_scale,
             }
@@ -558,6 +571,7 @@ fn emissions(feats: &[Epoch], p: &Params, anchor: Anchor) -> Vec<[f64; 4]> {
     let zhv = ZScore::build(&feats.iter().map(|f| f.hr_var).collect::<Vec<_>>());
     let zmv = ZScore::build(&feats.iter().map(|f| f.move_frac).collect::<Vec<_>>());
     let zrg = ZScore::build(&feats.iter().map(|f| f.resp_reg).collect::<Vec<_>>());
+    let ztn = ZScore::build(&feats.iter().map(|f| f.turn).collect::<Vec<_>>());
 
     let mut fsorted: Vec<f64> = feats.iter().filter_map(|f| f.hr_flat11).collect();
     fsorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -594,12 +608,15 @@ fn emissions(feats: &[Epoch], p: &Params, anchor: Anchor) -> Vec<[f64; 4]> {
         let rr_backed = p.clamp_only_without_rr && f.resp_reg.is_some();
         let clamped = motion_quiescent(f, p) && zhrv < p.quiescent_hr_z_max && !rr_backed;
         let awake_cardiac = if clamped { awake_cardiac0.min(0.0) } else { awake_cardiac0 };
+        // Rotation is evidence of wake on its own terms: it survives the stillness clamp, because a
+        // wrist that changed orientation did not hold still whatever the jerk peak says.
+        let awake_turn = p.awake_turn * ztn.apply(f.turn);
 
         let mut em = [0.0f64; 4];
         em[DEEP] = p.deep_hrv * zhvv + p.deep_hr * zhrv + p.deep_motion * zmvv - gate + blp[DEEP];
         em[REM] = p.rem_hrv * zhvv + p.rem_motion * zmvv + p.rem_hr * zhrv + blp[REM];
         em[LIGHT] = blp[LIGHT];
-        em[AWAKE] = p.awake_motion * zmvv + awake_cardiac + blp[AWAKE];
+        em[AWAKE] = p.awake_motion * zmvv + awake_cardiac + awake_turn + blp[AWAKE];
 
         let pr = cycle_prior(cycle_clock(f.clock, feats, anchor, p), rem_guard(i, f.clock, anchor, p), p);
         for (s, p) in pr.iter().enumerate() {
@@ -720,6 +737,52 @@ mod tests {
             "the candidate must let an R-R-backed still epoch keep its awake cardiac term");
         assert_eq!(awake_of(&without_rr, &cand), awake_of(&without_rr, &Params::SHIPPED),
             "with no R-R there is nothing to exempt, so the candidate is SHIPPED");
+    }
+
+    /// The port's safety property: `awake_turn` ships at 0.0, so carrying the feature must not move
+    /// a single emission. Without this the port is a silent recipe change on every user's night.
+    #[test]
+    fn carrying_turn_at_the_shipped_weight_changes_no_emission() {
+        let input = still_hot_night(true);
+        let base = emissions_prepared(&prepare(&input, &Params::SHIPPED), &Params::SHIPPED);
+        let zeroed = Params { awake_turn: 0.0, ..Params::SHIPPED };
+        assert_eq!(Params::SHIPPED.awake_turn, 0.0, "the shipped weight is zero");
+        assert_eq!(base, emissions_prepared(&prepare(&input, &zeroed), &zeroed));
+    }
+
+    /// And it must actually DO something at a non-zero weight, or the wiring is decorative.
+    #[test]
+    fn a_nonzero_turn_weight_moves_the_awake_emission_on_a_rotating_night() {
+        // turn must VARY, not merely be large: it is z-scored per night, so a night that rotates
+        // by the same amount every epoch has zero variance and correctly contributes nothing.
+        // Here the wrist holds still for most epochs and rolls over on two of them.
+        let start = 1_749_513_600i64;
+        let hr: Vec<HrSample> = (0..600).map(|i| HrSample { ts: start + i, bpm: 60 }).collect();
+        let accel: Vec<AccelSample> = (0..600)
+            .map(|i| {
+                let e = i / 30;
+                if e == 5 || e == 12 {
+                    AccelSample { ts: start + i, x: 1.0, y: 0.0, z: 0.0 }
+                } else if e > 12 {
+                    AccelSample { ts: start + i, x: 0.0, y: 1.0, z: 0.0 }
+                } else {
+                    AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 }
+                }
+            })
+            .collect();
+        let input = SleepInput { start, end: start + 600, hr, rr: Vec::new(), accel };
+        let base = emissions_prepared(&prepare(&input, &Params::SHIPPED), &Params::SHIPPED);
+        let weighted = Params { awake_turn: 1.0, ..Params::SHIPPED };
+        let moved = emissions_prepared(&prepare(&input, &weighted), &weighted);
+        assert_eq!(base.len(), moved.len());
+        assert!(base.iter().zip(&moved).any(|(a, b)| a[AWAKE] != b[AWAKE]),
+            "a rotating night at weight 1.0 must move some AWAKE emission");
+        // Only AWAKE may move: turn enters no other stage's row.
+        for (a, b) in base.iter().zip(&moved) {
+            for st in [DEEP, REM, LIGHT] {
+                assert_eq!(a[st], b[st], "turn must not touch stage {st}");
+            }
+        }
     }
 
     #[test]

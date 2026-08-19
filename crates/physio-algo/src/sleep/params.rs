@@ -19,6 +19,10 @@ pub struct Params {
     pub awake_hr: f64,
     /// Below this |z| the cardiac terms read as noise and contribute nothing to the awake emission.
     pub awake_deadzone: f64,
+    /// Weight on the z-scored inter-epoch rotation. `turn` is frame-invariant, so unlike a per-axis
+    /// term it means the same thing however the strap is worn. SHIPPED is 0.0: the feature is
+    /// computed and carried, and contributes nothing until a fitted value replaces this.
+    pub awake_turn: f64,
     /// Deep-eligibility HR-flatness percentile gate and the slope of the penalty past it.
     pub deep_gate_thresh: f64,
     pub deep_gate_slope: f64,
@@ -89,6 +93,7 @@ impl Params {
         awake_hrv: 0.5,
         awake_hr: 0.6,
         awake_deadzone: 0.30,
+        awake_turn: 0.0,
         deep_gate_thresh: 0.40,
         deep_gate_slope: 5.0,
         jerk_move_mult: 75.0,
