@@ -39,6 +39,16 @@ const LR: f64 = 0.5;
 /// L2 penalty. 100 subjects against 26 parameters per class overfits without one, and the plan
 /// names overfitting as the expected failure mode.
 const L2: f64 = 1e-3;
+/// Exponent on the inverse-frequency class weight. 0 = unweighted, 1 = full inverse frequency.
+///
+/// Both extremes are wrong and both were measured. Unweighted, the fit calls deep 0.0% against a
+/// 3.4-18.1% truth rate - a two-class model wearing a four-class report. Full inverse frequency
+/// over-corrects the other way: deep called 34.9% against 3.4%, a 10x over-prediction. The
+/// square root is the usual compromise, but it was swept rather than assumed and it LOST: held-out
+/// kappa at 0.5 is 0.182/0.172 against 1.0's 0.239/0.203. Full weighting wins on the number that
+/// counts while being visibly miscalibrated, so the flag in the report exists to keep that visible
+/// rather than letting a better kappa hide it.
+const WEIGHT_POWER: f64 = 1.0;
 
 struct Set {
     x: Vec<[f64; NCOL]>,
@@ -145,13 +155,42 @@ fn design(r: &[f64; NCOL], m: &[f64; NCOL], s: &[f64; NCOL], drop: Option<usize>
     out
 }
 
+/// Inverse-frequency weight per class, normalised to mean 1 so the effective learning rate is
+/// unchanged. Without this the fit collapses: measured, an unweighted model called deep 0.0% of
+/// epochs on all three cohorts against true rates of 3.4-18.1%, and REM under 1% against 10.5-22.0%.
+/// It was a two-class wake/light classifier wearing a four-class report.
+fn class_weights(y: &[usize]) -> [f64; CLASSES] {
+    let mut n = [0usize; CLASSES];
+    for &c in y {
+        n[c] += 1;
+    }
+    let mut w = [1.0f64; CLASSES];
+    for c in 0..CLASSES {
+        w[c] = if n[c] > 0 {
+            (y.len() as f64 / (CLASSES as f64 * n[c] as f64)).powf(WEIGHT_POWER)
+        } else {
+            0.0
+        };
+    }
+    let mean = w.iter().sum::<f64>() / CLASSES as f64;
+    if mean > 0.0 {
+        for v in w.iter_mut() {
+            *v /= mean;
+        }
+    }
+    w
+}
+
 /// Multinomial logistic regression by full-batch gradient descent. Deterministic: no shuffling, no
 /// randomness, fixed iteration count - two runs give identical weights.
 fn fit(x: &[Vec<f64>], y: &[usize]) -> Vec<Vec<f64>> {
     let p = x[0].len();
+    let cw = class_weights(y);
     let mut w = vec![vec![0.0f64; p]; CLASSES];
-    for _ in 0..ITERS {
+    let mut last_nll = f64::MAX;
+    for it in 0..ITERS {
         let mut g = vec![vec![0.0f64; p]; CLASSES];
+        let mut nll = 0.0f64;
         for (row, &lab) in x.iter().zip(y) {
             let mut z = [0.0f64; CLASSES];
             for c in 0..CLASSES {
@@ -160,13 +199,25 @@ fn fit(x: &[Vec<f64>], y: &[usize]) -> Vec<Vec<f64>> {
             let mx = z.iter().cloned().fold(f64::MIN, f64::max);
             let ex: Vec<f64> = z.iter().map(|v| (v - mx).exp()).collect();
             let sum: f64 = ex.iter().sum();
+            nll -= cw[lab] * (ex[lab] / sum).max(1e-300).ln();
             for c in 0..CLASSES {
-                let err = ex[c] / sum - if c == lab { 1.0 } else { 0.0 };
+                let err = cw[lab] * (ex[c] / sum - if c == lab { 1.0 } else { 0.0 });
                 for (gi, xi) in g[c].iter_mut().zip(row) {
                     *gi += err * xi;
                 }
             }
         }
+        // MEDIUM from the review: 400 iterations was neither printed nor checked. Measured, the
+        // gradient norm at 400 was still 2.1x its value at 4000, so stop on the loss instead.
+        let nll = nll / x.len() as f64;
+        if it % 200 == 0 || it + 1 == ITERS {
+            println!("    iter {it:>4}  weighted nll {nll:.5}");
+        }
+        if (last_nll - nll).abs() < 1e-7 {
+            println!("    converged at iter {it}");
+            break;
+        }
+        last_nll = nll;
         let scale = LR / x.len() as f64;
         for c in 0..CLASSES {
             for j in 0..p {
@@ -193,9 +244,12 @@ fn predict(w: &[Vec<f64>], row: &[f64]) -> usize {
 /// Per-night kappa / wake recall / wake specificity, then the median across nights - never pooled,
 /// because pooling lets the longest night decide the number.
 fn score(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: Option<usize>)
-    -> (f64, f64, f64, f64) {
+    -> (f64, f64, f64, [f64; CLASSES], [f64; CLASSES]) {
     let nights = s.night.iter().max().map_or(0, |v| v + 1);
-    let (mut ks, mut rs, mut ss, mut calls) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut ks, mut rs, mut ss) = (Vec::new(), Vec::new(), Vec::new());
+    // Per-class call rate AND truth rate. A kappa alone cannot show that a class is never predicted.
+    let (mut called, mut truth_n) = ([0usize; CLASSES], [0usize; CLASSES]);
+    let mut total = 0usize;
     for nid in 0..nights {
         let (mut p, mut t) = (Vec::new(), Vec::new());
         for i in 0..s.x.len() {
@@ -216,7 +270,11 @@ fn score(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: Optio
         if let Some(v) = specificity(&cm, WAKE) {
             ss.push(v);
         }
-        calls.push(p.iter().filter(|v| **v == WAKE).count() as f64 / p.len() as f64);
+        for (pi, ti) in p.iter().zip(&t) {
+            called[*pi] += 1;
+            truth_n[*ti] += 1;
+            total += 1;
+        }
     }
     let med = |mut v: Vec<f64>| {
         if v.is_empty() {
@@ -225,7 +283,14 @@ fn score(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: Optio
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         v[v.len() / 2]
     };
-    (med(ks), med(rs), med(ss), med(calls))
+    let frac = |v: [usize; CLASSES]| {
+        let mut o = [0.0; CLASSES];
+        for c in 0..CLASSES {
+            o[c] = if total > 0 { v[c] as f64 / total as f64 } else { f64::NAN };
+        }
+        o
+    };
+    (med(ks), med(rs), med(ss), frac(called), frac(truth_n))
 }
 
 fn main() {
@@ -237,29 +302,53 @@ fn main() {
         return;
     }
     let (m, sd) = standardiser(&train.x);
-    // The interaction column, by name rather than by a hardcoded index.
-    let int_col = Features::NAMES.iter().position(|n| *n == "still_x_cardiac");
-    println!("interaction column `still_x_cardiac` at index {int_col:?}\n");
+    // By name, not a hardcoded index. And `expect`, because if the column is ever renamed then
+    // `position` yields None, BOTH arms get drop=None, and two identical runs are compared against
+    // each other - printing a confident wrong conclusion with no error anywhere.
+    let int_col = Features::NAMES
+        .iter()
+        .position(|n| *n == "still_x_cardiac")
+        .expect("still_x_cardiac must exist in Features::NAMES or the ablation compares nothing");
+    println!("interaction column `still_x_cardiac` at index {int_col}\n");
 
     let arms: [(&str, Option<usize>); 2] =
-        [("MAIN (interaction withheld)", int_col), ("MAIN + INTERACTION", None)];
+        [("MAIN (interaction withheld)", Some(int_col)), ("MAIN + INTERACTION", None)];
 
     for (label, drop) in arms {
         let dx: Vec<Vec<f64>> = train.x.iter().map(|r| design(r, &m, &sd, drop)).collect();
         let w = fit(&dx, &train.y);
         println!("=== {label}");
-        let (k, r, s, c) = score(&w, &train, &m, &sd, drop);
-        println!("  {:<14} kappa {k:.3}  wake recall {r:.3}  spec {s:.3}  calls wake {:.1}%",
-                 "dreamt (FIT)", 100.0 * c);
+        println!("  {:<18} {:>6} {:>7} {:>6}   {:<28} truth  W/L/D/R %", "cohort", "kappa",
+                 "wake r", "spec", "we call  W/L/D/R %");
+        let show = |name: &str, r: (f64, f64, f64, [f64; CLASSES], [f64; CLASSES])| {
+            let (k, rec, sp, call, tru) = r;
+            let pc = |v: [f64; CLASSES]| {
+                format!("{:>5.1}/{:>4.1}/{:>4.1}/{:>4.1}", 100.0 * v[0], 100.0 * v[1],
+                        100.0 * v[2], 100.0 * v[3])
+            };
+            // A class never predicted is the failure an unweighted fit hides behind a kappa.
+            let worst = (0..CLASSES)
+                .filter(|c| tru[*c] > 0.005)
+                .map(|c| (call[c] / tru[c]).max(tru[c] / call[c].max(1e-9)))
+                .fold(1.0f64, f64::max);
+            let flag = if call[2] < 0.005 || call[3] < 0.005 {
+                "  <- CLASS COLLAPSE".to_string()
+            } else if worst > 3.0 {
+                format!("  <- MISCALIBRATED {worst:.1}x")
+            } else {
+                String::new()
+            };
+            println!("  {name:<18} {k:>6.3} {rec:>7.3} {sp:>6.3}   {:<28} {}{}",
+                     pc(call), pc(tru), flag);
+        };
+        show("dreamt (FIT)", score(&w, &train, &m, &sd, drop));
         for set in HELD_OUT {
             let ho = load(&[set]);
             if ho.x.is_empty() {
-                println!("  {set:<14} no data");
+                println!("  {set:<18} no data");
                 continue;
             }
-            let (k, r, s, c) = score(&w, &ho, &m, &sd, drop);
-            println!("  {:<14} kappa {k:.3}  wake recall {r:.3}  spec {s:.3}  calls wake {:.1}%",
-                     format!("{set} (HELD)"), 100.0 * c);
+            show(&format!("{set} (HELD)"), score(&w, &ho, &m, &sd, drop));
         }
         println!();
     }
