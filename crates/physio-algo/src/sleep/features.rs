@@ -50,6 +50,19 @@ pub const MIN_SCALE_DELTAS: usize = 120;
 /// stop. Four is enough to see a trend without making the vector mostly redundant.
 pub const WINDOWS_S: [i64; 4] = [30, 120, 300, 600];
 
+/// The cardiac quantities per epoch, computed by the caller so this module stays motion-only.
+///
+/// `hr_flat_pct` is the within-night percentile RANK of the long-window HR standard deviation, the
+/// same transform the shipped recipe's deep gate reads. Without it no column here can express deep
+/// at all, and every deep number a fitted model prints is a statement about the missing feature.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Cardiac {
+    pub hr_z: Option<f64>,
+    pub hr_var_z: Option<f64>,
+    /// Rank in 0..1 of this epoch's ~12-minute HR standard deviation among the night's own epochs.
+    pub hr_flat_pct: Option<f64>,
+}
+
 /// One epoch, fully described. `None` is "not measurable here", which a fitted model must be handed
 /// as an explicit missing-indicator rather than as a zero - a zero is a claim of no movement.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -68,10 +81,16 @@ pub struct Features {
     pub swing: Option<f64>,
     /// The interaction v2 hard-codes as `motion_quiescent(f) && ... .min(0.0)`. Supplied as a
     /// PRODUCT so a linear model can represent what v2 needs a branch for.
+    ///
+    /// v2's clamp reads BOTH cardiac terms, so one product is only half of it - `still_x_hrvar` is
+    /// the other half, and with one alone the interaction arm cannot represent the branch it stands in for.
     pub still_x_cardiac: Option<f64>,
+    pub still_x_hrvar: Option<f64>,
     /// Cardiac, carried through from the caller so this module stays motion-only in what it computes.
     pub hr_z: Option<f64>,
     pub hr_var_z: Option<f64>,
+    /// Within-night rank of the long-window HR standard deviation. The deep-separating quantity.
+    pub hr_flat_pct: Option<f64>,
     /// Fraction of the LONGEST window that lies inside the span, 0..1.
     ///
     /// The first and last ~10 epochs of a night cannot have a full 10-minute centred window, so
@@ -82,18 +101,23 @@ pub struct Features {
 
 impl Features {
     /// Column names, index-for-index with [`Features::values`].
-    pub const NAMES: [&'static str; 25] = [
+    pub const NAMES: [&'static str; Self::N] = [
         "motion_mean_30", "motion_mean_120", "motion_mean_300", "motion_mean_600",
         "motion_max_30", "motion_max_120", "motion_max_300", "motion_max_600",
         "motion_frac_30", "motion_frac_120", "motion_frac_300", "motion_frac_600",
         "turn_sum_30", "turn_sum_120", "turn_sum_300", "turn_sum_600",
         "turn_max_30", "turn_max_120", "turn_max_300", "turn_max_600",
-        "swing", "still_x_cardiac", "hr_z", "hr_var_z", "win_cov_600",
+        "swing", "still_x_cardiac", "still_x_hrvar", "hr_z", "hr_var_z", "hr_flat_pct",
+        "win_cov_600",
     ];
+
+    /// Column count. One constant so a consumer sizes its design matrix from here rather than
+    /// repeating the number and drifting when a column is added.
+    pub const N: usize = 27;
 
     /// The vector, in [`Features::NAMES`] order. `None` becomes `f64::NAN` so a caller must decide
     /// what missing means rather than inheriting a silent zero.
-    pub fn values(&self) -> [f64; 25] {
+    pub fn values(&self) -> [f64; Self::N] {
         let n = |o: Option<f64>| o.unwrap_or(f64::NAN);
         [
             n(self.motion_mean[0]), n(self.motion_mean[1]), n(self.motion_mean[2]), n(self.motion_mean[3]),
@@ -101,8 +125,8 @@ impl Features {
             n(self.motion_frac[0]), n(self.motion_frac[1]), n(self.motion_frac[2]), n(self.motion_frac[3]),
             n(self.turn_sum[0]), n(self.turn_sum[1]), n(self.turn_sum[2]), n(self.turn_sum[3]),
             n(self.turn_max[0]), n(self.turn_max[1]), n(self.turn_max[2]), n(self.turn_max[3]),
-            n(self.swing), n(self.still_x_cardiac), n(self.hr_z), n(self.hr_var_z),
-            n(self.win_cov_600),
+            n(self.swing), n(self.still_x_cardiac), n(self.still_x_hrvar), n(self.hr_z),
+            n(self.hr_var_z), n(self.hr_flat_pct), n(self.win_cov_600),
         ]
     }
 }
@@ -137,15 +161,9 @@ fn deltas(grav: &[AccelSample], a: i64, b: i64) -> Vec<f64> {
         .collect()
 }
 
-/// Per-epoch features over `[start, end)`. `hr_z` and `hr_var_z` are the caller's per-night z-scores,
-/// one per epoch; a short slice leaves the tail's cardiac columns missing rather than shifting them.
-pub fn extract(
-    grav: &[AccelSample],
-    start: i64,
-    end: i64,
-    hr_z: &[Option<f64>],
-    hr_var_z: &[Option<f64>],
-) -> Vec<Features> {
+/// Per-epoch features over `[start, end)`. `card` is the caller's per-night cardiac series, one entry
+/// per epoch; a short slice leaves the tail's cardiac columns missing rather than shifting them.
+pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> Vec<Features> {
     if end <= start {
         return Vec::new();
     }
@@ -181,11 +199,13 @@ pub fn extract(
     (0..n)
         .map(|k| {
             let mid = start + k as i64 * EPOCH_S + EPOCH_S / 2;
+            let c = card.get(k).copied().unwrap_or_default();
             let mut f = Features {
                 start: start + k as i64 * EPOCH_S,
                 swing: post.get(k).and_then(|p| p.map(|p| p.swing)),
-                hr_z: hr_z.get(k).copied().flatten(),
-                hr_var_z: hr_var_z.get(k).copied().flatten(),
+                hr_z: c.hr_z,
+                hr_var_z: c.hr_var_z,
+                hr_flat_pct: c.hr_flat_pct,
                 ..Default::default()
             };
             for (w, width) in WINDOWS_S.iter().enumerate() {
@@ -214,12 +234,14 @@ pub fn extract(
                     f.turn_max[w] = Some(seg.iter().cloned().fold(f64::MIN, f64::max));
                 }
             }
-            // Stillness x cardiac, as a product rather than a branch. Stillness ramps linearly from
-            // 1 at zero motion to 0 at `night_scale` (the floored p75), so the term is the cardiac
-            // evidence that survives being still - what v2's clamp decides with an `if`.
-            if let (Some(m), Some(h)) = (f.motion_mean[0], f.hr_z) {
+            // Stillness x cardiac, as products rather than a branch. Stillness ramps linearly from
+            // 1 at zero motion to 0 at `night_scale` (the floored p75), so a term is the cardiac
+            // evidence that survives being still - what v2's clamp decides with an `if`. Both cardiac
+            // terms get one, because v2's clamp reads both.
+            if let Some(m) = f.motion_mean[0] {
                 let still = (1.0 - m / night_scale).clamp(0.0, 1.0);
-                f.still_x_cardiac = Some(still * h);
+                f.still_x_cardiac = f.hr_z.map(|h| still * h);
+                f.still_x_hrvar = f.hr_var_z.map(|h| still * h);
             }
             f
         })
@@ -260,13 +282,16 @@ mod tests {
         }
         f.swing = Some(600.0);
         f.still_x_cardiac = Some(700.0);
+        f.still_x_hrvar = Some(750.0);
         f.hr_z = Some(800.0);
         f.hr_var_z = Some(900.0);
+        f.hr_flat_pct = Some(950.0);
         f.win_cov_600 = Some(1000.0);
 
         let v = f.values();
         assert_eq!(Features::NAMES.len(), v.len());
-        let expect: [(&str, f64); 25] = [
+        assert_eq!(Features::N, v.len(), "N must be the real width, or a consumer sizes wrong");
+        let expect: [(&str, f64); Features::N] = [
             ("motion_mean_30", 100.0), ("motion_mean_120", 101.0),
             ("motion_mean_300", 102.0), ("motion_mean_600", 103.0),
             ("motion_max_30", 200.0), ("motion_max_120", 201.0),
@@ -277,8 +302,9 @@ mod tests {
             ("turn_sum_300", 402.0), ("turn_sum_600", 403.0),
             ("turn_max_30", 500.0), ("turn_max_120", 501.0),
             ("turn_max_300", 502.0), ("turn_max_600", 503.0),
-            ("swing", 600.0), ("still_x_cardiac", 700.0),
-            ("hr_z", 800.0), ("hr_var_z", 900.0), ("win_cov_600", 1000.0),
+            ("swing", 600.0), ("still_x_cardiac", 700.0), ("still_x_hrvar", 750.0),
+            ("hr_z", 800.0), ("hr_var_z", 900.0), ("hr_flat_pct", 950.0),
+            ("win_cov_600", 1000.0),
         ];
         for (i, (name, want)) in expect.iter().enumerate() {
             assert_eq!(Features::NAMES[i], *name, "column {i} is misnamed");
@@ -291,7 +317,7 @@ mod tests {
     /// feature exists for.
     #[test]
     fn motion_frac_is_measured_on_a_quiet_night_rather_than_missing() {
-        let f = extract(&still(1200), 0, 1200, &[], &[]);
+        let f = extract(&still(1200), 0, 1200, &[]);
         for w in 0..WINDOWS_S.len() {
             assert_eq!(f[20].motion_frac[w], Some(0.0),
                 "window {w}: a still night must report a measured zero fraction, not None");
@@ -302,7 +328,7 @@ mod tests {
     #[test]
     fn a_still_night_reports_zero_motion_rather_than_missing_motion() {
         let g = still(1200);
-        let f = extract(&g, 0, 1200, &[], &[]);
+        let f = extract(&g, 0, 1200, &[]);
         assert_eq!(f.len(), 40);
         let mid = &f[20];
         for w in 0..WINDOWS_S.len() {
@@ -313,7 +339,7 @@ mod tests {
 
     #[test]
     fn an_absent_stream_reports_missing_rather_than_still() {
-        let f = extract(&[], 0, 600, &[], &[]);
+        let f = extract(&[], 0, 600, &[]);
         assert_eq!(f.len(), 20);
         assert!(f[10].motion_mean.iter().all(|m| m.is_none()), "no gravity is not zero movement");
         assert!(f[10].values()[0].is_nan(), "and it must reach the vector as NaN, not 0.0");
@@ -328,7 +354,7 @@ mod tests {
         for i in 600..602 {
             g[i as usize] = s(i, 0.5, 0.0, 0.87);
         }
-        let f = extract(&g, 0, 1200, &[], &[]);
+        let f = extract(&g, 0, 1200, &[]);
         let k = 20; // the epoch containing second 600
         let short = f[k].motion_mean[0].expect("30 s window");
         let long = f[k].motion_mean[3].expect("10 min window");
@@ -349,12 +375,35 @@ mod tests {
             let a = if i % 2 == 0 { 0.5 } else { 0.0 };
             g[i as usize] = s(i, a, 0.0, (1.0f64 - a * a).sqrt());
         }
-        let hr: Vec<Option<f64>> = (0..40).map(|_| Some(2.0)).collect();
-        let f = extract(&g, 0, 1200, &hr, &[]);
+        let card: Vec<Cardiac> = (0..40)
+            .map(|_| Cardiac { hr_z: Some(2.0), hr_var_z: Some(3.0), hr_flat_pct: None })
+            .collect();
+        let f = extract(&g, 0, 1200, &card);
         let moving = f[20].still_x_cardiac.expect("moving epoch");
         let quiet = f[5].still_x_cardiac.expect("still epoch");
         assert!(quiet > moving,
             "identical hr_z, but the still epoch must carry more surviving cardiac: {quiet} vs {moving}");
+        // BOTH cardiac terms get a product. v2's clamp reads both, so one alone represents half the
+        // branch - the gap adversarial round 2 found.
+        let moving_v = f[20].still_x_hrvar.expect("moving epoch");
+        let quiet_v = f[5].still_x_hrvar.expect("still epoch");
+        assert!(quiet_v > moving_v,
+            "the hr_var half must behave the same way: {quiet_v} vs {moving_v}");
+    }
+
+    /// The deep-separating quantity is CARRIED, not invented here: a caller that supplies it must see
+    /// it in the named column, and one that does not must see missing rather than a silent zero.
+    #[test]
+    fn the_flatness_rank_reaches_its_own_column_and_is_missing_when_unsupplied() {
+        let g = still(600);
+        let card: Vec<Cardiac> =
+            (0..20).map(|k| Cardiac { hr_flat_pct: Some(k as f64 / 20.0), ..Default::default() }).collect();
+        let f = extract(&g, 0, 600, &card);
+        let col = Features::NAMES.iter().position(|n| *n == "hr_flat_pct").expect("named column");
+        assert_eq!(f[7].values()[col], 7.0 / 20.0, "the rank must land in its own column");
+
+        let bare = extract(&g, 0, 600, &[]);
+        assert!(bare[7].values()[col].is_nan(), "unsupplied must be NaN, never a rank of zero");
     }
 
     /// H2 from adversarial round 2. Two map entries either side of a dropout are adjacent in the
@@ -365,7 +414,7 @@ mod tests {
         // Still at one orientation, a 95 s hole, then still at a completely different one.
         let mut g: Vec<AccelSample> = (0..5).map(|i| s(i, 0.0, 0.0, 1.0)).collect();
         g.extend((100..105).map(|i| s(i, 1.0, 0.0, 0.0)));
-        let f = extract(&g, 0, 300, &[], &[]);
+        let f = extract(&g, 0, 300, &[]);
         let peak = f.iter().filter_map(|x| x.motion_max[3]).fold(0.0f64, f64::max);
         assert!(peak < 1e-6,
             "the gap must not be read as movement: two still stretches, peak delta {peak}");
@@ -388,7 +437,7 @@ mod tests {
                 g.push(if moved { s(t + i, 1.0, 0.0, 0.0) } else { s(t + i, 0.0, 0.0, 1.0) });
             }
         }
-        let f = extract(&g, 0, 1800, &[], &[]);
+        let f = extract(&g, 0, 1800, &[]);
         // Under MIN_SCALE_DELTAS the floor is used, so the burst cannot inflate the scale and the
         // epoch that really moved must still stand out.
         let moved_epoch = f.iter().find(|x| x.start == 1200).expect("epoch at 1200");
@@ -406,10 +455,10 @@ mod tests {
             let a = if i % 2 == 0 { 0.5 } else { 0.0 };
             g[i as usize] = s(i, a, 0.0, (1.0f64 - a * a).sqrt());
         }
-        let sorted = extract(&g, 0, 600, &[], &[]);
+        let sorted = extract(&g, 0, 600, &[]);
         let mut shuffled = g.clone();
         shuffled.reverse();
-        let out = extract(&shuffled, 0, 600, &[], &[]);
+        let out = extract(&shuffled, 0, 600, &[]);
         assert_eq!(sorted.len(), out.len());
         for (a, b) in sorted.iter().zip(&out) {
             assert_eq!(a.motion_max, b.motion_max, "epoch {} differs on unsorted input", a.start);
@@ -421,7 +470,7 @@ mod tests {
     /// without this column a fitted model reads that systematic truncation as signal.
     #[test]
     fn edge_epochs_declare_their_truncated_window() {
-        let f = extract(&still(2400), 0, 2400, &[], &[]);
+        let f = extract(&still(2400), 0, 2400, &[]);
         assert!(f[0].win_cov_600.unwrap() < 0.6, "epoch 0 has at most half a centred 10-min window");
         assert!((f[40].win_cov_600.unwrap() - 1.0).abs() < 1e-9, "the middle has a full one");
         assert!(f.last().unwrap().win_cov_600.unwrap() < 0.6, "and so does the last epoch");
@@ -434,7 +483,7 @@ mod tests {
         for i in 0..2 {
             g[i as usize] = s(i, 0.5, 0.0, 0.87);
         }
-        let f = extract(&g, 0, 1200, &[], &[]);
+        let f = extract(&g, 0, 1200, &[]);
         assert!(f[0].motion_max[0].unwrap() > 0.1, "epoch 0 sees its own burst");
         assert!(f[30].motion_max[0].unwrap() < 1e-6, "an epoch 15 min later does not");
     }
