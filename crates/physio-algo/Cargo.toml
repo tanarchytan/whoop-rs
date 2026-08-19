@@ -10,3 +10,6 @@ whoop-protocol.workspace = true
 
 [dev-dependencies]
 serde_json = "1"
+# Examples only: the corpus harnesses read a real .noopbak store, so a measurement uses the shipped
+# turn()/posture() rather than a second copy of the formula written in the harness.
+rusqlite = { version = "0.32", features = ["bundled"] }
