@@ -30,7 +30,21 @@ pub const EPOCH_S: i64 = 30;
 /// per-wearer arbitrary unit: sleeping deltas sit far below this and any real movement above it.
 pub const STILL_SCALE_FLOOR_G: f64 = 0.01;
 
-/// Centred window half-widths in seconds: 30 s, 2, 5 and 10 minutes.
+/// Fewest consecutive-second deltas before the night's p75 is trusted as a scale.
+///
+/// With a handful of deltas the p75 index sits at or near the MAXIMUM, so one real movement becomes
+/// the whole night's scale and every other epoch reads as motionless - a measured zero, not a
+/// missing one, and indistinguishable from a genuinely still night. A fragmented night (BLE
+/// dropouts leaving isolated bursts) is exactly that case; the real corpus has captures down to 3%
+/// coverage. Below this the floor is used instead, which is a conservative scale rather than a
+/// confidently wrong one.
+pub const MIN_SCALE_DELTAS: usize = 120;
+
+/// Centred window WIDTHS in seconds: 30 s, 2, 5 and 10 minutes.
+///
+/// Widths, not half-widths - `(mid - w/2, mid + w/2)` spans exactly `w`. An earlier comment here
+/// said "half-widths", which would make the long window 20 minutes and put it past where the MESA
+/// benchmark's actigraphy features stop.
 ///
 /// The short end is the epoch itself, the long end is where the MESA benchmark's actigraphy features
 /// stop. Four is enough to see a trend without making the vector mostly redundant.
@@ -156,7 +170,11 @@ pub fn extract(
     let night_scale = {
         let mut v = all.clone();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p75 = if v.is_empty() { 0.0 } else { v[(v.len() * 3 / 4).min(v.len() - 1)] };
+        let p75 = if v.len() < MIN_SCALE_DELTAS {
+            0.0
+        } else {
+            v[(v.len() * 3 / 4).min(v.len() - 1)]
+        };
         p75.max(STILL_SCALE_FLOOR_G)
     };
 
@@ -170,12 +188,12 @@ pub fn extract(
                 hr_var_z: hr_var_z.get(k).copied().flatten(),
                 ..Default::default()
             };
-            for (w, half) in WINDOWS_S.iter().enumerate() {
+            for (w, width) in WINDOWS_S.iter().enumerate() {
                 // Clamped to the span. A window running off the end does not wrap or read nothing,
                 // it is short - and how short is recorded on the longest window below.
-                let (a, b) = ((mid - half / 2).max(start), (mid + half / 2).min(end));
-                if *half == WINDOWS_S[WINDOWS_S.len() - 1] {
-                    f.win_cov_600 = Some((b - a) as f64 / *half as f64);
+                let (a, b) = ((mid - width / 2).max(start), (mid + width / 2).min(end));
+                if w == WINDOWS_S.len() - 1 {
+                    f.win_cov_600 = Some((b - a) as f64 / *width as f64);
                 }
                 let d = deltas(grav, a, b);
                 if !d.is_empty() {
@@ -188,8 +206,8 @@ pub fn extract(
                     f.motion_frac[w] = Some(over as f64 / d.len() as f64);
                 }
                 // Rotation over the same window, in epochs rather than seconds.
-                let lo = k.saturating_sub((half / 2 / EPOCH_S) as usize);
-                let hi = (k + (half / 2 / EPOCH_S) as usize + 1).min(turns.len());
+                let lo = k.saturating_sub((width / 2 / EPOCH_S) as usize);
+                let hi = (k + (width / 2 / EPOCH_S) as usize + 1).min(turns.len());
                 let seg: Vec<f64> = turns[lo..hi.max(lo)].iter().flatten().copied().collect();
                 if !seg.is_empty() {
                     f.turn_sum[w] = Some(seg.iter().sum());
@@ -351,6 +369,32 @@ mod tests {
         let peak = f.iter().filter_map(|x| x.motion_max[3]).fold(0.0f64, f64::max);
         assert!(peak < 1e-6,
             "the gap must not be read as movement: two still stretches, peak delta {peak}");
+    }
+
+    /// The MEDIUM from adversarial round 3. A night fragmented into isolated bursts leaves only a
+    /// handful of consecutive-second deltas, and p75 over a handful sits at the MAXIMUM - so one
+    /// real movement becomes the whole night's scale and every other epoch reads as a MEASURED zero.
+    /// That is worse than missing, because nothing downstream can tell it from a still night.
+    #[test]
+    fn a_fragmented_night_does_not_let_one_burst_become_the_whole_scale() {
+        // TWO widely separated 3-second bursts, so only FOUR consecutive-second deltas survive.
+        // The count matters: p75's index is `(n*3/4).min(n-1)`, which lands on the MAXIMUM at n=4
+        // and not until n is small. A first version of this test used three bursts (n=6, index 4)
+        // and passed with the guard removed - it did not reach the failure at all.
+        let mut g: Vec<AccelSample> = Vec::new();
+        for t in [0i64, 1200] {
+            for i in 0..3 {
+                let moved = t == 1200 && i == 2;
+                g.push(if moved { s(t + i, 1.0, 0.0, 0.0) } else { s(t + i, 0.0, 0.0, 1.0) });
+            }
+        }
+        let f = extract(&g, 0, 1800, &[], &[]);
+        // Under MIN_SCALE_DELTAS the floor is used, so the burst cannot inflate the scale and the
+        // epoch that really moved must still stand out.
+        let moved_epoch = f.iter().find(|x| x.start == 1200).expect("epoch at 1200");
+        assert!(moved_epoch.motion_frac[0].is_some_and(|v| v > 0.0),
+            "the epoch that genuinely moved must report a non-zero fraction, got {:?}",
+            moved_epoch.motion_frac[0]);
     }
 
     /// H1 from adversarial round 2. The binary search in `deltas` needs sorted input; the filter it
