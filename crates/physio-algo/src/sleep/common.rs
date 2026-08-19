@@ -36,7 +36,7 @@ impl ZScore {
 
 /// Flatten grouped R-R runs into `(ts, rr_ms)` pairs in emission order — the shape the V2 stager buckets by
 /// second. A run reports several beats under one whole-second anchor.
-pub(super) fn flatten_rr(runs: &[RrRun]) -> Vec<(i64, f64)> {
+pub fn flatten_rr(runs: &[RrRun]) -> Vec<(i64, f64)> {
     let mut out = Vec::new();
     for run in runs {
         for &ms in &run.intervals {

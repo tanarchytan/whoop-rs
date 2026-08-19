@@ -36,9 +36,11 @@ pub use params::Params;
 pub use detect::{band_in_bed_window, detect_sessions, detect_sessions_with, efficiency, DetectParams,
     DetectedSpan, BAND_STATE_AWAKE, BAND_STATE_EMERGING, BAND_STATE_SETTLED, DAYTIME_BAND_END_HOUR,
     DAYTIME_BAND_START_HOUR, MAX_GAP_MIN, SPARSE_GRAVITY_SPAN_FRAC};
+pub use common::flatten_rr;
 pub use v2::{emissions_prepared as emissions_v2, epoch_starts as epoch_starts_v2, prepare as prepare_v2,
     segments_of as segments_v2, stage as stage_v2, stage_prepared as stage_v2_prepared,
-    stage_with as stage_v2_with, viterbi as decode_v2, Prepared, DEEP_GATE_THRESH, STAGE_ORDER};
+    resp_regularity, stage_with as stage_v2_with, viterbi as decode_v2, Prepared, DEEP_GATE_THRESH,
+    STAGE_ORDER};
 pub use refine::{
     is_motion_dense as motion_dense, motion_density, refine as refine_wake, refine_with as refine_wake_with,
     RefineParams, MIN_DENSE_FRACTION,

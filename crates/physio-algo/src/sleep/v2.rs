@@ -347,7 +347,7 @@ fn features(
 
 /// RSA respiration regularity: tachogram → 4 Hz resample → detrend → band-limited DFT peak/sum over the
 /// 0.15–0.40 Hz band. Higher = more regular breathing. `None` when there are too few beats.
-fn resp_regularity(beats: &[(f64, f64)]) -> Option<f64> {
+pub fn resp_regularity(beats: &[(f64, f64)]) -> Option<f64> {
     if beats.len() < 12 {
         return None;
     }
