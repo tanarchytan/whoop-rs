@@ -39,7 +39,19 @@ fn main() {
     println!("{:<18} {:<26} {:>9} {:>10} {:>11} {:>11}",
         "night", "recipe", "wake rec", "wake spec", "bout COV", "we call");
 
-    for name in ["david-20260816", "reader-20260815"] {
+    // Discovered, not listed. A hardcoded roster silently ignores a night someone adds, and this
+    // set is the acceptance gate - a night missing from it is a check that does not run.
+    let mut names: Vec<String> = std::fs::read_dir(ROOT)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("truth.csv").exists())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    println!("acceptance set: {} nights - {}\n", names.len(), names.join(", "));
+    for name in &names {
+        let name = name.as_str();
         let d = Path::new(ROOT).join(name);
         let meta = rows(&d.join("meta.txt"));
         let m: Vec<f64> = fs::read_to_string(d.join("meta.txt"))
