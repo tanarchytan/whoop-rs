@@ -378,7 +378,7 @@ fn select_power(train: &Set) -> f64 {
     let mut best = (POWERS[0], f64::MIN);
     for p in POWERS {
         let w = fit(&dx, &iy, p);
-        let k = score_decoded(&w, &inner_val, &m, &sd, &[]).0;
+        let k = score_decoded(&w, &inner_val, &m, &sd, &[]).kappa;
         println!("  power {p:.2}  inner-val kappa {k:.4}");
         if k > best.1 {
             best = (p, k);
@@ -404,8 +404,7 @@ fn nights_of(s: &Set) -> Vec<Vec<usize>> {
 /// `pred` is handed one night's row indices IN ORDER and returns one call per row, so an arm that
 /// decodes a path sees the night whole while an arm that calls each epoch alone still works. Only
 /// labelled rows are scored; the rest are context for the decode.
-fn score_rows(s: &Set, pred: impl Fn(&[usize]) -> Vec<usize>)
-    -> (f64, f64, f64, [f64; CLASSES], [f64; CLASSES]) {
+fn score_rows(s: &Set, pred: impl Fn(&[usize]) -> Vec<usize>) -> Scored {
     let (mut ks, mut rs, mut ss) = (Vec::new(), Vec::new(), Vec::new());
     // Per-class call rate AND truth rate. A kappa alone cannot show that a class is never predicted.
     let (mut called, mut truth_n) = ([0usize; CLASSES], [0usize; CLASSES]);
@@ -452,7 +451,14 @@ fn score_rows(s: &Set, pred: impl Fn(&[usize]) -> Vec<usize>)
         }
         o
     };
-    (med(ks), med(rs), med(ss), frac(called), frac(truth_n))
+    Scored {
+        kappa: med(ks.clone()),
+        wake_recall: med(rs),
+        wake_spec: med(ss),
+        called: frac(called),
+        truth: frac(truth_n),
+        per_night: ks,
+    }
 }
 
 /// Class scores for one row.
@@ -465,8 +471,7 @@ fn scores(w: &[Vec<f64>], row: &[f64]) -> [f64; CLASSES] {
 }
 
 /// The fitted model, each epoch called alone.
-fn score(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: &[usize])
-    -> (f64, f64, f64, [f64; CLASSES], [f64; CLASSES]) {
+fn score(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: &[usize]) -> Scored {
     score_rows(s, |rows| {
         rows.iter().map(|i| predict(w, &design(&s.x[*i], m, sd, drop))).collect()
     })
@@ -476,7 +481,7 @@ fn score(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: &[usi
 /// transition matrix. Stages are strongly autocorrelated, so scoring a decoded baseline against
 /// undecoded emissions measures the decode rather than the model.
 fn score_decoded(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: &[usize])
-    -> (f64, f64, f64, [f64; CLASSES], [f64; CLASSES]) {
+    -> Scored {
     // Our class index is [wake, light, deep, rem]; the decoder's columns are STAGE_ORDER.
     let to_stage_order: [usize; CLASSES] =
         std::array::from_fn(|col| stage_idx(STAGE_ORDER[col]));
@@ -505,15 +510,39 @@ fn col(name: &str) -> usize {
         .unwrap_or_else(|| panic!("{name} must exist in Features::NAMES or the ablation compares nothing"))
 }
 
-type Scored = (f64, f64, f64, [f64; CLASSES], [f64; CLASSES]);
+/// One arm's score on one cohort. `per_night` is kept because the medians of two arms are two
+/// SEPARATE order statistics: subtracting them is a rank artefact, not a per-night effect, and it
+/// reported a 0.035 kappa loss where the paired difference is 0.0008 and inside the noise.
+struct Scored {
+    kappa: f64,
+    wake_recall: f64,
+    wake_spec: f64,
+    called: [f64; CLASSES],
+    truth: [f64; CLASSES],
+    per_night: Vec<f64>,
+}
+
+/// Mean paired difference and the delta this cohort can resolve, `1.96 * sd / sqrt(n)`. Anything
+/// inside the bar is noise, whatever the two medians say.
+fn paired(a: &Scored, b: &Scored) -> (f64, f64, usize) {
+    let d: Vec<f64> =
+        a.per_night.iter().zip(&b.per_night).map(|(x, y)| y - x).collect();
+    let n = d.len();
+    if n < 2 {
+        return (f64::NAN, f64::NAN, n);
+    }
+    let m = d.iter().sum::<f64>() / n as f64;
+    let sd = (d.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
+    (m, 1.96 * sd / (n as f64).sqrt(), n)
+}
 
 fn header() {
     println!("  {:<18} {:>6} {:>7} {:>6}   {:<28} truth  W/L/D/R %", "cohort", "kappa",
              "wake r", "spec", "we call  W/L/D/R %");
 }
 
-fn show(name: &str, r: Scored) {
-    let (k, rec, sp, call, tru) = r;
+fn show(name: &str, r: &Scored) {
+    let (k, rec, sp, call, tru) = (r.kappa, r.wake_recall, r.wake_spec, r.called, r.truth);
     let pc = |v: [f64; CLASSES]| {
         format!("{:>5.1}/{:>4.1}/{:>4.1}/{:>4.1}", 100.0 * v[0], 100.0 * v[1],
                 100.0 * v[2], 100.0 * v[3])
@@ -564,9 +593,14 @@ fn main() {
     // to read the fitted numbers against, only a cross-statistic comparison that looks like one.
     println!("\n=== BASELINE: the shipped recipe, scored by THIS file's statistic on THESE rows");
     header();
-    show("dreamt (FIT)", score_rows(&train, |r| r.iter().map(|i| train.v2[*i]).collect()));
-    for (name, h) in &held {
-        show(&format!("{name} (HELD)"), score_rows(h, |r| r.iter().map(|i| h.v2[*i]).collect()));
+    let base: Vec<Scored> = std::iter::once(score_rows(&train, |r| {
+        r.iter().map(|i| train.v2[*i]).collect()
+    }))
+    .chain(held.iter().map(|(_, h)| score_rows(h, |r| r.iter().map(|i| h.v2[*i]).collect())))
+    .collect();
+    show("dreamt (FIT)", &base[0]);
+    for ((name, _), sc) in held.iter().zip(&base[1..]) {
+        show(&format!("{name} (HELD)"), sc);
     }
 
     // Both interaction columns. v2's clamp reads the HR-level AND the HR-variability term, so
@@ -578,27 +612,51 @@ fn main() {
     let arms: [(&str, &[usize]); 2] =
         [("MAIN (interaction withheld)", &int_cols), ("MAIN + INTERACTION", &[])];
 
+    // Kept per arm and per decode so the interaction is judged by a PAIRED per-night difference.
+    let mut by_arm: Vec<[Vec<Scored>; 2]> = Vec::new();
     for (label, drop) in arms {
         let dx: Vec<Vec<f64>> = fit_x.iter().map(|r| design(r, &m, &sd, drop)).collect();
         let w = fit(&dx, &fit_y, power);
-        for (how, decoded) in [("per-epoch", false), ("VITERBI-decoded", true)] {
+        let mut both: [Vec<Scored>; 2] = [Vec::new(), Vec::new()];
+        for (d, (how, decoded)) in [("per-epoch", false), ("VITERBI-decoded", true)].iter().enumerate() {
             println!("=== {label}, {how}");
             header();
             let run = |s: &Set| {
-                if decoded {
+                if *decoded {
                     score_decoded(&w, s, &m, &sd, drop)
                 } else {
                     score(&w, s, &m, &sd, drop)
                 }
             };
-            show("dreamt (FIT)", run(&train));
-            for (name, h) in &held {
-                show(&format!("{name} (HELD)"), run(h));
+            both[d].push(run(&train));
+            for (_, h) in &held {
+                both[d].push(run(h));
+            }
+            show("dreamt (FIT)", &both[d][0]);
+            for ((name, _), sc) in held.iter().zip(&both[d][1..]) {
+                show(&format!("{name} (HELD)"), sc);
             }
             println!();
         }
+        by_arm.push(both);
     }
-    println!("The difference between the two arms IS the interaction's contribution: identical data,");
-    println!("identical optimiser, the same two columns zeroed. Held out is the only result here.");
+
+    // The interaction's contribution, per night rather than between two medians. Two arms' medians
+    // are separate order statistics and their difference moves when ONE night changes rank.
+    println!("=== THE INTERACTION, as a paired per-night difference (MAIN+INT minus MAIN)");
+    println!("  {:<18} {:>10} {:>10} {:>6}   verdict", "cohort", "mean d", "bar +/-", "n");
+    let names: Vec<String> = std::iter::once("dreamt (FIT)".to_string())
+        .chain(held.iter().map(|(n, _)| format!("{n} (HELD)")))
+        .collect();
+    for (d, how) in ["per-epoch", "VITERBI-decoded"].iter().enumerate() {
+        println!("  {how}");
+        for (i, name) in names.iter().enumerate() {
+            let (mean, bar, n) = paired(&by_arm[0][d][i], &by_arm[1][d][i]);
+            let verdict = if mean.abs() > bar { "RESOLVED" } else { "inside the bar - noise" };
+            println!("  {name:<18} {mean:>+10.4} {bar:>10.4} {n:>6}   {verdict}");
+        }
+    }
+    println!("\nThe paired row is the interaction's contribution. A difference of medians is not:");
+    println!("it reported -0.035 where the paired mean is -0.0008 against a +/-0.0068 bar.");
     println!("Read the fit against the BASELINE at matching decode, never across the two.");
 }
