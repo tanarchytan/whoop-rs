@@ -668,6 +668,60 @@ mod tests {
         assert_eq!(clamped, awake_of(f64::MAX), "any ceiling above the data clamps identically");
     }
 
+    /// A still, hot night, optionally carrying R-R. The intervals swing at 0.25 Hz because a flat
+    /// tachogram has no power and yields no respiration term at all. R-R feeds only `resp_reg`, so
+    /// the two nights differ in nothing else.
+    fn still_hot_night(with_rr: bool) -> SleepInput {
+        let start = 1_749_513_600i64;
+        let hr: Vec<HrSample> = (0..600)
+            .map(|i| HrSample { ts: start + i, bpm: if i < 300 { 50 } else { 90 } })
+            .collect();
+        let accel: Vec<AccelSample> =
+            (0..600).map(|i| AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 }).collect();
+        let rr = if with_rr {
+            (0..600)
+                .map(|i| {
+                    let ms = 1000.0 + 40.0 * (2.0 * PI * 0.25 * i as f64).sin();
+                    RrRun { ts: start + i, intervals: vec![ms as u16] }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        SleepInput { start, end: start + 600, hr, rr, accel }
+    }
+
+    /// Pins BOTH operands of the R-R clamp exemption. Under SHIPPED the exemption is off, so a still
+    /// epoch is clamped whether or not R-R backs it; under the candidate the R-R night keeps its
+    /// cardiac term. Turning the `&&` into an `||` makes SHIPPED behave as the candidate.
+    #[test]
+    fn the_rr_exemption_is_off_under_shipped_and_reads_the_respiration_term_under_the_candidate() {
+        const { assert!(!Params::SHIPPED.clamp_only_without_rr) };
+
+        let awake_of = |input: &SleepInput, p: &Params| {
+            emissions_prepared(&prepare(input, p), p)
+                .last()
+                .map(|e| e[AWAKE])
+                .expect("emissions for a 10-minute night")
+        };
+        let (with_rr, without_rr) = (still_hot_night(true), still_hot_night(false));
+
+        let prep = prepare(&with_rr, &Params::SHIPPED);
+        assert!(prep.feats.last().expect("epochs").resp_reg.is_some(),
+            "the R-R night must actually produce a respiration term or this proves nothing");
+        assert!(prepare(&without_rr, &Params::SHIPPED).feats.last().expect("epochs").resp_reg.is_none());
+
+        assert_eq!(
+            awake_of(&with_rr, &Params::SHIPPED), awake_of(&without_rr, &Params::SHIPPED),
+            "under SHIPPED the presence of R-R must not change whether a still epoch is clamped");
+
+        let cand = Params { clamp_only_without_rr: true, ..Params::SHIPPED };
+        assert!(awake_of(&with_rr, &cand) > awake_of(&with_rr, &Params::SHIPPED),
+            "the candidate must let an R-R-backed still epoch keep its awake cardiac term");
+        assert_eq!(awake_of(&without_rr, &cand), awake_of(&without_rr, &Params::SHIPPED),
+            "with no R-R there is nothing to exempt, so the candidate is SHIPPED");
+    }
+
     #[test]
     fn an_epoch_without_gravity_reports_no_motion_reading() {
         let feats = half_blind_epochs();
