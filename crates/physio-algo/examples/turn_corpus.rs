@@ -54,6 +54,8 @@ fn pct(v: &[f64], q: f64) -> f64 {
 
 /// Peak within-epoch delta per axis plus the norm, so all four read off identical epochs.
 /// Index 0..2 are x/y/z, index 3 is the shipped norm.
+// Four parallel output vectors written at the same index; a zip would need four iterators.
+#[allow(clippy::needless_range_loop)]
 fn jerk_axes(grav: &[AccelSample], w0: i64, n: usize) -> [Vec<Option<f64>>; 4] {
     let mut out = [vec![None; n], vec![None; n], vec![None; n], vec![None; n]];
     let mut i = 0usize;
@@ -103,7 +105,7 @@ fn labelled_nights() {
         .filter(|p| p.join("truth.csv").exists() && p.join("gravity.csv").exists())
         .collect();
     names.sort();
-    println!("  {:<18} {:>7} {:>8} {:>8}   {}", "night", "epochs", "turn", "jerk", "verdict");
+    println!("  {:<18} {:>7} {:>8} {:>8}   verdict", "night", "epochs", "turn", "jerk");
     for dir in names {
         let name = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
         let Ok(gtext) = std::fs::read_to_string(dir.join("gravity.csv")) else { continue };

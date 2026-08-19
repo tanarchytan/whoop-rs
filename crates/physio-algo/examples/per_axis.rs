@@ -58,6 +58,8 @@ fn median(v: &[f64]) -> f64 {
 
 /// Peak per-second absolute delta on each axis, plus the norm, per epoch.
 /// Returns `[x, y, z, norm]` series so all four are read off identical epochs.
+// Four parallel output vectors written at the same index; a zip would need four iterators.
+#[allow(clippy::needless_range_loop)]
 fn axis_series(grav: &[AccelSample], w0: i64, n: usize) -> [Vec<Option<f64>>; 4] {
     let mut out = [vec![None; n], vec![None; n], vec![None; n], vec![None; n]];
     let mut by_sec: std::collections::HashMap<i64, (f64, f64, f64, f64)> = Default::default();

@@ -58,22 +58,28 @@ pub struct Features {
     /// Cardiac, carried through from the caller so this module stays motion-only in what it computes.
     pub hr_z: Option<f64>,
     pub hr_var_z: Option<f64>,
+    /// Fraction of the LONGEST window that lies inside the span, 0..1.
+    ///
+    /// The first and last ~10 epochs of a night cannot have a full 10-minute centred window, so
+    /// their long-window features are computed on less data and are not distributed like the
+    /// middle's. Without this column a fitted model sees that systematic edge bias as signal.
+    pub win_cov_600: Option<f64>,
 }
 
 impl Features {
     /// Column names, index-for-index with [`Features::values`].
-    pub const NAMES: [&'static str; 24] = [
+    pub const NAMES: [&'static str; 25] = [
         "motion_mean_30", "motion_mean_120", "motion_mean_300", "motion_mean_600",
         "motion_max_30", "motion_max_120", "motion_max_300", "motion_max_600",
         "motion_frac_30", "motion_frac_120", "motion_frac_300", "motion_frac_600",
         "turn_sum_30", "turn_sum_120", "turn_sum_300", "turn_sum_600",
         "turn_max_30", "turn_max_120", "turn_max_300", "turn_max_600",
-        "swing", "still_x_cardiac", "hr_z", "hr_var_z",
+        "swing", "still_x_cardiac", "hr_z", "hr_var_z", "win_cov_600",
     ];
 
     /// The vector, in [`Features::NAMES`] order. `None` becomes `f64::NAN` so a caller must decide
     /// what missing means rather than inheriting a silent zero.
-    pub fn values(&self) -> [f64; 24] {
+    pub fn values(&self) -> [f64; 25] {
         let n = |o: Option<f64>| o.unwrap_or(f64::NAN);
         [
             n(self.motion_mean[0]), n(self.motion_mean[1]), n(self.motion_mean[2]), n(self.motion_mean[3]),
@@ -82,6 +88,7 @@ impl Features {
             n(self.turn_sum[0]), n(self.turn_sum[1]), n(self.turn_sum[2]), n(self.turn_sum[3]),
             n(self.turn_max[0]), n(self.turn_max[1]), n(self.turn_max[2]), n(self.turn_max[3]),
             n(self.swing), n(self.still_x_cardiac), n(self.hr_z), n(self.hr_var_z),
+            n(self.win_cov_600),
         ]
     }
 }
@@ -103,25 +110,17 @@ fn deltas(grav: &[AccelSample], a: i64, b: i64) -> Vec<f64> {
         e.2 += g.z;
         e.3 += 1.0;
     }
-    let seq: Vec<(f64, f64, f64)> =
-        per.values().map(|v| (v.0 / v.3, v.1 / v.3, v.2 / v.3)).collect();
+    let seq: Vec<(i64, f64, f64, f64)> =
+        per.iter().map(|(t, v)| (*t, v.0 / v.3, v.1 / v.3, v.2 / v.3)).collect();
+    // Only CONSECUTIVE seconds. Two map entries either side of a dropout are adjacent in the map but
+    // minutes apart in time, and pairing them attributes a whole gap's movement to one second - a
+    // large delta indistinguishable from real motion, flowing into motion_max and the night scale.
     seq.windows(2)
+        .filter(|w| w[1].0 - w[0].0 == 1)
         .map(|w| {
-            ((w[0].0 - w[1].0).powi(2) + (w[0].1 - w[1].1).powi(2) + (w[0].2 - w[1].2).powi(2)).sqrt()
+            ((w[0].1 - w[1].1).powi(2) + (w[0].2 - w[1].2).powi(2) + (w[0].3 - w[1].3).powi(2)).sqrt()
         })
         .collect()
-}
-
-/// NOT `crate::stats::median`. That one returns 0.0 on empty and interpolates the middle pair; this
-/// returns NaN on empty deliberately, so an absent stream cannot masquerade as a real scale. Do not
-/// "de-duplicate" these two without changing the callers.
-fn median(v: &[f64]) -> f64 {
-    if v.is_empty() {
-        return f64::NAN;
-    }
-    let mut s = v.to_vec();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    s[s.len() / 2]
 }
 
 /// Per-epoch features over `[start, end)`. `hr_z` and `hr_var_z` are the caller's per-night z-scores,
@@ -136,6 +135,17 @@ pub fn extract(
     if end <= start {
         return Vec::new();
     }
+    // Sorted DEFENSIVELY, the way `v2::prepare` does, rather than trusting a doc comment. `deltas`
+    // binary-searches and `posture_series` walks a forward cursor, so both silently return the wrong
+    // range on unsorted input - no panic, no NaN, just wrong numbers. A caller merging two accel
+    // sources would hit that, and nothing downstream could tell.
+    let owned: Vec<AccelSample>;
+    let grav = if grav.windows(2).all(|w| w[0].ts <= w[1].ts) {
+        grav
+    } else {
+        owned = { let mut v = grav.to_vec(); v.sort_by_key(|g| g.ts); v };
+        &owned
+    };
     let n = ((end - start) / EPOCH_S) as usize;
     let post: Vec<Option<Posture>> = posture_series(grav, start, end, EPOCH_S);
     let turns = turn_series(&post);
@@ -161,7 +171,12 @@ pub fn extract(
                 ..Default::default()
             };
             for (w, half) in WINDOWS_S.iter().enumerate() {
-                let (a, b) = (mid - half / 2, mid + half / 2);
+                // Clamped to the span. A window running off the end does not wrap or read nothing,
+                // it is short - and how short is recorded on the longest window below.
+                let (a, b) = ((mid - half / 2).max(start), (mid + half / 2).min(end));
+                if *half == WINDOWS_S[WINDOWS_S.len() - 1] {
+                    f.win_cov_600 = Some((b - a) as f64 / *half as f64);
+                }
                 let d = deltas(grav, a, b);
                 if !d.is_empty() {
                     f.motion_mean[w] = Some(d.iter().sum::<f64>() / d.len() as f64);
@@ -229,10 +244,11 @@ mod tests {
         f.still_x_cardiac = Some(700.0);
         f.hr_z = Some(800.0);
         f.hr_var_z = Some(900.0);
+        f.win_cov_600 = Some(1000.0);
 
         let v = f.values();
         assert_eq!(Features::NAMES.len(), v.len());
-        let expect: [(&str, f64); 24] = [
+        let expect: [(&str, f64); 25] = [
             ("motion_mean_30", 100.0), ("motion_mean_120", 101.0),
             ("motion_mean_300", 102.0), ("motion_mean_600", 103.0),
             ("motion_max_30", 200.0), ("motion_max_120", 201.0),
@@ -244,7 +260,7 @@ mod tests {
             ("turn_max_30", 500.0), ("turn_max_120", 501.0),
             ("turn_max_300", 502.0), ("turn_max_600", 503.0),
             ("swing", 600.0), ("still_x_cardiac", 700.0),
-            ("hr_z", 800.0), ("hr_var_z", 900.0),
+            ("hr_z", 800.0), ("hr_var_z", 900.0), ("win_cov_600", 1000.0),
         ];
         for (i, (name, want)) in expect.iter().enumerate() {
             assert_eq!(Features::NAMES[i], *name, "column {i} is misnamed");
@@ -321,6 +337,50 @@ mod tests {
         let quiet = f[5].still_x_cardiac.expect("still epoch");
         assert!(quiet > moving,
             "identical hr_z, but the still epoch must carry more surviving cardiac: {quiet} vs {moving}");
+    }
+
+    /// H2 from adversarial round 2. Two map entries either side of a dropout are adjacent in the
+    /// BTreeMap but minutes apart in time; pairing them attributed a whole gap's movement to one
+    /// second, as a large delta indistinguishable from real motion.
+    #[test]
+    fn a_dropout_does_not_manufacture_one_enormous_delta() {
+        // Still at one orientation, a 95 s hole, then still at a completely different one.
+        let mut g: Vec<AccelSample> = (0..5).map(|i| s(i, 0.0, 0.0, 1.0)).collect();
+        g.extend((100..105).map(|i| s(i, 1.0, 0.0, 0.0)));
+        let f = extract(&g, 0, 300, &[], &[]);
+        let peak = f.iter().filter_map(|x| x.motion_max[3]).fold(0.0f64, f64::max);
+        assert!(peak < 1e-6,
+            "the gap must not be read as movement: two still stretches, peak delta {peak}");
+    }
+
+    /// H1 from adversarial round 2. The binary search in `deltas` needs sorted input; the filter it
+    /// replaced did not. Unsorted input must give the SAME answer, not a silently wrong one.
+    #[test]
+    fn unsorted_input_gives_the_same_answer_rather_than_a_silently_wrong_one() {
+        let mut g = still(600);
+        for i in 300..330 {
+            let a = if i % 2 == 0 { 0.5 } else { 0.0 };
+            g[i as usize] = s(i, a, 0.0, (1.0f64 - a * a).sqrt());
+        }
+        let sorted = extract(&g, 0, 600, &[], &[]);
+        let mut shuffled = g.clone();
+        shuffled.reverse();
+        let out = extract(&shuffled, 0, 600, &[], &[]);
+        assert_eq!(sorted.len(), out.len());
+        for (a, b) in sorted.iter().zip(&out) {
+            assert_eq!(a.motion_max, b.motion_max, "epoch {} differs on unsorted input", a.start);
+            assert_eq!(a.motion_mean, b.motion_mean);
+        }
+    }
+
+    /// M3 from adversarial round 2. An edge epoch cannot have a full 10-minute centred window, and
+    /// without this column a fitted model reads that systematic truncation as signal.
+    #[test]
+    fn edge_epochs_declare_their_truncated_window() {
+        let f = extract(&still(2400), 0, 2400, &[], &[]);
+        assert!(f[0].win_cov_600.unwrap() < 0.6, "epoch 0 has at most half a centred 10-min window");
+        assert!((f[40].win_cov_600.unwrap() - 1.0).abs() < 1e-9, "the middle has a full one");
+        assert!(f.last().unwrap().win_cov_600.unwrap() < 0.6, "and so does the last epoch");
     }
 
     #[test]

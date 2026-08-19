@@ -212,7 +212,8 @@ fn main() {
     println!("AUC of wake over sleep, per epoch. 0.5 is a coin. Per cohort, never pooled.\n");
     for set in SETS {
         let dirs = dirs_of(set);
-        let named: [(&str, fn(&Move) -> Option<f64>); 7] = [
+        type Getter = (&'static str, fn(&Move) -> Option<f64>);
+        let named: [Getter; 7] = [
             ("jerk (SHIPPED)", |m| m.jerk),
             ("move_frac (SHIPPED)", |m| m.move_frac),
             ("swing", |m| m.swing),
