@@ -14,6 +14,7 @@ mod common;
 
 use common::{dirs_of, read_accel, read_hr, read_meta, read_truth};
 
+use physio_algo::sleep::movement::{axis_agreement_series, movement_series};
 use physio_algo::sleep::posture::{posture_series, turn_series, Posture};
 use physio_algo::sleep::{AccelSample, HrSample};
 
@@ -37,6 +38,11 @@ struct Move {
     /// Angle from this night's own median sleeping orientation. Self-calibrating, so it needs no
     /// reference capture and survives the band being re-mounted.
     off_posture: Option<f64>,
+    /// Share of within-epoch motion on its single loudest axis. 1/3 isotropic, 1 planar.
+    anisotropy: Option<f64>,
+    /// Angle between this epoch's rotation axis and the previous one. Low = turning the same way
+    /// twice, which a repetitive arm swing does and a restless sleeper does not.
+    axis_agree: Option<f64>,
 }
 
 fn auc(pos: &[f64], neg: &[f64]) -> Option<f64> {
@@ -162,6 +168,8 @@ fn features(hr: &[HrSample], grav: &[AccelSample], w0: i64, n: usize) -> Vec<Mov
     let post: Vec<Option<Posture>> = posture_series(grav, w0, w0 + n as i64 * EPOCH, EPOCH);
     let turns = turn_series(&post);
     let (jerks, fracs) = jerk_series(grav, w0, n);
+    let mv = movement_series(grav, &post, w0, w0 + n as i64 * EPOCH, EPOCH);
+    let agree = axis_agreement_series(&mv);
     let mut out: Vec<Move> = (0..n)
         .map(|k| Move {
             jerk: jerks.get(k).copied().flatten(),
@@ -169,6 +177,8 @@ fn features(hr: &[HrSample], grav: &[AccelSample], w0: i64, n: usize) -> Vec<Mov
             swing: post.get(k).and_then(|p| p.map(|p| p.swing)),
             turn: turns.get(k).copied().flatten(),
             off_posture: None,
+            anisotropy: mv.get(k).and_then(|m| m.anisotropy),
+            axis_agree: agree.get(k).copied().flatten(),
         })
         .collect();
     // The reference is this night's own median sleeping orientation, so it is available at runtime
@@ -202,12 +212,14 @@ fn main() {
     println!("AUC of wake over sleep, per epoch. 0.5 is a coin. Per cohort, never pooled.\n");
     for set in SETS {
         let dirs = dirs_of(set);
-        let named: [(&str, fn(&Move) -> Option<f64>); 5] = [
+        let named: [(&str, fn(&Move) -> Option<f64>); 7] = [
             ("jerk (SHIPPED)", |m| m.jerk),
             ("move_frac (SHIPPED)", |m| m.move_frac),
             ("swing", |m| m.swing),
             ("turn", |m| m.turn),
             ("off_posture", |m| m.off_posture),
+            ("anisotropy (3-axis)", |m| m.anisotropy),
+            ("axis_agree (3-axis)", |m| m.axis_agree),
         ];
         let mut per_feature: Vec<Vec<f64>> = vec![Vec::new(); named.len()];
         // type -> (wake epochs, total epochs), pooled across nights for the rate table.

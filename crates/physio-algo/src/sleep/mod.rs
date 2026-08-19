@@ -22,6 +22,7 @@ mod input;
 mod mainnight;
 pub mod hrv_bands;
 pub mod metrics;
+pub mod movement;
 pub mod params;
 pub mod posture;
 mod refine;
