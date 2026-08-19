@@ -62,32 +62,41 @@ pub struct Features {
 
 impl Features {
     /// Column names, index-for-index with [`Features::values`].
-    pub const NAMES: [&'static str; 20] = [
+    pub const NAMES: [&'static str; 24] = [
         "motion_mean_30", "motion_mean_120", "motion_mean_300", "motion_mean_600",
         "motion_max_30", "motion_max_120", "motion_max_300", "motion_max_600",
         "motion_frac_30", "motion_frac_120", "motion_frac_300", "motion_frac_600",
         "turn_sum_30", "turn_sum_120", "turn_sum_300", "turn_sum_600",
-        "turn_max_600", "swing", "still_x_cardiac", "hr_z",
+        "turn_max_30", "turn_max_120", "turn_max_300", "turn_max_600",
+        "swing", "still_x_cardiac", "hr_z", "hr_var_z",
     ];
 
     /// The vector, in [`Features::NAMES`] order. `None` becomes `f64::NAN` so a caller must decide
     /// what missing means rather than inheriting a silent zero.
-    pub fn values(&self) -> [f64; 20] {
+    pub fn values(&self) -> [f64; 24] {
         let n = |o: Option<f64>| o.unwrap_or(f64::NAN);
         [
             n(self.motion_mean[0]), n(self.motion_mean[1]), n(self.motion_mean[2]), n(self.motion_mean[3]),
             n(self.motion_max[0]), n(self.motion_max[1]), n(self.motion_max[2]), n(self.motion_max[3]),
             n(self.motion_frac[0]), n(self.motion_frac[1]), n(self.motion_frac[2]), n(self.motion_frac[3]),
             n(self.turn_sum[0]), n(self.turn_sum[1]), n(self.turn_sum[2]), n(self.turn_sum[3]),
-            n(self.turn_max[3]), n(self.swing), n(self.still_x_cardiac), n(self.hr_z),
+            n(self.turn_max[0]), n(self.turn_max[1]), n(self.turn_max[2]), n(self.turn_max[3]),
+            n(self.swing), n(self.still_x_cardiac), n(self.hr_z), n(self.hr_var_z),
         ]
     }
 }
 
 /// Per-second gravity means over `[a, b)`, and the deltas between them.
+///
+/// `grav` must be sorted by `ts` - the same contract `posture_series` states. The range is found by
+/// binary search rather than by filtering the whole slice: this is called once per epoch per window,
+/// so a full rescan makes the cost quadratic in night length and multi-day bridged sessions much
+/// worse than a linear extrapolation suggests.
 fn deltas(grav: &[AccelSample], a: i64, b: i64) -> Vec<f64> {
+    let lo = grav.partition_point(|g| g.ts < a);
+    let hi = grav.partition_point(|g| g.ts < b);
     let mut per: std::collections::BTreeMap<i64, (f64, f64, f64, f64)> = Default::default();
-    for g in grav.iter().filter(|g| g.ts >= a && g.ts < b) {
+    for g in grav[lo..hi].iter() {
         let e = per.entry(g.ts).or_insert((0.0, 0.0, 0.0, 0.0));
         e.0 += g.x;
         e.1 += g.y;
@@ -103,6 +112,9 @@ fn deltas(grav: &[AccelSample], a: i64, b: i64) -> Vec<f64> {
         .collect()
 }
 
+/// NOT `crate::stats::median`. That one returns 0.0 on empty and interpolates the middle pair; this
+/// returns NaN on empty deliberately, so an absent stream cannot masquerade as a real scale. Do not
+/// "de-duplicate" these two without changing the callers.
 fn median(v: &[f64]) -> f64 {
     if v.is_empty() {
         return f64::NAN;
@@ -131,7 +143,6 @@ pub fn extract(
     // The night's own scale, floored. p75 rather than the median because half a quiet night's
     // deltas are identically zero and a median of zero normalises nothing.
     let all = deltas(grav, start, end);
-    let night_med = median(&all);
     let night_scale = {
         let mut v = all.clone();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -155,10 +166,11 @@ pub fn extract(
                 if !d.is_empty() {
                     f.motion_mean[w] = Some(d.iter().sum::<f64>() / d.len() as f64);
                     f.motion_max[w] = Some(d.iter().cloned().fold(f64::MIN, f64::max));
-                    if night_med.is_finite() && night_med > 0.0 {
-                        let over = d.iter().filter(|x| **x > night_med).count();
-                        f.motion_frac[w] = Some(over as f64 / d.len() as f64);
-                    }
+                    // Against the FLOORED scale, not the raw median. A quiet night's median delta
+                    // is exactly 0.0, so the old `night_med > 0.0` guard left motion_frac missing on
+                    // every epoch of precisely the nights this feature exists for.
+                    let over = d.iter().filter(|x| **x > night_scale).count();
+                    f.motion_frac[w] = Some(over as f64 / d.len() as f64);
                 }
                 // Rotation over the same window, in epochs rather than seconds.
                 let lo = k.saturating_sub((half / 2 / EPOCH_S) as usize);
@@ -169,9 +181,9 @@ pub fn extract(
                     f.turn_max[w] = Some(seg.iter().cloned().fold(f64::MIN, f64::max));
                 }
             }
-            // Stillness x cardiac, as a product rather than a branch. Stillness is 1 when the epoch
-            // is at or below the night's median motion and 0 above it, so the term is the cardiac
-            // evidence that survives being still - exactly what v2's clamp decides with an `if`.
+            // Stillness x cardiac, as a product rather than a branch. Stillness ramps linearly from
+            // 1 at zero motion to 0 at `night_scale` (the floored p75), so the term is the cardiac
+            // evidence that survives being still - what v2's clamp decides with an `if`.
             if let (Some(m), Some(h)) = (f.motion_mean[0], f.hr_z) {
                 let still = (1.0 - m / night_scale).clamp(0.0, 1.0);
                 f.still_x_cardiac = Some(still * h);
@@ -194,11 +206,63 @@ mod tests {
         (0..n).map(|i| s(i, 0.0, 0.0, 1.0)).collect()
     }
 
+    /// The failure this prevents: a fitted weight vector silently transposed against the wrong
+    /// column, which no test of the model's accuracy would ever catch.
+    ///
+    /// The first version of this test asserted only `NAMES.len() == values().len()`, i.e. `24 == 24`.
+    /// That would have passed with `swing` and `still_x_cardiac` swapped, with `turn_max[0]` emitted
+    /// where `turn_max_600` is named, or with a field wholly omitted and a wrong one appended. It
+    /// tested the one thing that could not go wrong. Every field now carries a UNIQUE marker value
+    /// and each is asserted against its own name.
     #[test]
-    fn names_and_values_are_the_same_length_and_order() {
-        // The failure this prevents: a fitted weight vector silently transposed against the wrong
-        // column, which no test of the model's accuracy would ever catch.
-        assert_eq!(Features::NAMES.len(), Features::default().values().len());
+    fn every_value_lands_in_the_column_its_name_claims() {
+        let mut f = Features::default();
+        // Distinct per field AND per window, so any transposition changes a number.
+        for w in 0..WINDOWS_S.len() {
+            f.motion_mean[w] = Some(100.0 + w as f64);
+            f.motion_max[w] = Some(200.0 + w as f64);
+            f.motion_frac[w] = Some(300.0 + w as f64);
+            f.turn_sum[w] = Some(400.0 + w as f64);
+            f.turn_max[w] = Some(500.0 + w as f64);
+        }
+        f.swing = Some(600.0);
+        f.still_x_cardiac = Some(700.0);
+        f.hr_z = Some(800.0);
+        f.hr_var_z = Some(900.0);
+
+        let v = f.values();
+        assert_eq!(Features::NAMES.len(), v.len());
+        let expect: [(&str, f64); 24] = [
+            ("motion_mean_30", 100.0), ("motion_mean_120", 101.0),
+            ("motion_mean_300", 102.0), ("motion_mean_600", 103.0),
+            ("motion_max_30", 200.0), ("motion_max_120", 201.0),
+            ("motion_max_300", 202.0), ("motion_max_600", 203.0),
+            ("motion_frac_30", 300.0), ("motion_frac_120", 301.0),
+            ("motion_frac_300", 302.0), ("motion_frac_600", 303.0),
+            ("turn_sum_30", 400.0), ("turn_sum_120", 401.0),
+            ("turn_sum_300", 402.0), ("turn_sum_600", 403.0),
+            ("turn_max_30", 500.0), ("turn_max_120", 501.0),
+            ("turn_max_300", 502.0), ("turn_max_600", 503.0),
+            ("swing", 600.0), ("still_x_cardiac", 700.0),
+            ("hr_z", 800.0), ("hr_var_z", 900.0),
+        ];
+        for (i, (name, want)) in expect.iter().enumerate() {
+            assert_eq!(Features::NAMES[i], *name, "column {i} is misnamed");
+            assert_eq!(v[i], *want, "column {i} ({name}) carries the wrong field");
+        }
+    }
+
+    /// The HIGH the review found: a genuinely quiet night has a median inter-second delta of exactly
+    /// zero, and the old guard left `motion_frac` missing on every epoch of precisely the nights the
+    /// feature exists for.
+    #[test]
+    fn motion_frac_is_measured_on_a_quiet_night_rather_than_missing() {
+        let f = extract(&still(1200), 0, 1200, &[], &[]);
+        for w in 0..WINDOWS_S.len() {
+            assert_eq!(f[20].motion_frac[w], Some(0.0),
+                "window {w}: a still night must report a measured zero fraction, not None");
+        }
+        assert!(!f[20].values()[8].is_nan(), "and it must not reach the vector as NaN");
     }
 
     #[test]
