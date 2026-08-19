@@ -113,7 +113,13 @@ fn main() {
         let labelled = truth.iter().filter(|t| **t != usize::MAX).count();
 
         let input = SleepInput { start: w0, end: w1, hr, rr, accel: accel.clone() };
-        for (label, p) in [("shipped", Params::SHIPPED), ("cand: clamp_only_without_rr", cand)] {
+        for (label, p) in [
+            ("shipped", Params::SHIPPED),
+            ("cand: clamp_only_without_rr", cand),
+            ("cand: awake_turn 1.0", Params { awake_turn: 1.0, ..Params::SHIPPED }),
+            ("cand: turn 1.0 + clamp",
+             Params { awake_turn: 1.0, clamp_only_without_rr: true, ..Params::SHIPPED }),
+        ] {
             let prep = prepare_v2(&input, &p);
             let segs = refine_wake(&stage_v2_prepared(&prep, &p), &accel, &steps);
             let pred: Vec<usize> = (0..n)

@@ -571,7 +571,11 @@ fn emissions(feats: &[Epoch], p: &Params, anchor: Anchor) -> Vec<[f64; 4]> {
     let zhv = ZScore::build(&feats.iter().map(|f| f.hr_var).collect::<Vec<_>>());
     let zmv = ZScore::build(&feats.iter().map(|f| f.move_frac).collect::<Vec<_>>());
     let zrg = ZScore::build(&feats.iter().map(|f| f.resp_reg).collect::<Vec<_>>());
-    let ztn = ZScore::build(&feats.iter().map(|f| f.turn).collect::<Vec<_>>());
+    // turn spans three orders of magnitude within a night (p50 ~0.1 deg, max ~140), so a z-score
+    // hands a small NEGATIVE to the great majority of epochs and a huge positive to a handful,
+    // which lowers AWAKE across the whole night. Rank it instead, the way hr_flat11 is ranked.
+    let mut tsorted: Vec<f64> = feats.iter().filter_map(|f| f.turn).collect();
+    tsorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let mut fsorted: Vec<f64> = feats.iter().filter_map(|f| f.hr_flat11).collect();
     fsorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -610,7 +614,20 @@ fn emissions(feats: &[Epoch], p: &Params, anchor: Anchor) -> Vec<[f64; 4]> {
         let awake_cardiac = if clamped { awake_cardiac0.min(0.0) } else { awake_cardiac0 };
         // Rotation is evidence of wake on its own terms: it survives the stillness clamp, because a
         // wrist that changed orientation did not hold still whatever the jerk peak says.
-        let awake_turn = p.awake_turn * ztn.apply(f.turn);
+        // Centred on the median so the term is symmetric: a still epoch pushes AWAKE down as much
+        // as a rotating one pushes it up, and a night with no rotation at all is left alone.
+        let tpct = match f.turn {
+            Some(v) if !tsorted.is_empty() => {
+                let (mut lo, mut hi) = (0usize, tsorted.len());
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    if tsorted[mid] <= v { lo = mid + 1 } else { hi = mid }
+                }
+                lo as f64 / tsorted.len() as f64
+            }
+            _ => 0.5,
+        };
+        let awake_turn = p.awake_turn * (tpct - 0.5) * 2.0;
 
         let mut em = [0.0f64; 4];
         em[DEEP] = p.deep_hrv * zhvv + p.deep_hr * zhrv + p.deep_motion * zmvv - gate + blp[DEEP];
