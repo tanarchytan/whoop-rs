@@ -23,18 +23,21 @@
 //!   - Both arms must CONVERGE. Two fits stopped at a shared iteration cap sit at unequal distances
 //!     from their own optima, and the whole result here is a small delta between them.
 //!
-//! The shipped recipe is scored FIRST, on the same rows through the same function. This project
-//! carries three incompatible kappa formulas - pooled over all epochs, mean of per-subject, median
-//! of per-subject - so a number from here read against a published v2 number is a cross-statistic
-//! comparison that looks like a like-for-like one. One caveat survives that baseline and is not
-//! fixable here: v2 decodes with Viterbi and this fit predicts each epoch independently.
+//! The shipped recipe is scored FIRST, on the same rows through the same function, and both are
+//! reported per-epoch and Viterbi-decoded. This project carries three incompatible kappa formulas,
+//! so a number from here read against a published one compares different statistics.
+//!
+//! One asymmetry is NOT closed and qualifies every number: the class weighting rebalances the loss
+//! but `predict` takes a plain argmax, so the printed call rates are not calibrated probabilities.
+//! Undoing it post hoc bakes in DREAMT's own prevalence and makes held-out kappa worse, so it is
+//! named rather than applied.
 //!
 //! The output is weights. Nothing is wired and `Params::SHIPPED` is untouched.
 
 mod common;
 
 use common::{
-    dirs_of, labels_at, read_accel, read_hr, read_meta, read_rr, read_truth,
+    dirs_of, labels_at, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
 };
 use physio_algo::sleep::features::{extract, Cardiac, Features};
 use physio_algo::sleep::metrics::{confusion4, kappa4, recall, specificity, WAKE};
@@ -53,13 +56,9 @@ const UNLABELLED: usize = usize::MAX;
 /// Column count from `Features::NAMES`, plus a bias term appended by the design matrix. Read from
 /// the source of truth so adding a column can never leave the design matrix silently narrow.
 const NCOL: usize = Features::N;
-/// Hard cap only. The loop is expected to exit on [`TOL`]; reaching this means it did NOT converge,
-/// and the run says so rather than printing a number from a half-finished fit.
-///
-/// 400 was the previous value and was measured insufficient: the loss was still falling 1.2e-5 per
-/// iteration at cutoff, four orders of magnitude above `TOL`, and `converged` never printed. The
-/// whole conclusion here is a delta of ~0.002-0.007 between two arms, and two arms stopped at a
-/// shared iteration count are not equally far from their own optima.
+/// Hard cap only - the loop exits on [`TOL`], and reaching this means it did NOT converge. Two arms
+/// stopped at a shared iteration count are not equally far from their own optima, and the whole
+/// result here is a small delta between them.
 const ITERS: usize = 20_000;
 /// Per-iteration loss change below which the fit is converged.
 const TOL: f64 = 1e-9;
@@ -67,20 +66,13 @@ const LR: f64 = 0.5;
 /// L2 penalty. 100 subjects against 26 parameters per class overfits without one, and the plan
 /// names overfitting as the expected failure mode.
 const L2: f64 = 1e-3;
-/// Exponent on the inverse-frequency class weight. 0 = unweighted, 1 = full inverse frequency.
-///
-/// Both extremes are wrong and both were measured. Unweighted, the fit calls deep 0.0% against a
-/// 3.4-18.1% truth rate - a two-class model wearing a four-class report. Full inverse frequency
-/// over-corrects the other way: deep called 34.9% against 3.4%, a 10x over-prediction. The
-/// square root is the usual compromise, but it was swept rather than assumed and it LOST: held-out
-/// kappa at 0.5 is 0.182/0.172 against 1.0's 0.239/0.203. Full weighting wins on the number that
-/// counts while being visibly miscalibrated, so the flag in the report exists to keep that visible
-/// rather than letting a better kappa hide it.
-const WEIGHT_POWER: f64 = 1.0;
+/// Exponent on the inverse-frequency class weight, 0 = unweighted, 1 = full inverse frequency.
+/// Swept over 0/0.25/0.5/0.75/1.0; this wins on held-out kappa and is the only setting that trips no
+/// calibration flag. Unweighted collapses deep and REM entirely.
+const WEIGHT_POWER: f64 = 0.75;
 
 /// `WEIGHT_POWER`, overridable by `TANV1_WEIGHT_POWER` so the sweep that chose it is reproducible
-/// without editing the file. The first sweep was run before the normalisation above was fixed and
-/// is not evidence for anything.
+/// without editing the file.
 fn weight_power() -> f64 {
     std::env::var("TANV1_WEIGHT_POWER").ok().and_then(|v| v.parse().ok()).unwrap_or(WEIGHT_POWER)
 }
@@ -91,9 +83,8 @@ struct Set {
     /// Night index per row, so a per-subject score never pools across nights.
     night: Vec<usize>,
     /// The SHIPPED recipe's own call for the same epoch, so the baseline is scored by the same
-    /// function on the same rows. Three incompatible kappa formulas live in this project - pooled,
-    /// mean-of-subjects and median-of-subjects - and quoting one against another was comparing
-    /// different statistics on top of the already-named no-Viterbi asymmetry.
+    /// function on the same rows. This project carries three incompatible kappa formulas, and
+    /// quoting one against another compares different statistics.
     v2: Vec<usize>,
 }
 
@@ -123,10 +114,8 @@ fn per_second_hr(hr: &[physio_algo::sleep::HrSample]) -> BTreeMap<i64, f64> {
 }
 
 /// Population sd of PER-SECOND heart rate over `[lo, hi)`, the statistic the shipped recipe reads.
-///
-/// Averaging to per-epoch means first and taking the spread of THOSE is a different, much smoother
-/// quantity - eleven already-averaged points instead of ~330 raw ones. That substitution was in here
-/// under a matching name, which is why the fitted model had no access to what v2 separates deep with.
+/// Averaging to per-epoch means first and taking the spread of THOSE is a much smoother quantity -
+/// eleven already-averaged points instead of ~330 raw ones.
 fn std_of_seconds(sec: &BTreeMap<i64, f64>, lo: i64, hi: i64) -> Option<f64> {
     let v: Vec<f64> = sec.range(lo..hi).map(|(_, b)| *b).collect();
     if v.len() < 2 {
@@ -201,6 +190,12 @@ fn load(sets: &[&str]) -> Set {
                 SleepInput { start: w0, end: w1, hr, rr: read_rr(dir), accel: grav.clone() };
             let base = labels_at(&stage_v2(&input), w0, n, EPOCH);
 
+            // `n` comes from the meta window; `extract` derives its own count from `[w0, w1)`. If a
+            // truth key ever ran past that window the loop below would silently stop short of it
+            // rather than failing, which every other integrity violation in this corpus does not.
+            assert!(f.len() >= n, "{}: {n} epochs of truth against {} of features",
+                    dir.display(), f.len());
+
             // EVERY epoch, in order, labelled or not. read_truth yields i32; anything outside the
             // four classes is a row the decode still needs and no score may count.
             for (k, fe) in f.iter().enumerate().take(n) {
@@ -244,14 +239,9 @@ fn design(r: &[f64; NCOL], m: &[f64; NCOL], s: &[f64; NCOL], drop: &[usize]) -> 
 }
 
 /// Inverse-frequency weight per class, normalised so the TOTAL weighted mass equals the sample count
-/// at every `WEIGHT_POWER`. Without the weighting the fit collapses: measured, an unweighted model
-/// called deep 0.0% of epochs on all three cohorts against true rates of 3.4-18.1%, and REM under 1%
-/// against 10.5-22.0%. It was a two-class wake/light classifier wearing a four-class report.
-///
-/// The divisor is the SAMPLE-weighted mean, not the arithmetic mean across the four classes. The
-/// arithmetic mean is dominated by the rare classes' large raw weights, so it rescaled total mass by
-/// a factor that differed at every swept power - which silently changed the data-fit-versus-L2
-/// balance between the settings being compared, confounding the sweep that chose this one.
+/// at every `WEIGHT_POWER`. The divisor is the SAMPLE-weighted mean; the arithmetic mean across four
+/// classes is dominated by the rare ones and rescales total mass differently at every power, which
+/// would change the data-fit-versus-L2 balance between the settings a sweep compares.
 fn class_weights(y: &[usize]) -> [f64; CLASSES] {
     let mut n = [0usize; CLASSES];
     for &c in y {
@@ -428,15 +418,14 @@ fn score(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: &[usi
     })
 }
 
-/// The fitted model, decoded by the SAME path search the shipped recipe uses, under the same
-/// transition matrix. Without this the comparison is emissions-with-smoothing against
-/// emissions-alone, and sleep stages are strongly autocorrelated, so the decode is worth real kappa
-/// on its own. This is the last of the three ways the baseline comparison was not like-for-like.
+/// The fitted model, decoded by the SAME path search the shipped recipe uses under the same
+/// transition matrix. Stages are strongly autocorrelated, so scoring a decoded baseline against
+/// undecoded emissions measures the decode rather than the model.
 fn score_decoded(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], drop: &[usize])
     -> (f64, f64, f64, [f64; CLASSES], [f64; CLASSES]) {
     // Our class index is [wake, light, deep, rem]; the decoder's columns are STAGE_ORDER.
     let to_stage_order: [usize; CLASSES] =
-        std::array::from_fn(|col| stage_class(STAGE_ORDER[col]));
+        std::array::from_fn(|col| stage_idx(STAGE_ORDER[col]));
     score_rows(s, |rows| {
         let em: Vec<[f64; CLASSES]> = rows
             .iter()
@@ -448,21 +437,10 @@ fn score_decoded(w: &[Vec<f64>], s: &Set, m: &[f64; NCOL], sd: &[f64; NCOL], dro
                 std::array::from_fn(|col| z[to_stage_order[col]] - lse)
             })
             .collect();
-        decode_v2(&em, &Params::SHIPPED.transition).iter().map(|st| stage_class(*st)).collect()
+        decode_v2(&em, &Params::SHIPPED.transition).iter().map(|st| stage_idx(*st)).collect()
     })
 }
 
-/// Our class index for a stage. `common::stage_idx` is the same mapping; it is repeated here only
-/// because a decode needs it inside this file's own column convention.
-fn stage_class(s: physio_algo::sleep::SleepStage) -> usize {
-    use physio_algo::sleep::SleepStage as S;
-    match s {
-        S::Wake => 0,
-        S::Light => 1,
-        S::Deep => 2,
-        S::Rem => 3,
-    }
-}
 
 /// Column index by name, or a panic. A silent `None` here would drop nothing, run both arms
 /// identically, and print a confident conclusion from comparing a fit against itself.

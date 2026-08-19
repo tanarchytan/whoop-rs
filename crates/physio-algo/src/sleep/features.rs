@@ -1,14 +1,8 @@
 //! The tanv1 feature vector: one named, fitted-model-ready record per epoch.
 //!
-//! v2 reads seven features and computes each over ONE window. The MESA benchmark that measures our
-//! modality uses **370 actigraphy features over sliding windows from 30 s to 10 min**, and the
-//! systematic review is explicit that a 30-second segment does not carry enough cardiorespiratory
-//! information - a 4.5-minute centred window does. Our cardiac features already respect that; our
-//! motion features do not, and that is the largest cheap gap we have.
-//!
-//! So this is not "more features" for its own sake. It is the same small set of physical quantities
-//! read at the timescales the literature says they live at, plus the interaction terms v2 hard-codes
-//! as branches.
+//! The same small set of physical quantities the shipped recipe reads, but each over four centred
+//! timescales rather than one, plus the products it hard-codes as branches and the elapsed-night
+//! clock it derives a temporal prior from.
 //!
 //! Everything here is descriptive: no thresholds, no scoring, no stage decision. [`Features::NAMES`]
 //! is index-for-index with [`Features::values`] so a fitted weight vector can never silently
@@ -21,40 +15,27 @@ use super::posture::{posture_series, turn_series, Posture};
 /// lead or lag the label it is scored against.
 pub const EPOCH_S: i64 = 30;
 
-/// Absolute floor on the stillness scale, in g.
-///
-/// A per-night median collapses on a quiet night - a mostly-still night has a median inter-second
-/// gravity delta of ZERO, and every ratio against it becomes 0 or infinite. That happened here on
-/// first write, and it is the same failure the swing quantile hit on a real night the same day. A
-/// physical floor is defensible because gravity is measured in g on an absolute scale, unlike a
-/// per-wearer arbitrary unit: sleeping deltas sit far below this and any real movement above it.
+/// Absolute floor on the stillness scale, in g. A quiet night's median inter-second gravity delta is
+/// exactly zero, so every ratio against it is 0 or infinite; gravity is on an absolute scale, so a
+/// physical floor is defensible where a per-wearer one is not.
 pub const STILL_SCALE_FLOOR_G: f64 = 0.01;
 
-/// Fewest consecutive-second deltas before the night's p75 is trusted as a scale.
-///
-/// With a handful of deltas the p75 index sits at or near the MAXIMUM, so one real movement becomes
-/// the whole night's scale and every other epoch reads as motionless - a measured zero, not a
-/// missing one, and indistinguishable from a genuinely still night. A fragmented night (BLE
-/// dropouts leaving isolated bursts) is exactly that case; the real corpus has captures down to 3%
-/// coverage. Below this the floor is used instead, which is a conservative scale rather than a
-/// confidently wrong one.
+/// Fewest consecutive-second deltas before the night's p75 is trusted as a scale. Below this the p75
+/// index sits at or near the MAXIMUM, so one movement becomes the whole night's scale and every other
+/// epoch reads as a measured zero. Fragmented captures go down to 3% coverage.
 pub const MIN_SCALE_DELTAS: usize = 120;
 
-/// Centred window WIDTHS in seconds: 30 s, 2, 5 and 10 minutes.
-///
-/// Widths, not half-widths - `(mid - w/2, mid + w/2)` spans exactly `w`. An earlier comment here
-/// said "half-widths", which would make the long window 20 minutes and put it past where the MESA
-/// benchmark's actigraphy features stop.
-///
-/// The short end is the epoch itself, the long end is where the MESA benchmark's actigraphy features
-/// stop. Four is enough to see a trend without making the vector mostly redundant.
+/// Centred window WIDTHS in seconds - `(mid - w/2, mid + w/2)` spans exactly `w`, not `2w`. The short
+/// end is the epoch itself, the long end is where the benchmark's actigraphy features stop.
 pub const WINDOWS_S: [i64; 4] = [30, 120, 300, 600];
 
+/// The NREM-REM cycle period in seconds, for the phase columns. A fixed physiological constant, not
+/// a fitted one: the shipped recipe derives its own temporal prior from the same elapsed clock.
+pub const CYCLE_S: f64 = 5400.0;
+
 /// The cardiac quantities per epoch, computed by the caller so this module stays motion-only.
-///
-/// `hr_flat_pct` is the within-night percentile RANK of the long-window HR standard deviation, the
-/// same transform the shipped recipe's deep gate reads. Without it no column here can express deep
-/// at all, and every deep number a fitted model prints is a statement about the missing feature.
+/// `hr_flat_pct` is the transform the shipped recipe's deep gate reads; without it no column here can
+/// express deep, and a fitted model's deep numbers describe the missing feature rather than itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cardiac {
     pub hr_z: Option<f64>,
@@ -79,11 +60,8 @@ pub struct Features {
     pub turn_max: [Option<f64>; 4],
     /// Within-epoch orientation spread.
     pub swing: Option<f64>,
-    /// The interaction v2 hard-codes as `motion_quiescent(f) && ... .min(0.0)`. Supplied as a
-    /// PRODUCT so a linear model can represent what v2 needs a branch for.
-    ///
-    /// v2's clamp reads BOTH cardiac terms, so one product is only half of it - `still_x_hrvar` is
-    /// the other half, and with one alone the interaction arm cannot represent the branch it stands in for.
+    /// The clamp v2 hard-codes as a branch, supplied as PRODUCTS a linear model can represent. Both,
+    /// because that clamp reads the HR-level and the HR-variability term; one alone is half of it.
     pub still_x_cardiac: Option<f64>,
     pub still_x_hrvar: Option<f64>,
     /// Cardiac, carried through from the caller so this module stays motion-only in what it computes.
@@ -91,11 +69,14 @@ pub struct Features {
     pub hr_var_z: Option<f64>,
     /// Within-night rank of the long-window HR standard deviation. The deep-separating quantity.
     pub hr_flat_pct: Option<f64>,
-    /// Fraction of the LONGEST window that lies inside the span, 0..1.
-    ///
-    /// The first and last ~10 epochs of a night cannot have a full 10-minute centred window, so
-    /// their long-window features are computed on less data and are not distributed like the
-    /// middle's. Without this column a fitted model sees that systematic edge bias as signal.
+    /// Elapsed fraction of the span, 0..1, and the phase of a [`CYCLE_S`] cycle over the same clock.
+    /// v2 builds a temporal prior from this and a design matrix without it cannot see time at all.
+    pub clock: Option<f64>,
+    pub cycle_sin: Option<f64>,
+    pub cycle_cos: Option<f64>,
+    /// Fraction of the LONGEST window that lies inside the span, 0..1. The first and last ~10 epochs
+    /// cannot have a full centred window, and without this column a fitted model reads that
+    /// systematic edge bias as signal.
     pub win_cov_600: Option<f64>,
 }
 
@@ -108,12 +89,12 @@ impl Features {
         "turn_sum_30", "turn_sum_120", "turn_sum_300", "turn_sum_600",
         "turn_max_30", "turn_max_120", "turn_max_300", "turn_max_600",
         "swing", "still_x_cardiac", "still_x_hrvar", "hr_z", "hr_var_z", "hr_flat_pct",
-        "win_cov_600",
+        "clock", "cycle_sin", "cycle_cos", "win_cov_600",
     ];
 
     /// Column count. One constant so a consumer sizes its design matrix from here rather than
     /// repeating the number and drifting when a column is added.
-    pub const N: usize = 27;
+    pub const N: usize = 30;
 
     /// The vector, in [`Features::NAMES`] order. `None` becomes `f64::NAN` so a caller must decide
     /// what missing means rather than inheriting a silent zero.
@@ -126,7 +107,8 @@ impl Features {
             n(self.turn_sum[0]), n(self.turn_sum[1]), n(self.turn_sum[2]), n(self.turn_sum[3]),
             n(self.turn_max[0]), n(self.turn_max[1]), n(self.turn_max[2]), n(self.turn_max[3]),
             n(self.swing), n(self.still_x_cardiac), n(self.still_x_hrvar), n(self.hr_z),
-            n(self.hr_var_z), n(self.hr_flat_pct), n(self.win_cov_600),
+            n(self.hr_var_z), n(self.hr_flat_pct),
+            n(self.clock), n(self.cycle_sin), n(self.cycle_cos), n(self.win_cov_600),
         ]
     }
 }
@@ -200,12 +182,17 @@ pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> 
         .map(|k| {
             let mid = start + k as i64 * EPOCH_S + EPOCH_S / 2;
             let c = card.get(k).copied().unwrap_or_default();
+            let elapsed = (mid - start) as f64;
+            let phase = std::f64::consts::TAU * elapsed / CYCLE_S;
             let mut f = Features {
                 start: start + k as i64 * EPOCH_S,
                 swing: post.get(k).and_then(|p| p.map(|p| p.swing)),
                 hr_z: c.hr_z,
                 hr_var_z: c.hr_var_z,
                 hr_flat_pct: c.hr_flat_pct,
+                clock: Some(elapsed / (end - start) as f64),
+                cycle_sin: Some(phase.sin()),
+                cycle_cos: Some(phase.cos()),
                 ..Default::default()
             };
             for (w, width) in WINDOWS_S.iter().enumerate() {
@@ -263,12 +250,8 @@ mod tests {
 
     /// The failure this prevents: a fitted weight vector silently transposed against the wrong
     /// column, which no test of the model's accuracy would ever catch.
-    ///
-    /// The first version of this test asserted only `NAMES.len() == values().len()`, i.e. `24 == 24`.
-    /// That would have passed with `swing` and `still_x_cardiac` swapped, with `turn_max[0]` emitted
-    /// where `turn_max_600` is named, or with a field wholly omitted and a wrong one appended. It
-    /// tested the one thing that could not go wrong. Every field now carries a UNIQUE marker value
-    /// and each is asserted against its own name.
+    /// A width-only assertion would pass with two fields swapped or one omitted and a wrong one
+    /// appended, so every field carries a UNIQUE marker and is asserted against its own name.
     #[test]
     fn every_value_lands_in_the_column_its_name_claims() {
         let mut f = Features::default();
@@ -286,6 +269,9 @@ mod tests {
         f.hr_z = Some(800.0);
         f.hr_var_z = Some(900.0);
         f.hr_flat_pct = Some(950.0);
+        f.clock = Some(960.0);
+        f.cycle_sin = Some(970.0);
+        f.cycle_cos = Some(980.0);
         f.win_cov_600 = Some(1000.0);
 
         let v = f.values();
@@ -304,6 +290,7 @@ mod tests {
             ("turn_max_300", 502.0), ("turn_max_600", 503.0),
             ("swing", 600.0), ("still_x_cardiac", 700.0), ("still_x_hrvar", 750.0),
             ("hr_z", 800.0), ("hr_var_z", 900.0), ("hr_flat_pct", 950.0),
+            ("clock", 960.0), ("cycle_sin", 970.0), ("cycle_cos", 980.0),
             ("win_cov_600", 1000.0),
         ];
         for (i, (name, want)) in expect.iter().enumerate() {
@@ -312,9 +299,8 @@ mod tests {
         }
     }
 
-    /// The HIGH the review found: a genuinely quiet night has a median inter-second delta of exactly
-    /// zero, and the old guard left `motion_frac` missing on every epoch of precisely the nights the
-    /// feature exists for.
+    /// A genuinely quiet night has a median inter-second delta of exactly zero, so a guard on that
+    /// median leaves `motion_frac` missing on every epoch of precisely the nights it exists for.
     #[test]
     fn motion_frac_is_measured_on_a_quiet_night_rather_than_missing() {
         let f = extract(&still(1200), 0, 1200, &[]);
@@ -368,9 +354,8 @@ mod tests {
     #[test]
     fn stillness_times_cardiac_separates_two_epochs_a_linear_model_would_tie() {
         let mut g = still(1200);
-        // Genuinely MOVING, not merely held somewhere new: a block at a new constant orientation has
-        // zero internal delta, because only the transition into it moves. That is the whole reason
-        // `swing` exists, and the first version of this test fell for it.
+        // Genuinely MOVING, not merely held somewhere new: a block at a new constant orientation
+        // has zero internal delta, because only the transition into it moves.
         for i in 600..630 {
             let a = if i % 2 == 0 { 0.5 } else { 0.0 };
             g[i as usize] = s(i, a, 0.0, (1.0f64 - a * a).sqrt());
@@ -383,12 +368,35 @@ mod tests {
         let quiet = f[5].still_x_cardiac.expect("still epoch");
         assert!(quiet > moving,
             "identical hr_z, but the still epoch must carry more surviving cardiac: {quiet} vs {moving}");
-        // BOTH cardiac terms get a product. v2's clamp reads both, so one alone represents half the
-        // branch - the gap adversarial round 2 found.
+        // BOTH cardiac terms get a product, because v2's clamp reads both.
         let moving_v = f[20].still_x_hrvar.expect("moving epoch");
         let quiet_v = f[5].still_x_hrvar.expect("still epoch");
         assert!(quiet_v > moving_v,
             "the hr_var half must behave the same way: {quiet_v} vs {moving_v}");
+    }
+
+    /// v2 builds a temporal prior from the elapsed clock, so a design matrix without one cannot see
+    /// time at all. The fraction must span 0..1 across the night and the phase must be periodic.
+    #[test]
+    fn the_clock_spans_the_night_and_the_cycle_phase_turns_over() {
+        let span: i64 = 4 * 5400; // exactly four cycles
+        let f = extract(&still(span), 0, span, &[]);
+        let first = f.first().expect("epochs").clock.expect("clock");
+        let last = f.last().expect("epochs").clock.expect("clock");
+        assert!(first < 0.01 && last > 0.99, "the clock must span the night: {first} to {last}");
+        assert!(f.windows(2).all(|w| w[0].clock < w[1].clock), "and it must be monotonic");
+
+        // One cycle apart must land at the same phase; a quarter cycle apart must not.
+        let per = (CYCLE_S as i64 / EPOCH_S) as usize;
+        let (a, b) = (f[3].cycle_sin.unwrap(), f[3 + per].cycle_sin.unwrap());
+        assert!((a - b).abs() < 1e-9, "one period apart is the same phase: {a} vs {b}");
+        let q = f[3 + per / 4].cycle_sin.unwrap();
+        assert!((a - q).abs() > 0.5, "a quarter period apart is not: {a} vs {q}");
+        // sin and cos together disambiguate the half of the cycle a single term cannot.
+        assert!(f.iter().all(|x| {
+            let (s, c) = (x.cycle_sin.unwrap(), x.cycle_cos.unwrap());
+            (s * s + c * c - 1.0).abs() < 1e-9
+        }));
     }
 
     /// The deep-separating quantity is CARRIED, not invented here: a caller that supplies it must see
@@ -406,9 +414,8 @@ mod tests {
         assert!(bare[7].values()[col].is_nan(), "unsupplied must be NaN, never a rank of zero");
     }
 
-    /// H2 from adversarial round 2. Two map entries either side of a dropout are adjacent in the
-    /// BTreeMap but minutes apart in time; pairing them attributed a whole gap's movement to one
-    /// second, as a large delta indistinguishable from real motion.
+    /// Two entries either side of a dropout are adjacent in the map but minutes apart in time, and
+    /// pairing them attributes a whole gap's movement to one second.
     #[test]
     fn a_dropout_does_not_manufacture_one_enormous_delta() {
         // Still at one orientation, a 95 s hole, then still at a completely different one.
@@ -420,16 +427,14 @@ mod tests {
             "the gap must not be read as movement: two still stretches, peak delta {peak}");
     }
 
-    /// The MEDIUM from adversarial round 3. A night fragmented into isolated bursts leaves only a
-    /// handful of consecutive-second deltas, and p75 over a handful sits at the MAXIMUM - so one
-    /// real movement becomes the whole night's scale and every other epoch reads as a MEASURED zero.
-    /// That is worse than missing, because nothing downstream can tell it from a still night.
+    /// A fragmented night leaves a handful of consecutive-second deltas, and p75 over a handful sits
+    /// at the MAXIMUM - one movement becomes the scale and every other epoch reads as a MEASURED
+    /// zero, which nothing downstream can tell from a still night.
     #[test]
     fn a_fragmented_night_does_not_let_one_burst_become_the_whole_scale() {
         // TWO widely separated 3-second bursts, so only FOUR consecutive-second deltas survive.
-        // The count matters: p75's index is `(n*3/4).min(n-1)`, which lands on the MAXIMUM at n=4
-        // and not until n is small. A first version of this test used three bursts (n=6, index 4)
-        // and passed with the guard removed - it did not reach the failure at all.
+        // The count matters: p75's index is `(n*3/4).min(n-1)`, which lands on the MAXIMUM at n=4.
+        // At n=6 the index is 4, never the maximum, and the guard is not reached at all.
         let mut g: Vec<AccelSample> = Vec::new();
         for t in [0i64, 1200] {
             for i in 0..3 {
@@ -446,8 +451,8 @@ mod tests {
             moved_epoch.motion_frac[0]);
     }
 
-    /// H1 from adversarial round 2. The binary search in `deltas` needs sorted input; the filter it
-    /// replaced did not. Unsorted input must give the SAME answer, not a silently wrong one.
+    /// The binary search in `deltas` needs sorted input. Unsorted input must give the SAME answer,
+    /// not a silently wrong one.
     #[test]
     fn unsorted_input_gives_the_same_answer_rather_than_a_silently_wrong_one() {
         let mut g = still(600);
@@ -466,8 +471,8 @@ mod tests {
         }
     }
 
-    /// M3 from adversarial round 2. An edge epoch cannot have a full 10-minute centred window, and
-    /// without this column a fitted model reads that systematic truncation as signal.
+    /// An edge epoch cannot have a full 10-minute centred window, and without this column a fitted
+    /// model reads that systematic truncation as signal.
     #[test]
     fn edge_epochs_declare_their_truncated_window() {
         let f = extract(&still(2400), 0, 2400, &[]);
