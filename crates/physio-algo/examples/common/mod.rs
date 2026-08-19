@@ -505,3 +505,29 @@ impl RefineCensus {
         );
     }
 }
+
+/// The registered user cohort: every backup a user has sent, as `(wearer, store path)`.
+///
+/// The counterweight to the PSG sets. PSG has per-epoch truth and two disqualifying flaws for some
+/// questions - different hardware, and ONE NIGHT PER SUBJECT, which leaves within-wearer variance
+/// undefined at any sample size. Ask this when the question is about a person rather than a night.
+///
+/// Registered by `dev-notes/cohort_add.py`, never hardcoded here: three harnesses carried their own
+/// path lists before this existed and adding a store meant editing all three.
+pub fn user_cohort() -> Vec<(String, String)> {
+    const MANIFEST: &str =
+        "C:/Users/DavidGillot/Projects/whoop/whoop-data/harnesses/user-cohort/manifest.json";
+    let Ok(text) = fs::read_to_string(MANIFEST) else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    v["stores"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        // A store that cannot be scored is skipped here rather than contributing zero nights to a
+        // total that then reads as coverage.
+        .filter(|s| s["scorable"].as_bool() == Some(true))
+        .filter_map(|s| {
+            Some((s["wearer"].as_str()?.to_string(), s["path"].as_str()?.to_string()))
+        })
+        .collect()
+}

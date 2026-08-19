@@ -151,6 +151,13 @@ fn arms() -> Vec<(&'static str, Arm)> {
             Arm::Recipe(Box::new(Params { awake_turn: 2.00, ..Params::SHIPPED }))),
         ("cand: turn 1.0 + clamp",
             Arm::Recipe(Box::new(Params { awake_turn: 1.0, clamp_only_without_rr: true, ..Params::SHIPPED }))),
+        // THE NULL THAT MATTERS for any candidate that raises the wake rate: just call more wake,
+        // via the AWAKE base rate, with no new information at all. A candidate only earns its place
+        // if it beats this AT A MATCHED WAKE RATE. Coverage rises for free otherwise.
+        ("null: more wake, base +0.05", Arm::Recipe(Box::new(bumped(0.05)))),
+        ("null: more wake, base +0.10", Arm::Recipe(Box::new(bumped(0.10)))),
+        ("null: more wake, base +0.15", Arm::Recipe(Box::new(bumped(0.15)))),
+        ("null: more wake, base +0.20", Arm::Recipe(Box::new(bumped(0.20)))),
         ("null: always wake", Arm::Fixed(WAKE)),
         ("null: always light", Arm::Fixed(LIGHT)),
         ("null: shuffled ours", Arm::Shuffle),
@@ -201,6 +208,13 @@ fn some(v: &[Option<f64>]) -> Vec<f64> {
 /// Mean +/- sd, or a dash where no subject could answer.
 fn cell(v: &[f64]) -> String {
     if v.is_empty() { "     -      ".into() } else { format!("{:5.3} ±{:5.3}", mean(v), sd(v)) }
+}
+
+/// SHIPPED with the AWAKE base rate raised - more wake called, zero new information.
+fn bumped(by: f64) -> Params {
+    let mut p = Params::SHIPPED;
+    p.base_rate[3] += by;
+    p
 }
 
 fn main() {
