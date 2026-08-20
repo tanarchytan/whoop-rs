@@ -28,10 +28,12 @@ const MIN_EPOCHS: usize = 120;
 const PER_STORE: usize = 40;
 /// Beats in one second above which the second is a storage artefact rather than a rhythm.
 const MAX_BEATS_PER_SEC: usize = 4;
-/// Columns a mean shift CANNOT measure. `hr_z`, `hr_var_z` and `resp_z` are z-scored inside each
-/// night, so their pooled mean is 0 by construction; `clock` averages to exactly 0.5 for any whole
-/// window by arithmetic alone. They read 0.000 for every whole-window cohort whatever the data does
-/// - but NOT for a trimmed subset like the labelled floor, which would flatter every other row.
+/// Columns a mean shift CANNOT measure: three are z-scored within the night so their pooled mean is
+/// 0 by construction, and `clock` averages to 0.5 for any whole window by arithmetic. They read
+/// 0.000 for every whole-window cohort but NOT for a trimmed subset, which would flatter every row.
+/// One cohort's distance: mean over columns, its worst column, and the ranked list.
+type Distance = (f64, f64, Vec<(f64, &'static str)>);
+
 const DEGENERATE: [&str; 4] = ["hr_z", "hr_var_z", "resp_z", "clock"];
 
 /// One night's feature rows, through the same cardiac pipeline the fitter uses.
@@ -215,12 +217,11 @@ fn main() {
         cohorts.push(("ALL REAL STRAPS".to_string(), all_user));
     }
 
-    println!("
-{:<26} {:>8} {:>8} {:>8}   worst columns", "cohort", "rows", "mean|d|", "max|d|");
-    for (name, rows) in &cohorts {
+    // Mean AND max, each as a multiple of the floor's. They disagree, and reading only the mean
+    // says real straps match the PSG cohorts while the max says they are worse on their worst column.
+    let summarise = |rows: &[[f64; NCOL]]| -> Option<Distance> {
         if rows.len() < 100 {
-            println!("{name:<26} {:>8}   too few rows to compare", rows.len());
-            continue;
+            return None;
         }
         let (m, _, cnt) = stats(rows);
         let mut d: Vec<(f64, &str)> = (0..NCOL)
@@ -230,16 +231,29 @@ fn main() {
             .filter(|(v, _)| v.is_finite())
             .collect();
         if d.is_empty() {
-            println!("{name:<26} {:>8}   no comparable column", rows.len());
-            continue;
+            return None;
         }
         let mean = d.iter().map(|(v, _)| v).sum::<f64>() / d.len() as f64;
         d.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-        let worst: Vec<String> = d.iter().take(3).map(|(v, n)| format!("{n} {v:.2}")).collect();
-        println!("{name:<26} {:>8} {mean:>8.3} {:>8.3}   {}", rows.len(), d[0].0, worst.join(", "));
+        Some((mean, d[0].0, d))
+    };
+
+    let floor = cohorts.first().and_then(|(_, r)| summarise(r));
+    println!("
+{:<26} {:>7} {:>7} {:>7} {:>7}   worst column",
+             "cohort", "mean", "xfloor", "max", "xfloor");
+    for (name, rows) in &cohorts {
+        let Some((mean, max, d)) = summarise(rows) else {
+            println!("{name:<26} {:>7}   too few rows to compare", rows.len());
+            continue;
+        };
+        let (fm, fx) = floor.as_ref().map_or((f64::NAN, f64::NAN), |(a, b, _)| (*a, *b));
+        println!("{name:<26} {mean:>7.3} {:>7.2} {max:>7.3} {:>7.2}   {} {:.2}",
+                 mean / fm, max / fx, d[0].1, d[0].0);
     }
 
     println!("
-Read every row against the FLOOR, not against zero. A cohort below it is closer to");
-    println!("DREAMT than DREAMT's own labelled subset is, and carries no transfer claim at all.");
+Read every row against the FLOOR, not against zero, and read BOTH statistics. A");
+    println!("cohort can match on the mean and be far out on its single worst column, which is what");
+    println!("a fitted weight applied off its estimated range actually looks like.");
 }

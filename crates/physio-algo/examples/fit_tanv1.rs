@@ -45,7 +45,7 @@ use common::{
     stage_idx,
 };
 use physio_algo::sleep::features::{extract, Features};
-use physio_algo::sleep::metrics::{confusion4, kappa4, recall, specificity, WAKE};
+use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar, recall, specificity, WAKE};
 use physio_algo::sleep::{decode_v2, params::Params, stage_v2, SleepInput, STAGE_ORDER};
 
 const EPOCH: i64 = 30;
@@ -67,8 +67,9 @@ const ITERS: usize = 20_000;
 /// Per-iteration loss change below which the fit is converged.
 const TOL: f64 = 1e-9;
 const LR: f64 = 0.5;
-/// L2 penalty. 100 subjects against 26 parameters per class overfits without one, and the plan
-/// names overfitting as the expected failure mode.
+/// L2 penalty. 100 subjects against 30 parameters per class needs one. It does NOT explain the
+/// held-out loss: swept to 1000x this, held-out degrades in step with the fit cohort, which is a
+/// distribution gap rather than under-regularisation.
 const L2: f64 = 1e-3;
 /// Candidate exponents on the inverse-frequency class weight. 0 = unweighted, which collapses deep
 /// and REM entirely; 1 = full inverse frequency, which over-calls them. Chosen by [`select_power`]
@@ -451,31 +452,14 @@ struct Scored {
     per_night: Vec<f64>,
 }
 
-/// Two-sided 95% critical value at `n-1` degrees of freedom. The normal 1.96 is ~11% too narrow at
-/// n=13 and inflates apparent significance exactly where the cohorts are smallest.
-fn t95(n: usize) -> f64 {
-    const T: [(usize, f64); 9] =
-        [(2, 12.706), (5, 2.776), (10, 2.262), (13, 2.179), (20, 2.093), (31, 2.042), (40, 2.021),
-         (60, 2.000), (120, 1.980)];
-    let df = n.saturating_sub(1).max(1);
-    T.iter().find(|(k, _)| df <= *k).map_or(1.96, |(_, v)| *v)
-}
-
-/// Mean paired difference and the delta this cohort can resolve, `t * sd / sqrt(n)`. Anything inside
-/// the bar is noise, whatever the two medians say.
+/// Mean paired difference and the resolvable bar for two arms scored on the same nights.
 fn paired(a: &Scored, b: &Scored) -> (f64, f64, usize) {
     // Positional pairing is only meaningful if both arms scored the same nights in the same order.
     assert_eq!(a.per_night.len(), b.per_night.len(),
                "paired arms scored different night counts - the zip would misalign every pair");
-    let d: Vec<f64> =
-        a.per_night.iter().zip(&b.per_night).map(|(x, y)| y - x).collect();
+    let d: Vec<f64> = a.per_night.iter().zip(&b.per_night).map(|(x, y)| y - x).collect();
     let n = d.len();
-    if n < 2 {
-        return (f64::NAN, f64::NAN, n);
-    }
-    let m = d.iter().sum::<f64>() / n as f64;
-    let sd = (d.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
-    (m, t95(n) * sd / (n as f64).sqrt(), n)
+    paired_bar(&d).map_or((f64::NAN, f64::NAN, n), |(m, bar)| (m, bar, n))
 }
 
 /// One paired row: mean difference, the bar, and whether the difference clears it.
@@ -626,21 +610,25 @@ fn main() {
     println!("  imputes it to the same zero a withheld column gets, and both arms see the same");
     println!("  input. Its near-zero is arithmetic, not evidence.");
     println!("  {:<18} {:>10} {:>10} {:>6}   verdict", "cohort", "mean d", "bar +/-", "n");
-    let beatless: Vec<bool> = std::iter::once(&train)
+    // Coverage, not presence. A cohort with a handful of beat-carrying nights would otherwise read
+    // as a full test while most of its paired differences are identically zero.
+    let coverage: Vec<f64> = std::iter::once(&train)
         .chain(held.iter().map(|(_, h)| h))
         .map(|s| {
             let c = col("resp_z");
-            !s.x.iter().any(|r| r[c].is_finite())
+            s.x.iter().filter(|r| r[c].is_finite()).count() as f64 / s.x.len().max(1) as f64
         })
         .collect();
     for (d, how) in ["per-epoch", "VITERBI-decoded"].iter().enumerate() {
         println!("  {how}");
         for (i, name) in names.iter().enumerate() {
-            if beatless[i] {
-                println!("  {name:<18} {:>10} {:>10} {:>6}   NO BEATS - not a test", "-", "-", "-");
+            if coverage[i] < 0.5 {
+                println!("  {name:<18} {:>10} {:>10} {:>6}   {:.0}% of epochs carry beats - NOT A TEST",
+                         "-", "-", "-", 100.0 * coverage[i]);
                 continue;
             }
-            paired_row(name, &by_arm[2][d][i], &by_arm[1][d][i]);
+            paired_row(&format!("{name} [{:.0}%]", 100.0 * coverage[i]),
+                       &by_arm[2][d][i], &by_arm[1][d][i]);
         }
     }
     println!("\nThe paired row is the interaction's contribution. A difference of medians is not:");

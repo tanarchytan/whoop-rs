@@ -326,3 +326,61 @@ mod tests {
         assert_eq!((s.recall(), s.precision()), (Some(1.0), Some(1.0)));
     }
 }
+
+/// Two-sided 95% critical value at `n-1` degrees of freedom. The normal 1.96 is ~11% too narrow at
+/// n=13 and inflates apparent significance exactly where a cohort is smallest.
+///
+/// Keyed on DEGREES OF FREEDOM and rounded DOWN to the next row, so an off-table size gets a
+/// CONSERVATIVE bar. Keying the same constants on `n` makes every off-anchor size too narrow.
+fn t95(n: usize) -> f64 {
+    const T: [(usize, f64); 12] = [
+        (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
+        (19, 2.093), (30, 2.042), (39, 2.023), (59, 2.001), (119, 1.980),
+    ];
+    let df = n.saturating_sub(1).max(1);
+    T.iter().find(|(k, _)| df <= *k).map_or(1.96, |(_, v)| *v)
+}
+
+/// Mean paired difference and the delta a sample of this size can resolve, `t * sd / sqrt(n)`.
+///
+/// Two arms' MEDIANS are separate order statistics and their difference moves when one subject
+/// changes rank; pair per subject instead. A mean inside the bar is noise whatever the medians say.
+pub fn paired_bar(deltas: &[f64]) -> Option<(f64, f64)> {
+    let n = deltas.len();
+    if n < 2 {
+        return None;
+    }
+    let m = deltas.iter().sum::<f64>() / n as f64;
+    let sd = (deltas.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
+    Some((m, t95(n) * sd / (n as f64).sqrt()))
+}
+
+#[cfg(test)]
+mod paired_tests {
+    use super::*;
+
+    /// The bar must never be NARROWER than the true critical value, which is the direction that
+    /// turns noise into a finding.
+    #[test]
+    fn the_bar_is_never_narrower_than_the_true_critical_value() {
+        assert!((t95(13) - 2.179).abs() < 1e-9, "n=13 is df=12");
+        assert!((t95(31) - 2.042).abs() < 1e-9, "n=31 is df=30");
+        assert!(t95(4) >= 3.182, "n=4 is df=3, true value 3.182, got {}", t95(4));
+        assert!(t95(22) >= 2.042, "n=22 is df=21, wider than df=30, got {}", t95(22));
+    }
+
+    #[test]
+    fn a_constant_difference_resolves_and_a_symmetric_one_does_not() {
+        let (m, bar) = paired_bar(&[0.05; 20]).expect("n=20");
+        assert!(m > bar, "a constant offset has zero spread and must resolve");
+        let alt: Vec<f64> = (0..20).map(|i| if i % 2 == 0 { 0.05 } else { -0.05 }).collect();
+        let (m, bar) = paired_bar(&alt).expect("n=20");
+        assert!(m.abs() < bar, "a mean-zero difference must not resolve: {m} vs {bar}");
+    }
+
+    #[test]
+    fn fewer_than_two_pairs_cannot_answer() {
+        assert!(paired_bar(&[]).is_none());
+        assert!(paired_bar(&[0.1]).is_none());
+    }
+}
