@@ -39,7 +39,7 @@ pub use detect::{band_in_bed_window, detect_sessions, detect_sessions_with, effi
 pub use common::flatten_rr;
 pub use v2::{emissions_prepared as emissions_v2, epoch_starts as epoch_starts_v2, prepare as prepare_v2,
     segments_of as segments_v2, stage as stage_v2, stage_prepared as stage_v2_prepared,
-    resp_regularity, stage_with as stage_v2_with, viterbi as decode_v2, Prepared, DEEP_GATE_THRESH,
+    emission_terms, resp_regularity, stage_with as stage_v2_with, weights_of, Terms, WEIGHT_NAMES, viterbi as decode_v2, Prepared, DEEP_GATE_THRESH,
     STAGE_ORDER};
 pub use refine::{
     is_motion_dense as motion_dense, motion_density, refine as refine_wake, refine_with as refine_wake_with,

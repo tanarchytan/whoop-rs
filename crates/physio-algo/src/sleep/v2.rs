@@ -548,11 +548,17 @@ fn idx_to_stage(i: usize) -> SleepStage {
 /// The log-emissions the decoder is handed, under whichever anchor `p` selects. An onset-anchored prior
 /// needs a staging to find the onset, so it stages once with the guard off first.
 fn final_emissions(feats: &[Epoch], p: &Params) -> Vec<[f64; 4]> {
+    emissions(feats, p, resolve_anchor(feats, p))
+}
+
+/// Which time-of-night anchor `p` selects. An onset-anchored prior needs a staging to find the
+/// onset, so it stages once with the guard off first.
+fn resolve_anchor(feats: &[Epoch], p: &Params) -> Anchor {
     if p.cycle_rem_onset_minutes > 0.0 || p.cycle_clock_from_onset {
         let probe = viterbi(&emissions(feats, p, Anchor::Probe), &p.transition);
-        return emissions(feats, p, Anchor::Onset(sustained_onset(&probe).unwrap_or(0)));
+        return Anchor::Onset(sustained_onset(&probe).unwrap_or(0));
     }
-    emissions(feats, p, Anchor::Window)
+    Anchor::Window
 }
 
 /// Run the full recipe over a night's epochs and return one stage label per epoch. All normalisation
@@ -562,6 +568,128 @@ fn stage_epochs(feats: &[Epoch], p: &Params) -> Vec<SleepStage> {
         return Vec::new();
     }
     viterbi(&final_emissions(feats, p), &p.transition)
+}
+
+
+/// The twelve emission weights, in the order [`emission_terms`] lays out its design.
+pub const WEIGHT_NAMES: [&str; 12] = [
+    "deep_hrv", "deep_hr", "deep_motion", "deep_gate_slope",
+    "rem_hrv", "rem_motion", "rem_hr",
+    "awake_motion", "awake_hrv", "awake_hr", "awake_turn",
+    "resp_weight",
+];
+
+/// The weights [`WEIGHT_NAMES`] refers to, read off `p` in the same order.
+pub fn weights_of(p: &Params) -> [f64; 12] {
+    [p.deep_hrv, p.deep_hr, p.deep_motion, p.deep_gate_slope,
+     p.rem_hrv, p.rem_motion, p.rem_hr,
+     p.awake_motion, p.awake_hrv, p.awake_hr, p.awake_turn,
+     p.resp_weight]
+}
+
+/// The emission decomposed into the parts a weight multiplies and the parts it does not.
+///
+/// `design[e][c][j]` is what weight `j` contributes to class `c`, and `fixed[e][c]` is everything
+/// no weight touches. `clamped[e]` marks where the stillness clamp applies, which is a `min(0.0)`
+/// over the awake CARDIAC SUM and so cannot be folded into either.
+pub struct Terms {
+    pub design: Vec<[[f64; 12]; 4]>,
+    pub fixed: Vec<[f64; 4]>,
+    pub clamped: Vec<bool>,
+}
+
+impl Terms {
+    /// Rebuild one epoch's emission from a weight vector. Reproduces [`emissions_prepared`] exactly
+    /// at `weights_of(p)`, which `the_decomposition_reproduces_the_emission` pins.
+    pub fn emission(&self, e: usize, w: &[f64; 12]) -> [f64; 4] {
+        let (d, f) = (&self.design[e], &self.fixed[e]);
+        let mut em = [0.0f64; 4];
+        for c in 0..4 {
+            let mut acc = f[c];
+            for j in 0..12 {
+                // The awake cardiac pair is summed first so the clamp can act on the pair.
+                if c == AWAKE && (j == 8 || j == 9) {
+                    continue;
+                }
+                acc += w[j] * d[c][j];
+            }
+            if c == AWAKE {
+                let card = w[8] * d[c][8] + w[9] * d[c][9];
+                acc += if self.clamped[e] { card.min(0.0) } else { card };
+            }
+            em[c] = acc;
+        }
+        em
+    }
+}
+
+/// Decompose a prepared night's emissions into [`Terms`], under the same anchor
+/// [`emissions_prepared`] resolves.
+pub fn emission_terms(prep: &Prepared, p: &Params) -> Terms {
+    terms(&prep.feats, p, resolve_anchor(&prep.feats, p))
+}
+
+
+/// [`emissions`] with the weighted parts kept apart from the rest. Every line here mirrors one in
+/// `emissions`; the test pins that the two agree at the shipped weights.
+fn terms(feats: &[Epoch], p: &Params, anchor: Anchor) -> Terms {
+    let blp = p.base_log_prior();
+    let zhr = ZScore::build(&feats.iter().map(|f| f.hr).collect::<Vec<_>>());
+    let zhv = ZScore::build(&feats.iter().map(|f| f.hr_var).collect::<Vec<_>>());
+    let zmv = ZScore::build(&feats.iter().map(|f| f.move_frac).collect::<Vec<_>>());
+    let zrg = ZScore::build(&feats.iter().map(|f| f.resp_reg).collect::<Vec<_>>());
+    let mut tsorted: Vec<f64> = feats.iter().filter_map(|f| f.turn).collect();
+    tsorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut fsorted: Vec<f64> = feats.iter().filter_map(|f| f.hr_flat11).collect();
+    fsorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |sorted: &[f64], value: Option<f64>| -> f64 {
+        match value {
+            Some(v) if !sorted.is_empty() => {
+                sorted.partition_point(|s| *s <= v) as f64 / sorted.len() as f64
+            }
+            _ => 0.5,
+        }
+    };
+
+    let mut out = Terms { design: Vec::new(), fixed: Vec::new(), clamped: Vec::new() };
+    for (i, f) in feats.iter().enumerate() {
+        let zhrv = zhr.apply(f.hr);
+        let zhvv = zhv.apply(f.hr_var);
+        let zmvv = zmv.apply(f.move_frac);
+        let hinge = (pct(&fsorted, f.hr_flat11) - p.deep_gate_thresh).max(0.0);
+        let rr_backed = p.clamp_only_without_rr && f.resp_reg.is_some();
+        let tp = (pct(&tsorted, f.turn) - 0.5) * 2.0;
+        let rz = f.resp_reg.map_or(0.0, |rg| zrg.apply(Some(rg)));
+
+        let mut d = [[0.0f64; 12]; 4];
+        d[DEEP][0] = zhvv;
+        d[DEEP][1] = zhrv;
+        d[DEEP][2] = zmvv;
+        d[DEEP][3] = -hinge;
+        d[REM][4] = zhvv;
+        d[REM][5] = zmvv;
+        d[REM][6] = zhrv;
+        d[AWAKE][7] = zmvv;
+        d[AWAKE][8] = dz(zhvv, p.awake_deadzone);
+        d[AWAKE][9] = dz(zhrv, p.awake_deadzone);
+        d[AWAKE][10] = tp;
+        d[DEEP][11] = rz;
+        d[REM][11] = -rz;
+
+        let mut fx = blp;
+        let pr = cycle_prior(cycle_clock(f.clock, feats, anchor, p), rem_guard(i, f.clock, anchor, p), p);
+        for (s, v) in pr.iter().enumerate() {
+            fx[s] += v;
+        }
+        if f.jerk_max > f.jerk_scale * p.jerk_gate_mult {
+            fx[AWAKE] += p.motion_gate_boost;
+        }
+
+        out.design.push(d);
+        out.fixed.push(fx);
+        out.clamped.push(motion_quiescent(f, p) && zhrv < p.quiescent_hr_z_max && !rr_backed);
+    }
+    out
 }
 
 /// Per-epoch log-emissions under `p`, with the time-of-night priors read from `anchor`.
@@ -650,6 +778,77 @@ fn emissions(feats: &[Epoch], p: &Params, anchor: Anchor) -> Vec<[f64; 4]> {
         seq.push(em);
     }
     seq
+}
+
+#[cfg(test)]
+mod terms_tests {
+    use super::*;
+    use crate::sleep::{AccelSample, HrSample, RrRun, SleepInput};
+
+    /// The decomposition is only useful if it IS the emission. At the shipped weights every epoch
+    /// and every class must agree to the last bit, or a refit is optimising something else.
+    #[test]
+    fn the_decomposition_reproduces_the_emission() {
+        let (start, end) = (0i64, 3600i64);
+        let hr: Vec<HrSample> = (0..3600)
+            .map(|t| HrSample { ts: t, bpm: (58.0 + 6.0 * (t as f64 / 400.0).sin()) as u16 })
+            .collect();
+        let accel: Vec<AccelSample> = (0..3600)
+            .map(|t| {
+                let a = if t % 600 < 20 { 0.4 * (t as f64).sin() } else { 0.0 };
+                AccelSample { ts: t, x: a, y: 0.0, z: (1.0f64 - a * a).max(0.0).sqrt() }
+            })
+            .collect();
+        let rr: Vec<RrRun> = (0..600)
+            .map(|k| RrRun { ts: k * 6, intervals: vec![980, 1010, 995] })
+            .collect();
+        let input = SleepInput { start, end, hr, rr, accel };
+
+        for p in [Params::SHIPPED, Params { cycle_clock_from_onset: true, ..Params::SHIPPED }] {
+            let prep = prepare(&input, &p);
+            let want = emissions_prepared(&prep, &p);
+            let terms = emission_terms(&prep, &p);
+            let w = weights_of(&p);
+            assert_eq!(terms.design.len(), want.len(), "one design row per epoch");
+            for (e, row) in want.iter().enumerate() {
+                let got = terms.emission(e, &w);
+                for c in 0..4 {
+                    assert!((got[c] - row[c]).abs() < 1e-12,
+                        "epoch {e} class {c}: decomposed {} vs emission {}", got[c], row[c]);
+                }
+            }
+        }
+    }
+
+    /// And it must be SENSITIVE to the weights it claims to carry: moving one has to move the
+    /// emission, or that weight is not really in the design.
+    #[test]
+    fn every_named_weight_moves_the_emission() {
+        let (start, end) = (0i64, 3600i64);
+        let hr: Vec<HrSample> = (0..3600)
+            .map(|t| HrSample { ts: t, bpm: (58.0 + 9.0 * (t as f64 / 300.0).sin()) as u16 })
+            .collect();
+        let accel: Vec<AccelSample> = (0..3600)
+            .map(|t| {
+                let a = if t % 300 < 40 { 0.5 * ((t % 7) as f64) / 7.0 } else { 0.0 };
+                AccelSample { ts: t, x: a, y: 0.0, z: (1.0f64 - a * a).max(0.0).sqrt() }
+            })
+            .collect();
+        let rr: Vec<RrRun> =
+            (0..600).map(|k| RrRun { ts: k * 6, intervals: vec![950, 1040, 990] }).collect();
+        let prep = prepare(&SleepInput { start, end, hr, rr, accel }, &Params::SHIPPED);
+        let terms = emission_terms(&prep, &Params::SHIPPED);
+        let base = weights_of(&Params::SHIPPED);
+        for j in 0..12 {
+            let mut w = base;
+            w[j] += 1.0;
+            let moved = (0..terms.design.len()).any(|e| {
+                let (a, b) = (terms.emission(e, &base), terms.emission(e, &w));
+                (0..4).any(|c| (a[c] - b[c]).abs() > 1e-9)
+            });
+            assert!(moved, "{} is named but moves nothing", WEIGHT_NAMES[j]);
+        }
+    }
 }
 
 #[cfg(test)]

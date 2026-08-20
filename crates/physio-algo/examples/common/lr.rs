@@ -149,3 +149,30 @@ pub fn scores(w: &[Vec<f64>], row: &[f64]) -> [f64; CLASSES] {
     z
 }
 
+
+/// Column means and sds over TRAIN only, for a design of arbitrary width.
+pub fn standardise_cols(x: &[Vec<f64>]) -> (Vec<f64>, Vec<f64>) {
+    let n = x.first().map_or(0, |r| r.len());
+    let (mut m, mut s) = (vec![0.0; n], vec![1.0; n]);
+    for c in 0..n {
+        let v: Vec<f64> = x.iter().map(|r| r[c]).filter(|v| v.is_finite()).collect();
+        if v.is_empty() {
+            continue;
+        }
+        m[c] = v.iter().sum::<f64>() / v.len() as f64;
+        let sd = (v.iter().map(|z| (z - m[c]).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+        s[c] = if sd > 1e-12 { sd } else { 1.0 };
+    }
+    (m, s)
+}
+
+/// Design row of arbitrary width: standardised, NaN imputed to the train mean, plus a bias.
+/// `drop` zeroes columns so one optimiser can be run with features withheld.
+pub fn design_row(r: &[f64], m: &[f64], s: &[f64], drop: &[usize]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(r.len() + 1);
+    for (c, v) in r.iter().enumerate() {
+        out.push(if drop.contains(&c) || !v.is_finite() { 0.0 } else { (v - m[c]) / s[c] });
+    }
+    out.push(1.0);
+    out
+}
