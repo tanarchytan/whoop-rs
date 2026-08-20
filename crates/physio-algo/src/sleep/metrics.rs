@@ -1,4 +1,5 @@
-//! Hypnogram scoring: one confusion matrix and the numbers read off it.
+//! Hypnogram scoring: one confusion matrix, the numbers read off it, and the paired bar that says
+//! whether two runs differ at all.
 //!
 //! Kappa is a whole-night agreement figure dominated by the stages that hold the most epochs, so it
 //! barely moves when a twenty-minute wake bout is missed. Per-class recall and [`bout_score`] are what
@@ -89,13 +90,9 @@ pub fn bouts(seq: &[usize], class: usize, min_len: usize) -> Vec<(usize, usize)>
     out
 }
 
-/// Bout-level agreement for one class, with the arm that stops it being gamed. Predicting the class
-/// everywhere detects every bout, so `spurious` and [`BoutScore::precision`] are reported beside it.
-///
-/// [`BoutScore::coverage`] is the number to read first. `detected` is BINARY at `min_overlap`, which
-/// makes a long bout all-or-nothing: a 409-minute wake bout found at 22% scores exactly the same as
-/// one found at 0%, and a change that lifted it to 27% was reported as "unchanged" for a whole
-/// session. Coverage is continuous and sees that.
+/// Bout-level agreement for one class. Predicting the class everywhere detects every bout, so
+/// `spurious` and [`BoutScore::precision`] are reported beside it. [`BoutScore::coverage`] is the
+/// continuous read; `detected` is BINARY at `min_overlap`, so a long bout is all-or-nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoutScore {
     pub truth_bouts: usize,
@@ -161,6 +158,31 @@ pub fn bout_score(
     }
 }
 
+/// Two-sided 95% critical value at `n-1` degrees of freedom; 1.96 is ~11% too narrow at n=13.
+/// Rounds df DOWN to the previous row - the value falls as df rises, so the previous row is the
+/// conservative one and rounding up returns a bar narrower than the truth.
+fn t95(n: usize) -> f64 {
+    const T: [(usize, f64); 12] = [
+        (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
+        (19, 2.093), (30, 2.042), (39, 2.023), (59, 2.001), (119, 1.980),
+    ];
+    let df = n.saturating_sub(1).max(1);
+    T.iter().rev().find(|(k, _)| *k <= df).map(|(_, v)| *v).expect("df >= 1; the table starts at 1")
+}
+
+/// Mean paired difference and the delta this sample size can resolve, `t * sd / sqrt(n)`. Two arms'
+/// MEDIANS are separate order statistics whose difference moves when one subject changes rank; a
+/// mean inside the bar is noise whatever those medians say.
+pub fn paired_bar(deltas: &[f64]) -> Option<(f64, f64)> {
+    let n = deltas.len();
+    if n < 2 {
+        return None;
+    }
+    let m = deltas.iter().sum::<f64>() / n as f64;
+    let sd = (deltas.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
+    Some((m, t95(n) * sd / (n as f64).sqrt()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,7 +246,7 @@ mod tests {
 
     /// The `< 4` guard is load-bearing and was unguarded: `sleep_eval` uses index 4 as its UNLABELLED
     /// sentinel and feeds it straight in, so dropping the check indexes a [[i64;4];4] out of bounds and
-    /// panics on real input. Found by a mutation sweep, not by anything failing.
+    /// panics on real input.
     #[test]
     fn an_out_of_range_index_is_ignored_rather_than_indexed() {
         const UNLABELLED: usize = 4;
@@ -234,8 +256,8 @@ mod tests {
     }
 
     /// Specificity must exclude the class's OWN row: everything in it is a positive, so counting it as
-    /// a negative inflates the score. A mutation removing the skip went unnoticed because the existing
-    /// case had an all-diagonal class row, where including it changes nothing.
+    /// a negative inflates the score. The class row here is MIXED, the only shape where including it
+    /// changes the answer.
     #[test]
     fn specificity_excludes_the_class_row_even_when_that_row_is_mixed() {
         // Three truth-wake epochs, one called wake and two called light; plus one true light.
@@ -287,9 +309,7 @@ mod tests {
     }
 
     /// The flaw `coverage` exists for, as a test. Two predictions of a long bout, 20% and 45% found:
-    /// `recall` calls both a total miss and cannot tell them apart, while coverage sees the gap. A
-    /// real 409-minute reading bout sat at 22% and a change lifting it to 27% was reported as
-    /// "unchanged" for a whole session because of exactly this.
+    /// `recall` calls both a total miss and cannot tell them apart, while coverage sees the gap.
     #[test]
     fn coverage_separates_partial_finds_that_binary_recall_rounds_to_zero() {
         let truth = vec![WAKE; 100];
@@ -325,45 +345,23 @@ mod tests {
         assert_eq!((s.truth_bouts, s.detected, s.pred_bouts, s.spurious), (1, 1, 1, 0));
         assert_eq!((s.recall(), s.precision()), (Some(1.0), Some(1.0)));
     }
-}
 
-/// Two-sided 95% critical value at `n-1` degrees of freedom; 1.96 is ~11% too narrow at n=13.
-/// Rounds df DOWN to the previous row - the value falls as df rises, so the previous row is the
-/// conservative one and rounding up returns a bar narrower than the truth.
-fn t95(n: usize) -> f64 {
-    const T: [(usize, f64); 12] = [
-        (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
-        (19, 2.093), (30, 2.042), (39, 2.023), (59, 2.001), (119, 1.980),
-    ];
-    let df = n.saturating_sub(1).max(1);
-    T.iter().rev().find(|(k, _)| *k <= df).map_or(T[0].1, |(_, v)| *v)
-}
-
-/// Mean paired difference and the delta this sample size can resolve, `t * sd / sqrt(n)`. Two arms'
-/// MEDIANS are separate order statistics whose difference moves when one subject changes rank; a
-/// mean inside the bar is noise whatever those medians say.
-pub fn paired_bar(deltas: &[f64]) -> Option<(f64, f64)> {
-    let n = deltas.len();
-    if n < 2 {
-        return None;
-    }
-    let m = deltas.iter().sum::<f64>() / n as f64;
-    let sd = (deltas.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
-    Some((m, t95(n) * sd / (n as f64).sqrt()))
-}
-
-#[cfg(test)]
-mod paired_tests {
-    use super::*;
-
-    /// The bar must never be NARROWER than the true critical value - the direction that turns noise
-    /// into a finding. Every value here is the textbook two-sided 95% point at that df.
+    /// The bar must BRACKET the true critical value: narrower turns noise into a finding, wider
+    /// reports a real difference as noise. Every value here is the textbook two-sided 95% point at
+    /// that df, and every row of the table is reached by one `n`, so no row can move either way.
     #[test]
-    fn the_bar_is_never_narrower_than_the_true_critical_value() {
-        for (n, truth) in [(13usize, 2.179), (31, 2.042), (7, 2.447), (14, 2.160), (22, 2.080),
-                           (36, 2.030), (4, 3.182), (3, 4.303)] {
+    fn the_bar_brackets_the_true_critical_value() {
+        // Rounding df down to the previous row is the only permitted widening; its worst case is
+        // df=6 reading the df=5 row, 2.571 against 2.447, so 6% covers all sixteen.
+        const ROUNDING_SLACK: f64 = 1.06;
+        for (n, truth) in [(2usize, 12.706), (3, 4.303), (4, 3.182), (5, 2.776), (6, 2.571),
+                           (7, 2.447), (10, 2.262), (13, 2.179), (14, 2.160), (20, 2.093),
+                           (22, 2.080), (31, 2.042), (36, 2.030), (40, 2.023), (60, 2.001),
+                           (120, 1.980)] {
             assert!(t95(n) >= truth - 1e-9,
                     "n={n} (df={}) needs at least {truth}, got {}", n - 1, t95(n));
+            assert!(t95(n) <= truth * ROUNDING_SLACK,
+                    "n={n} (df={}) is wider than {truth} allows, got {}", n - 1, t95(n));
         }
     }
 

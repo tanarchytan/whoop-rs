@@ -1,14 +1,12 @@
-//! The cardiac columns of the tanv1 feature vector, in one place.
+//! The four cardiac columns of the tanv1 feature vector, on the [`EPOCH_S`] grid.
 //!
-//! Two harnesses carried a copy each and they had already drifted by a clamp; a drift that mattered
-//! would have surfaced as a finding about the data rather than about the code.
-
-#![allow(dead_code)]
+//! The single producer for every harness that fits one; they call [`cardiac_series`].
 
 use std::collections::BTreeMap;
 
-use physio_algo::sleep::features::Cardiac;
+use physio_algo::sleep::features::{Cardiac, EPOCH_S};
 use physio_algo::sleep::{flatten_rr, resp_regularity, HrSample, RrRun};
+use physio_algo::stats::{mean, population_sd};
 
 /// Per-night z-score of a per-epoch series, missing where the series is.
 pub fn zscore(v: &[Option<f64>]) -> Vec<Option<f64>> {
@@ -16,8 +14,7 @@ pub fn zscore(v: &[Option<f64>]) -> Vec<Option<f64>> {
     if present.len() < 2 {
         return vec![None; v.len()];
     }
-    let m = present.iter().sum::<f64>() / present.len() as f64;
-    let sd = (present.iter().map(|x| (x - m).powi(2)).sum::<f64>() / present.len() as f64).sqrt();
+    let (m, sd) = (mean(&present), population_sd(&present));
     if sd <= 0.0 {
         return vec![None; v.len()];
     }
@@ -42,8 +39,7 @@ pub fn std_of_seconds(sec: &BTreeMap<i64, f64>, lo: i64, hi: i64) -> Option<f64>
     if v.len() < 2 {
         return None;
     }
-    let m = v.iter().sum::<f64>() / v.len() as f64;
-    Some((v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64).sqrt())
+    Some(population_sd(&v))
 }
 
 /// Within-night percentile rank in 0..1, `bisect_right / n` over the present values - the transform
@@ -59,7 +55,8 @@ pub fn rank_pct(v: &[Option<f64>]) -> Vec<Option<f64>> {
         .collect()
 }
 
-/// The four cardiac columns of the tanv1 feature vector, over `n` epochs from `w0`.
+/// The four cardiac columns of the tanv1 feature vector, over `n` epochs from `w0`. `features::extract`
+/// buckets its other 24 columns on [`EPOCH_S`] and indexes this by the same k, so the grids must agree.
 pub fn cardiac_series(
     w0: i64,
     n: usize,
@@ -67,14 +64,14 @@ pub fn cardiac_series(
     hr: &[HrSample],
     rr: &[RrRun],
 ) -> Vec<Cardiac> {
+    assert_eq!(epoch, EPOCH_S, "the cardiac grid must match the grid features::extract buckets on");
     let sec = per_second_hr(hr);
+    // The epoch mean averages the PER-SECOND means, so an unevenly sampled second keeps one vote.
     let mut sum = vec![(0.0f64, 0.0f64); n];
-    for s in hr {
-        let k = ((s.ts - w0) / epoch).max(0) as usize;
-        if k < n {
-            sum[k].0 += s.bpm as f64;
-            sum[k].1 += 1.0;
-        }
+    for (&t, &b) in sec.range(w0..w0 + n as i64 * epoch) {
+        let k = ((t - w0) / epoch) as usize;
+        sum[k].0 += b;
+        sum[k].1 += 1.0;
     }
     let raw: Vec<Option<f64>> = sum.iter().map(|(a, c)| (*c > 0.0).then(|| a / c)).collect();
     let hr_z = zscore(&raw);

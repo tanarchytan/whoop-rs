@@ -29,7 +29,6 @@ pub const MIN_SCALE_DELTAS: usize = 120;
 /// end is the epoch itself, the long end is where the benchmark's actigraphy features stop.
 pub const WINDOWS_S: [i64; 4] = [30, 120, 300, 600];
 
-
 /// The cardiac quantities per epoch, computed by the caller so this module stays motion-only.
 /// `hr_flat_pct` is the transform the shipped recipe's deep gate reads; without it no column here can
 /// express deep, and a fitted model's deep numbers describe the missing feature rather than itself.
@@ -50,8 +49,8 @@ pub struct Cardiac {
 pub struct Features {
     /// Epoch start, unix seconds.
     pub start: i64,
-    /// Per-window motion energy: mean, max and the fraction of seconds above this night's median.
-    /// Indexed by [`WINDOWS_S`].
+    /// Per-window motion energy: mean and max of the consecutive-second gravity deltas, and the
+    /// fraction of them above this night's floored p75 scale. Indexed by [`WINDOWS_S`].
     pub motion_mean: [Option<f64>; 4],
     pub motion_max: [Option<f64>; 4],
     pub motion_frac: [Option<f64>; 4],
@@ -167,14 +166,13 @@ pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> 
 
     // The night's own scale, floored. p75 rather than the median because half a quiet night's
     // deltas are identically zero and a median of zero normalises nothing.
-    let all = deltas(grav, start, end);
     let night_scale = {
-        let mut v = all.clone();
+        let mut v = deltas(grav, start, end);
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let p75 = if v.len() < MIN_SCALE_DELTAS {
             0.0
         } else {
-            v[(v.len() * 3 / 4).min(v.len() - 1)]
+            v[v.len() * 3 / 4]
         };
         p75.max(STILL_SCALE_FLOOR_G)
     };
@@ -205,16 +203,19 @@ pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> 
                 if !d.is_empty() {
                     f.motion_mean[w] = Some(d.iter().sum::<f64>() / d.len() as f64);
                     f.motion_max[w] = Some(d.iter().cloned().fold(f64::MIN, f64::max));
-                    // Against the FLOORED scale, not the raw median. A quiet night's median delta
-                    // is exactly 0.0, so the old `night_med > 0.0` guard left motion_frac missing on
-                    // every epoch of precisely the nights this feature exists for.
+                    // Against the FLOORED scale, not the raw median: a quiet night's median delta is
+                    // exactly 0.0, so a median guard leaves motion_frac missing on precisely the
+                    // nights this feature exists for.
                     let over = d.iter().filter(|x| **x > night_scale).count();
                     f.motion_frac[w] = Some(over as f64 / d.len() as f64);
                 }
-                // Rotation over the same window, in epochs rather than seconds.
-                let lo = k.saturating_sub((width / 2 / EPOCH_S) as usize);
-                let hi = (k + (width / 2 / EPOCH_S) as usize + 1).min(turns.len());
-                let seg: Vec<f64> = turns[lo..hi.max(lo)].iter().flatten().copied().collect();
+                // Rotation over the same window. A turn sits at the boundary BEFORE its own epoch, so
+                // the slice runs a half-epoch later than the index to stay centred on the midpoint:
+                // exactly `width / EPOCH_S` boundaries, the same half-open span the deltas use.
+                let m = (width / 2 / EPOCH_S) as usize;
+                let lo = (k + usize::from(m > 0)).saturating_sub(m);
+                let hi = (k + m + 1).min(turns.len());
+                let seg: Vec<f64> = turns[lo..hi].iter().flatten().copied().collect();
                 if !seg.is_empty() {
                     f.turn_sum[w] = Some(seg.iter().sum());
                     f.turn_max[w] = Some(seg.iter().cloned().fold(f64::MIN, f64::max));
@@ -248,8 +249,6 @@ mod tests {
 
     /// The failure this prevents: a fitted weight vector silently transposed against the wrong
     /// column, which no test of the model's accuracy would ever catch.
-    /// A width-only assertion passes with two fields swapped, so every field carries a unique
-    /// marker asserted against its own name.
     #[test]
     fn every_value_lands_in_the_column_its_name_claims() {
         let mut f = Features::default();
@@ -293,6 +292,39 @@ mod tests {
         for (i, (name, want)) in expect.iter().enumerate() {
             assert_eq!(Features::NAMES[i], *name, "column {i} is misnamed");
             assert_eq!(v[i], *want, "column {i} ({name}) carries the wrong field");
+        }
+    }
+
+    /// The names hard-code the widths, so a change to [`WINDOWS_S`] alone turns six columns into
+    /// lies: the placement test compares NAMES against `values()` and never against the widths.
+    #[test]
+    fn every_windowed_name_states_the_width_it_is_actually_computed_over() {
+        assert_eq!(WINDOWS_S, [30, 120, 300, 600], "the column names below spell out these widths");
+        for (i, name) in Features::NAMES.iter().take(19).enumerate() {
+            // Three motion blocks of four, then turn_sum without its 30 s column, then turn_max.
+            let w = match i {
+                0..=11 => i % 4,
+                12..=14 => i - 11,
+                _ => i - 15,
+            };
+            assert!(name.ends_with(&format!("_{}", WINDOWS_S[w])),
+                "column {i} ({name}) names a width it is not computed over");
+        }
+        let cov = Features::NAMES.iter().position(|n| n.starts_with("win_cov")).expect("coverage column");
+        assert_eq!(Features::NAMES[cov], format!("win_cov_{}", WINDOWS_S[3]),
+            "coverage names the longest window");
+
+        // The name is true by construction; the REACH is not. One turn at the boundary into epoch 10
+        // must be seen by exactly `width / EPOCH_S` epochs, or the rotation family lags its label.
+        let mut g = still(1200);
+        for i in 300..1200 {
+            g[i as usize] = s(i, 1.0, 0.0, 0.0);
+        }
+        let f = extract(&g, 0, 1200, &[]);
+        for (w, width) in WINDOWS_S.iter().enumerate() {
+            let reached = f.iter().filter(|x| x.turn_max[w].is_some_and(|t| t > 1e-9)).count() as i64;
+            assert_eq!(reached * EPOCH_S, *width,
+                "turn_max_{width} reaches {reached} epochs, which is {} s", reached * EPOCH_S);
         }
     }
 
@@ -424,8 +456,8 @@ mod tests {
     #[test]
     fn a_fragmented_night_does_not_let_one_burst_become_the_whole_scale() {
         // TWO widely separated 3-second bursts, so only FOUR consecutive-second deltas survive.
-        // The count matters: p75's index is `(n*3/4).min(n-1)`, which lands on the MAXIMUM at n=4.
-        // At n=6 the index is 4, never the maximum, and the guard is not reached at all.
+        // The count matters: at n=4 the p75 index lands on the MAXIMUM, and only being far under
+        // MIN_SCALE_DELTAS keeps that burst out of the scale.
         let mut g: Vec<AccelSample> = Vec::new();
         for t in [0i64, 1200] {
             for i in 0..3 {
@@ -474,13 +506,122 @@ mod tests {
 
     #[test]
     fn windows_are_centred_so_a_feature_neither_leads_nor_lags_its_label() {
-        // A burst at the very start is seen by epoch 0's window and not by a later epoch's.
+        // Epoch 20's 30 s window is [600, 630) centred and would be [585, 615) trailing, so a burst
+        // at second 620 is reached only by the centred one - and a trailing epoch 21 would lag onto it.
         let mut g = still(1200);
-        for i in 0..2 {
+        for i in 620..622 {
             g[i as usize] = s(i, 0.5, 0.0, 0.87);
         }
         let f = extract(&g, 0, 1200, &[]);
-        assert!(f[0].motion_max[0].unwrap() > 0.1, "epoch 0 sees its own burst");
-        assert!(f[30].motion_max[0].unwrap() < 1e-6, "an epoch 15 min later does not");
+        assert!(f[20].motion_max[0].unwrap() > 0.1, "epoch 20's own window covers second 620");
+        assert!(f[19].motion_max[0].unwrap() < 1e-6, "the epoch before must not lead onto it");
+        assert!(f[21].motion_max[0].unwrap() < 1e-6, "and the epoch after must not lag onto it");
+    }
+
+    /// Rotation is seven columns and the only thing that sees a roll-over. Each window spans a fixed
+    /// number of epochs, and the 30 s one spans exactly one turn - which is why its sum is not emitted.
+    #[test]
+    fn a_roll_over_reaches_the_rotation_columns_over_the_window_each_one_names() {
+        // Flat, one epoch on the side, flat again: two 90-degree turns, at epochs 10 and 11.
+        let mut g = still(1200);
+        for i in 300..330 {
+            g[i as usize] = s(i, 1.0, 0.0, 0.0);
+        }
+        let f = extract(&g, 0, 1200, &[]);
+        assert!((f[10].turn_max[0].expect("the rotating epoch") - 90.0).abs() < 1e-6);
+        assert_eq!(f[5].turn_max[0], Some(0.0), "a still epoch turns by zero, not by nothing");
+        assert_eq!(f[0].turn_max[0], None, "nothing precedes the first epoch");
+        // 120 s spans 4 boundaries, so it carries both turns; 600 s spans 20, nine back and ten on.
+        assert!((f[10].turn_sum[1].expect("120 s window") - 180.0).abs() < 1e-6);
+        assert_eq!(f[25].turn_sum[3], Some(0.0), "epoch 25 is 14 epochs out, past the 20-boundary window");
+        for (k, x) in f.iter().enumerate() {
+            assert_eq!(x.turn_sum[0], x.turn_max[0],
+                "epoch {k}: the 30 s window spans one turn, so its sum IS its max");
+        }
+    }
+
+    /// `swing` is per-epoch, and a whole-column index error is invisible on a uniform night because
+    /// every epoch's value is the same number.
+    #[test]
+    fn swing_reports_the_epoch_it_belongs_to_rather_than_the_night() {
+        let mut g = still(1200);
+        for i in 300..330 {
+            let a = (i - 300) as f64 * std::f64::consts::TAU / 30.0;
+            g[i as usize] = s(i, a.cos(), a.sin(), 0.0);
+        }
+        let f = extract(&g, 0, 1200, &[]);
+        assert!(f[10].swing.expect("the sweeping epoch") > 0.9, "a full sweep cancels");
+        assert!(f[9].swing.expect("before") < 1e-9, "its neighbours held one orientation");
+        assert!(f[11].swing.expect("after") < 1e-9);
+        assert!(f[0].swing.expect("epoch 0") < 1e-9, "and no epoch may report epoch 0's spread");
+    }
+
+    /// p75, not the median: they land on different scales whenever the near-zero half of a night runs
+    /// past the midpoint, and the scale sets `motion_frac` on all four windows.
+    #[test]
+    fn the_night_scale_is_the_p75_delta_and_not_the_median() {
+        // Four blocks of alternating x, so each block's inter-second delta is its own amplitude.
+        // Sorted over the night, the median lands on 0.05 g and the p75 on 0.5 g.
+        let amp = |i: i64| match i {
+            0..=599 => 0.05,
+            600..=1019 => 0.5,
+            1020..=1109 => 0.1,
+            _ => 0.9,
+        };
+        let g: Vec<AccelSample> =
+            (0..1200).map(|i| s(i, if i % 2 == 1 { amp(i) } else { 0.0 }, 0.0, 1.0)).collect();
+        let f = extract(&g, 0, 1200, &[]);
+        assert_eq!(f[38].motion_frac[0], Some(1.0), "0.9 g deltas clear either scale");
+        assert_eq!(f[35].motion_frac[0], Some(0.0),
+            "0.1 g deltas sit under a p75 of 0.5 g - against the median's 0.05 g they would read 1.0");
+    }
+
+    /// The floor is the entire scale on a quiet or fragmented night, so its VALUE decides what counts
+    /// as movement there. One delta either side of it pins the number, not just its sign.
+    #[test]
+    fn the_stillness_floor_is_the_scale_a_quiet_night_is_measured_against() {
+        // Far under MIN_SCALE_DELTAS, so the p75 is not trusted: one 0.015 g step and one 0.005 g step.
+        let step = |i: i64| if i < 5 { 0.0 } else if i < 10 { 0.015 } else { 0.02 };
+        let g: Vec<AccelSample> = (0..15).map(|i| s(i, step(i), 0.0, 1.0)).collect();
+        let f = extract(&g, 0, 30, &[]);
+        let frac = f[0].motion_frac[0].expect("a measured fraction");
+        assert!((frac * 14.0 - 1.0).abs() < 1e-9,
+            "exactly one of the 14 deltas clears a 0.01 g floor, got a fraction of {frac}");
+    }
+
+    /// Either side of the threshold the night is measured against a different scale, so only the
+    /// constant's own value picks the side. The counts are LITERAL: feeding the constant back in as
+    /// its own input would pass for any value the span can hold.
+    #[test]
+    fn the_scale_switches_at_min_scale_deltas_and_not_at_some_other_count() {
+        assert_eq!(MIN_SCALE_DELTAS, 120, "the literal counts below spell out this threshold");
+        // Every delta is 0.2 g: over the 0.01 g floor, and not over a measured p75 of 0.2 g.
+        let night = |secs: i64| -> Vec<AccelSample> {
+            (0..secs).map(|i| s(i, if i % 2 == 1 { 0.2 } else { 0.0 }, 0.0, 1.0)).collect()
+        };
+        // 120 samples is 119 consecutive-second deltas and 121 is 120; the span holds up to 149.
+        let below = extract(&night(120), 0, 150, &[]);
+        let at = extract(&night(121), 0, 150, &[]);
+        assert_eq!(below[0].motion_frac[0], Some(1.0), "119 deltas, one short: the floor is the scale");
+        assert_eq!(at[0].motion_frac[0], Some(0.0), "at 120 the night's own p75 is");
+    }
+
+    /// The products are a linear ramp, not merely a decreasing one: an ordering assertion holds for
+    /// any slope, and the slope is what decides how much cardiac evidence survives being still.
+    #[test]
+    fn stillness_ramps_to_a_known_value_rather_than_merely_downwards() {
+        // Deltas of 0.5 g all night, so the p75 scale is 0.5; epoch 5 alone moves at half of it.
+        let mut g: Vec<AccelSample> =
+            (0..1200).map(|i| s(i, if i % 2 == 1 { 0.5 } else { 0.0 }, 0.0, 1.0)).collect();
+        for i in 150..180 {
+            g[i as usize] = s(i, if i % 2 == 1 { 0.25 } else { 0.0 }, 0.0, 1.0);
+        }
+        let card: Vec<Cardiac> = (0..40)
+            .map(|_| Cardiac { hr_z: Some(2.0), hr_var_z: Some(3.0), ..Default::default() })
+            .collect();
+        let f = extract(&g, 0, 1200, &card);
+        assert_eq!(f[5].still_x_cardiac, Some(1.0), "half the night's scale leaves half of hr_z");
+        assert_eq!(f[5].still_x_hrvar, Some(1.5), "and half of hr_var_z");
+        assert_eq!(f[10].still_x_cardiac, Some(0.0), "at the night's scale none of it survives");
     }
 }

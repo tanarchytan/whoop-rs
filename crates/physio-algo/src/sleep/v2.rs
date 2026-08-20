@@ -571,27 +571,59 @@ fn stage_epochs(feats: &[Epoch], p: &Params) -> Vec<SleepStage> {
 }
 
 
-/// The twelve emission weights, in the order [`emission_terms`] lays out its design.
-pub const WEIGHT_NAMES: [&str; 12] = [
-    "deep_hrv", "deep_hr", "deep_motion", "deep_gate_slope",
-    "rem_hrv", "rem_motion", "rem_hr",
-    "awake_motion", "awake_hrv", "awake_hr", "awake_turn",
-    "resp_weight",
-];
+// Slot each weight owns, in [`WEIGHT_NAMES`], in [`weights_of`] and in the [`Terms`] design columns.
+// Nothing but these constants ties the three together, so all three read them.
+const W_DEEP_HRV: usize = 0;
+const W_DEEP_HR: usize = 1;
+const W_DEEP_MOTION: usize = 2;
+const W_DEEP_GATE_SLOPE: usize = 3;
+const W_REM_HRV: usize = 4;
+const W_REM_MOTION: usize = 5;
+const W_REM_HR: usize = 6;
+const W_AWAKE_MOTION: usize = 7;
+const W_AWAKE_HRV: usize = 8;
+const W_AWAKE_HR: usize = 9;
+const W_AWAKE_TURN: usize = 10;
+const W_RESP: usize = 11;
 
-/// The weights [`WEIGHT_NAMES`] refers to, read off `p` in the same order.
+/// The twelve emission weights, in the order [`emission_terms`] lays out its design.
+pub const WEIGHT_NAMES: [&str; 12] = {
+    let mut n = [""; 12];
+    n[W_DEEP_HRV] = "deep_hrv";
+    n[W_DEEP_HR] = "deep_hr";
+    n[W_DEEP_MOTION] = "deep_motion";
+    n[W_DEEP_GATE_SLOPE] = "deep_gate_slope";
+    n[W_REM_HRV] = "rem_hrv";
+    n[W_REM_MOTION] = "rem_motion";
+    n[W_REM_HR] = "rem_hr";
+    n[W_AWAKE_MOTION] = "awake_motion";
+    n[W_AWAKE_HRV] = "awake_hrv";
+    n[W_AWAKE_HR] = "awake_hr";
+    n[W_AWAKE_TURN] = "awake_turn";
+    n[W_RESP] = "resp_weight";
+    n
+};
+
+/// The weights [`WEIGHT_NAMES`] refers to, read off `p` into the slot each name owns.
 pub fn weights_of(p: &Params) -> [f64; 12] {
-    [p.deep_hrv, p.deep_hr, p.deep_motion, p.deep_gate_slope,
-     p.rem_hrv, p.rem_motion, p.rem_hr,
-     p.awake_motion, p.awake_hrv, p.awake_hr, p.awake_turn,
-     p.resp_weight]
+    let mut w = [0.0f64; 12];
+    w[W_DEEP_HRV] = p.deep_hrv;
+    w[W_DEEP_HR] = p.deep_hr;
+    w[W_DEEP_MOTION] = p.deep_motion;
+    w[W_DEEP_GATE_SLOPE] = p.deep_gate_slope;
+    w[W_REM_HRV] = p.rem_hrv;
+    w[W_REM_MOTION] = p.rem_motion;
+    w[W_REM_HR] = p.rem_hr;
+    w[W_AWAKE_MOTION] = p.awake_motion;
+    w[W_AWAKE_HRV] = p.awake_hrv;
+    w[W_AWAKE_HR] = p.awake_hr;
+    w[W_AWAKE_TURN] = p.awake_turn;
+    w[W_RESP] = p.resp_weight;
+    w
 }
 
-/// The emission decomposed into the parts a weight multiplies and the parts it does not.
-///
-/// `design[e][c][j]` is what weight `j` contributes to class `c`, and `fixed[e][c]` is everything
-/// no weight touches. `clamped[e]` marks where the stillness clamp applies, which is a `min(0.0)`
-/// over the awake CARDIAC SUM and so cannot be folded into either.
+/// The emission split into `design[e][c][j]`, what weight `j` contributes to class `c`, and
+/// `fixed[e][c]`, the rest. `clamped[e]` marks the awake-cardiac `min(0.0)`, which is neither.
 pub struct Terms {
     pub design: Vec<[[f64; 12]; 4]>,
     pub fixed: Vec<[f64; 4]>,
@@ -599,8 +631,8 @@ pub struct Terms {
 }
 
 impl Terms {
-    /// Rebuild one epoch's emission from a weight vector. Reproduces [`emissions_prepared`] exactly
-    /// at `weights_of(p)`, which `the_decomposition_reproduces_the_emission` pins.
+    /// Rebuild one epoch's emission from a weight vector. At `weights_of(p)` it is exactly what
+    /// [`emissions_prepared`] returns, because that path is this one.
     pub fn emission(&self, e: usize, w: &[f64; 12]) -> [f64; 4] {
         let (d, f) = (&self.design[e], &self.fixed[e]);
         let mut em = [0.0f64; 4];
@@ -608,13 +640,13 @@ impl Terms {
             let mut acc = f[c];
             for j in 0..12 {
                 // The awake cardiac pair is summed first so the clamp can act on the pair.
-                if c == AWAKE && (j == 8 || j == 9) {
+                if c == AWAKE && (j == W_AWAKE_HRV || j == W_AWAKE_HR) {
                     continue;
                 }
                 acc += w[j] * d[c][j];
             }
             if c == AWAKE {
-                let card = w[8] * d[c][8] + w[9] * d[c][9];
+                let card = w[W_AWAKE_HRV] * d[c][W_AWAKE_HRV] + w[W_AWAKE_HR] * d[c][W_AWAKE_HR];
                 acc += if self.clamped[e] { card.min(0.0) } else { card };
             }
             em[c] = acc;
@@ -624,20 +656,24 @@ impl Terms {
 }
 
 /// Decompose a prepared night's emissions into [`Terms`], under the same anchor
-/// [`emissions_prepared`] resolves.
+/// [`emissions_prepared`] resolves. An onset anchor is itself staged under `p`'s weights, so the
+/// cycle prior baked into `fixed` holds for those weights alone.
 pub fn emission_terms(prep: &Prepared, p: &Params) -> Terms {
     terms(&prep.feats, p, resolve_anchor(&prep.feats, p))
 }
 
 
-/// [`emissions`] with the weighted parts kept apart from the rest. Every line here mirrors one in
-/// `emissions`; the test pins that the two agree at the shipped weights.
+/// The recipe itself, with the weighted parts kept apart from the rest. [`emissions`] is this summed
+/// at `p`'s own weights, so the emission is written here and nowhere else.
 fn terms(feats: &[Epoch], p: &Params, anchor: Anchor) -> Terms {
     let blp = p.base_log_prior();
     let zhr = ZScore::build(&feats.iter().map(|f| f.hr).collect::<Vec<_>>());
     let zhv = ZScore::build(&feats.iter().map(|f| f.hr_var).collect::<Vec<_>>());
     let zmv = ZScore::build(&feats.iter().map(|f| f.move_frac).collect::<Vec<_>>());
     let zrg = ZScore::build(&feats.iter().map(|f| f.resp_reg).collect::<Vec<_>>());
+    // turn spans three orders of magnitude within a night (p50 ~0.1 deg, max ~140), so a z-score hands
+    // a small NEGATIVE to the great majority of epochs and a huge positive to a handful, which lowers
+    // AWAKE across the whole night. Rank it instead, the way hr_flat11 is ranked.
     let mut tsorted: Vec<f64> = feats.iter().filter_map(|f| f.turn).collect();
     tsorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mut fsorted: Vec<f64> = feats.iter().filter_map(|f| f.hr_flat11).collect();
@@ -657,24 +693,28 @@ fn terms(feats: &[Epoch], p: &Params, anchor: Anchor) -> Terms {
         let zhvv = zhv.apply(f.hr_var);
         let zmvv = zmv.apply(f.move_frac);
         let hinge = (pct(&fsorted, f.hr_flat11) - p.deep_gate_thresh).max(0.0);
+        // Trust the awake cardiac term where R-R backs it; clamp it where only heart rate does.
         let rr_backed = p.clamp_only_without_rr && f.resp_reg.is_some();
+        // Rotation is evidence of wake on its own terms, and it survives the stillness clamp. Centred
+        // on the median so it is symmetric: a still epoch pushes AWAKE down as much as a rotating one
+        // pushes it up, and a night with no rotation at all is left alone.
         let tp = (pct(&tsorted, f.turn) - 0.5) * 2.0;
         let rz = f.resp_reg.map_or(0.0, |rg| zrg.apply(Some(rg)));
 
         let mut d = [[0.0f64; 12]; 4];
-        d[DEEP][0] = zhvv;
-        d[DEEP][1] = zhrv;
-        d[DEEP][2] = zmvv;
-        d[DEEP][3] = -hinge;
-        d[REM][4] = zhvv;
-        d[REM][5] = zmvv;
-        d[REM][6] = zhrv;
-        d[AWAKE][7] = zmvv;
-        d[AWAKE][8] = dz(zhvv, p.awake_deadzone);
-        d[AWAKE][9] = dz(zhrv, p.awake_deadzone);
-        d[AWAKE][10] = tp;
-        d[DEEP][11] = rz;
-        d[REM][11] = -rz;
+        d[DEEP][W_DEEP_HRV] = zhvv;
+        d[DEEP][W_DEEP_HR] = zhrv;
+        d[DEEP][W_DEEP_MOTION] = zmvv;
+        d[DEEP][W_DEEP_GATE_SLOPE] = -hinge;
+        d[REM][W_REM_HRV] = zhvv;
+        d[REM][W_REM_MOTION] = zmvv;
+        d[REM][W_REM_HR] = zhrv;
+        d[AWAKE][W_AWAKE_MOTION] = zmvv;
+        d[AWAKE][W_AWAKE_HRV] = dz(zhvv, p.awake_deadzone);
+        d[AWAKE][W_AWAKE_HR] = dz(zhrv, p.awake_deadzone);
+        d[AWAKE][W_AWAKE_TURN] = tp;
+        d[DEEP][W_RESP] = rz;
+        d[REM][W_RESP] = -rz;
 
         let mut fx = blp;
         let pr = cycle_prior(cycle_clock(f.clock, feats, anchor, p), rem_guard(i, f.clock, anchor, p), p);
@@ -687,97 +727,19 @@ fn terms(feats: &[Epoch], p: &Params, anchor: Anchor) -> Terms {
 
         out.design.push(d);
         out.fixed.push(fx);
+        // Stillness silences the cardiac term - unless the heart is running well above this night's own
+        // mean, which is a wind-down and not sleep. INFINITY restores the unconditional clamp.
         out.clamped.push(motion_quiescent(f, p) && zhrv < p.quiescent_hr_z_max && !rr_backed);
     }
     out
 }
 
-/// Per-epoch log-emissions under `p`, with the time-of-night priors read from `anchor`.
+/// Per-epoch log-emissions under `p`, with the time-of-night priors read from `anchor`. [`terms`] holds
+/// the recipe; this is it summed at `p`'s own twelve weights.
 fn emissions(feats: &[Epoch], p: &Params, anchor: Anchor) -> Vec<[f64; 4]> {
-    let blp = p.base_log_prior();
-    let zhr = ZScore::build(&feats.iter().map(|f| f.hr).collect::<Vec<_>>());
-    let zhv = ZScore::build(&feats.iter().map(|f| f.hr_var).collect::<Vec<_>>());
-    let zmv = ZScore::build(&feats.iter().map(|f| f.move_frac).collect::<Vec<_>>());
-    let zrg = ZScore::build(&feats.iter().map(|f| f.resp_reg).collect::<Vec<_>>());
-    // turn spans three orders of magnitude within a night (p50 ~0.1 deg, max ~140), so a z-score
-    // hands a small NEGATIVE to the great majority of epochs and a huge positive to a handful,
-    // which lowers AWAKE across the whole night. Rank it instead, the way hr_flat11 is ranked.
-    let mut tsorted: Vec<f64> = feats.iter().filter_map(|f| f.turn).collect();
-    tsorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let mut fsorted: Vec<f64> = feats.iter().filter_map(|f| f.hr_flat11).collect();
-    fsorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let fpct = |value: Option<f64>| -> f64 {
-        match value {
-            Some(v) if !fsorted.is_empty() => {
-                // bisect_right / n
-                let mut lo = 0usize;
-                let mut hi = fsorted.len();
-                while lo < hi {
-                    let mid = (lo + hi) / 2;
-                    if fsorted[mid] <= v {
-                        lo = mid + 1;
-                    } else {
-                        hi = mid;
-                    }
-                }
-                lo as f64 / fsorted.len() as f64
-            }
-            _ => 0.5,
-        }
-    };
-
-    let mut seq: Vec<[f64; 4]> = Vec::with_capacity(feats.len());
-    for (i, f) in feats.iter().enumerate() {
-        let zhrv = zhr.apply(f.hr);
-        let zhvv = zhv.apply(f.hr_var);
-        let zmvv = zmv.apply(f.move_frac);
-        let gate = p.deep_gate_slope * (fpct(f.hr_flat11) - p.deep_gate_thresh).max(0.0);
-        let awake_cardiac0 = p.awake_hrv * dz(zhvv, p.awake_deadzone) + p.awake_hr * dz(zhrv, p.awake_deadzone);
-        // Stillness silences the cardiac term - unless the heart is running well above this night's
-        // own mean, which is a wind-down and not sleep. INFINITY restores the unconditional clamp.
-        // Trust the cardiac term where R-R backs it; clamp it where only heart rate does.
-        let rr_backed = p.clamp_only_without_rr && f.resp_reg.is_some();
-        let clamped = motion_quiescent(f, p) && zhrv < p.quiescent_hr_z_max && !rr_backed;
-        let awake_cardiac = if clamped { awake_cardiac0.min(0.0) } else { awake_cardiac0 };
-        // Rotation is evidence of wake on its own terms: it survives the stillness clamp, because a
-        // wrist that changed orientation did not hold still whatever the jerk peak says.
-        // Centred on the median so the term is symmetric: a still epoch pushes AWAKE down as much
-        // as a rotating one pushes it up, and a night with no rotation at all is left alone.
-        let tpct = match f.turn {
-            Some(v) if !tsorted.is_empty() => {
-                let (mut lo, mut hi) = (0usize, tsorted.len());
-                while lo < hi {
-                    let mid = (lo + hi) / 2;
-                    if tsorted[mid] <= v { lo = mid + 1 } else { hi = mid }
-                }
-                lo as f64 / tsorted.len() as f64
-            }
-            _ => 0.5,
-        };
-        let awake_turn = p.awake_turn * (tpct - 0.5) * 2.0;
-
-        let mut em = [0.0f64; 4];
-        em[DEEP] = p.deep_hrv * zhvv + p.deep_hr * zhrv + p.deep_motion * zmvv - gate + blp[DEEP];
-        em[REM] = p.rem_hrv * zhvv + p.rem_motion * zmvv + p.rem_hr * zhrv + blp[REM];
-        em[LIGHT] = blp[LIGHT];
-        em[AWAKE] = p.awake_motion * zmvv + awake_cardiac + awake_turn + blp[AWAKE];
-
-        let pr = cycle_prior(cycle_clock(f.clock, feats, anchor, p), rem_guard(i, f.clock, anchor, p), p);
-        for (s, p) in pr.iter().enumerate() {
-            em[s] += p;
-        }
-        if f.jerk_max > f.jerk_scale * p.jerk_gate_mult {
-            em[AWAKE] += p.motion_gate_boost;
-        }
-        if let Some(rg) = f.resp_reg {
-            let z = zrg.apply(Some(rg));
-            em[DEEP] += p.resp_weight * z;
-            em[REM] -= p.resp_weight * z;
-        }
-        seq.push(em);
-    }
-    seq
+    let t = terms(feats, p, anchor);
+    let w = weights_of(p);
+    (0..t.design.len()).map(|e| t.emission(e, &w)).collect()
 }
 
 #[cfg(test)]
@@ -785,45 +747,83 @@ mod terms_tests {
     use super::*;
     use crate::sleep::{AccelSample, HrSample, RrRun, SleepInput};
 
-    /// The decomposition is only useful if it IS the emission. At the shipped weights every epoch
-    /// and every class must agree to the last bit, or a refit is optimising something else.
-    #[test]
-    fn the_decomposition_reproduces_the_emission() {
-        let (start, end) = (0i64, 3600i64);
-        let hr: Vec<HrSample> = (0..3600)
-            .map(|t| HrSample { ts: t, bpm: (58.0 + 6.0 * (t as f64 / 400.0).sin()) as u16 })
-            .collect();
-        let accel: Vec<AccelSample> = (0..3600)
-            .map(|t| {
-                let a = if t % 600 < 20 { 0.4 * (t as f64).sin() } else { 0.0 };
-                AccelSample { ts: t, x: a, y: 0.0, z: (1.0f64 - a * a).max(0.0).sqrt() }
-            })
-            .collect();
-        let rr: Vec<RrRun> = (0..600)
-            .map(|k| RrRun { ts: k * 6, intervals: vec![980, 1010, 995] })
-            .collect();
-        let input = SleepInput { start, end, hr, rr, accel };
-
-        for p in [Params::SHIPPED, Params { cycle_clock_from_onset: true, ..Params::SHIPPED }] {
-            let prep = prepare(&input, &p);
-            let want = emissions_prepared(&prep, &p);
-            let terms = emission_terms(&prep, &p);
-            let w = weights_of(&p);
-            assert_eq!(terms.design.len(), want.len(), "one design row per epoch");
-            for (e, row) in want.iter().enumerate() {
-                let got = terms.emission(e, &w);
-                for c in 0..4 {
-                    assert!((got[c] - row[c]).abs() < 1e-12,
-                        "epoch {e} class {c}: decomposed {} vs emission {}", got[c], row[c]);
-                }
-            }
+    /// `Params::SHIPPED` with the one weight `name` refers to moved by 1.0. The match is the only
+    /// statement of which field each name means, so a name that reaches no field is a failure.
+    fn bumped(name: &str) -> Params {
+        let mut p = Params::SHIPPED;
+        match name {
+            "deep_hrv" => p.deep_hrv += 1.0,
+            "deep_hr" => p.deep_hr += 1.0,
+            "deep_motion" => p.deep_motion += 1.0,
+            "deep_gate_slope" => p.deep_gate_slope += 1.0,
+            "rem_hrv" => p.rem_hrv += 1.0,
+            "rem_motion" => p.rem_motion += 1.0,
+            "rem_hr" => p.rem_hr += 1.0,
+            "awake_motion" => p.awake_motion += 1.0,
+            "awake_hrv" => p.awake_hrv += 1.0,
+            "awake_hr" => p.awake_hr += 1.0,
+            "awake_turn" => p.awake_turn += 1.0,
+            "resp_weight" => p.resp_weight += 1.0,
+            other => panic!("{other} is named but reaches no Params field"),
         }
+        p
     }
 
-    /// And it must be SENSITIVE to the weights it claims to carry: moving one has to move the
-    /// emission, or that weight is not really in the design.
+    /// Ten minutes of flat HR with the wrist rolling onto a new face twice, so `turn` varies over the
+    /// night instead of holding one value the rank transform would flatten.
+    pub(super) fn rotating_night() -> SleepInput {
+        let start = 1_749_513_600i64;
+        let hr: Vec<HrSample> = (0..600).map(|i| HrSample { ts: start + i, bpm: 60 }).collect();
+        let accel: Vec<AccelSample> = (0..600)
+            .map(|i| match i / 30 {
+                5 | 12 => AccelSample { ts: start + i, x: 1.0, y: 0.0, z: 0.0 },
+                e if e > 12 => AccelSample { ts: start + i, x: 0.0, y: 1.0, z: 0.0 },
+                _ => AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 },
+            })
+            .collect();
+        SleepInput { start, end: start + 600, hr, rr: Vec::new(), accel }
+    }
+
+    /// `secs` seconds of one beat each, 1000 ms swinging 40 ms at 0.25 Hz. The swing is what carries
+    /// the respiration term: a flat tachogram has no power and yields none at all.
+    pub(super) fn rsa_rr(start: i64, secs: i64) -> Vec<RrRun> {
+        (0..secs)
+            .map(|i| {
+                let ms = 1000.0 + 40.0 * (2.0 * PI * 0.25 * i as f64).sin();
+                RrRun { ts: start + i, intervals: vec![ms as u16] }
+            })
+            .collect()
+    }
+
+    /// `awake_turn` ships at 0.0, so no staged night can see its column - pin the column itself. It is
+    /// the night-rank of `turn` centred on the median and spread to [-1, 1], and it reaches AWAKE alone.
     #[test]
-    fn every_named_weight_moves_the_emission() {
+    fn the_turn_column_is_the_centred_night_rank_of_the_rotation() {
+        let prep = prepare(&rotating_night(), &Params::SHIPPED);
+        let t = emission_terms(&prep, &Params::SHIPPED);
+        let turns: Vec<f64> = prep.feats.iter().filter_map(|f| f.turn).collect();
+        assert!(turns.len() >= 10, "the fixture must carry rotation on most epochs");
+        assert!(turns.iter().cloned().fold(f64::MIN, f64::max) > 1.0, "and it must actually rotate");
+
+        let mut nonzero = 0usize;
+        for (e, f) in prep.feats.iter().enumerate() {
+            let rank = match f.turn {
+                Some(v) => turns.iter().filter(|s| **s <= v).count() as f64 / turns.len() as f64,
+                None => 0.5,
+            };
+            assert_eq!((rank - 0.5) * 2.0, t.design[e][AWAKE][W_AWAKE_TURN], "epoch {e}");
+            for c in [DEEP, REM, LIGHT] {
+                assert_eq!(0.0, t.design[e][c][W_AWAKE_TURN], "epoch {e}: turn reaches AWAKE alone");
+            }
+            nonzero += usize::from(t.design[e][AWAKE][W_AWAKE_TURN] != 0.0);
+        }
+        assert!(nonzero >= 5, "a column of zeros would agree with anything");
+    }
+
+    /// Each named weight must land in its own slot and move the stages its name claims, no others. Two
+    /// shipped weights share a value with another, so only the slot and the stage part a swapped pair.
+    #[test]
+    fn every_named_weight_moves_exactly_the_stages_its_name_claims() {
         let (start, end) = (0i64, 3600i64);
         let hr: Vec<HrSample> = (0..3600)
             .map(|t| HrSample { ts: t, bpm: (58.0 + 9.0 * (t as f64 / 300.0).sin()) as u16 })
@@ -839,15 +839,104 @@ mod terms_tests {
         let prep = prepare(&SleepInput { start, end, hr, rr, accel }, &Params::SHIPPED);
         let terms = emission_terms(&prep, &Params::SHIPPED);
         let base = weights_of(&Params::SHIPPED);
-        for j in 0..12 {
-            let mut w = base;
-            w[j] += 1.0;
-            let moved = (0..terms.design.len()).any(|e| {
-                let (a, b) = (terms.emission(e, &base), terms.emission(e, &w));
-                (0..4).any(|c| (a[c] - b[c]).abs() > 1e-9)
-            });
-            assert!(moved, "{} is named but moves nothing", WEIGHT_NAMES[j]);
+        for (j, &name) in WEIGHT_NAMES.iter().enumerate() {
+            let w = weights_of(&bumped(name));
+            assert_ne!(base[j], w[j], "{name} must be the weight in slot {j}");
+            assert_eq!(1, (0..12).filter(|k| base[*k] != w[*k]).count(), "{name} moved another slot");
+            let want: &[usize] = match name.split('_').next().expect("a named weight") {
+                "deep" => &[DEEP],
+                "rem" => &[REM],
+                "awake" => &[AWAKE],
+                _ => &[DEEP, REM],
+            };
+            for c in 0..4 {
+                let moved = (0..terms.design.len())
+                    .any(|e| (terms.emission(e, &base)[c] - terms.emission(e, &w)[c]).abs() > 1e-9);
+                assert_eq!(want.contains(&c), moved, "{name} (slot {j}) against class {c}");
+            }
         }
+    }
+
+    /// The shipped recipe always resolves an onset anchor over a fully populated night. This is the
+    /// other side: window-anchored, with an HR gap, a gravity gap and an R-R gap.
+    #[test]
+    fn a_window_anchored_night_with_absent_channels_decomposes() {
+        let start = 1_749_513_600i64;
+        let hr: Vec<HrSample> = (0..900)
+            .filter(|i| !(300..600).contains(i))
+            .map(|i| HrSample { ts: start + i, bpm: 58 + (i % 5) as u16 })
+            .collect();
+        let accel: Vec<AccelSample> =
+            (0..600).map(|i| AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 }).collect();
+        let input = SleepInput { start, end: start + 900, hr, rr: rsa_rr(start, 300), accel };
+
+        let p =
+            Params { cycle_rem_onset_minutes: 0.0, cycle_clock_from_onset: false, ..Params::SHIPPED };
+        let prep = prepare(&input, &p);
+        assert!(prep.feats.iter().any(|f| f.hr.is_none()), "the fixture must carry an HR gap");
+        assert!(prep.feats.iter().any(|f| f.move_frac.is_none()), "and a gravity gap");
+        assert!(prep.feats.iter().any(|f| f.resp_reg.is_none()), "and an R-R gap");
+
+        let t = emission_terms(&prep, &p);
+        assert!(matches!(resolve_anchor(&prep.feats, &p), Anchor::Window),
+            "no onset minutes and no onset clock is window-anchored");
+        assert!(matches!(resolve_anchor(&prep.feats, &Params::SHIPPED), Anchor::Onset(_)),
+            "the shipped prior is anchored on a staging, so its fixed part is weight-dependent");
+        let clock_only = Params { cycle_clock_from_onset: true, ..p };
+        assert!(matches!(resolve_anchor(&prep.feats, &clock_only), Anchor::Onset(_)),
+            "an onset clock resolves an onset on its own, with no onset minutes to ask for one");
+        assert_eq!(prep.feats.len(), t.design.len(), "one design row per epoch");
+        let w = weights_of(&p);
+        for (e, f) in prep.feats.iter().enumerate() {
+            assert!(t.emission(e, &w).iter().all(|v| v.is_finite()), "epoch {e} is not finite");
+            if f.move_frac.is_none() {
+                assert!(!t.clamped[e], "epoch {e}: an absent accelerometer cannot assert stillness");
+            }
+        }
+    }
+
+    /// Twenty minutes of flat gravity, so every epoch is motion-quiescent and clamped, over a heart rate
+    /// that is low and swinging for the first half and high and steady for the second. That parts the two
+    /// cardiac z-scores in sign, which is what the pair clamp turns on.
+    fn still_night_with_opposed_cardiac_terms() -> SleepInput {
+        let start = 1_749_513_600i64;
+        let hr: Vec<HrSample> = (0..1200)
+            .map(|i| {
+                let swing = 55.0 + 18.0 * (2.0 * PI * i as f64 / 60.0).sin();
+                HrSample { ts: start + i, bpm: if i < 600 { swing as u16 } else { 78 } }
+            })
+            .collect();
+        let accel: Vec<AccelSample> =
+            (0..1200).map(|i| AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 }).collect();
+        SleepInput { start, end: start + 1200, hr, rr: Vec::new(), accel }
+    }
+
+    /// The clamp acts on the summed awake cardiac PAIR, the one thing in [`Terms`] a fitter cannot treat
+    /// as linear. Where the deadzoned HRV-z and HR-z disagree in sign, `min(a + b, 0)` and the per-term
+    /// `min(a, 0) + min(b, 0)` are different numbers, so the emission has to name which one it is.
+    #[test]
+    fn the_awake_cardiac_clamp_acts_on_the_summed_pair_not_on_each_term() {
+        let prep = prepare(&still_night_with_opposed_cardiac_terms(), &Params::SHIPPED);
+        let t = emission_terms(&prep, &Params::SHIPPED);
+        let w = weights_of(&Params::SHIPPED);
+
+        let mut opposed = 0usize;
+        for e in 0..t.design.len() {
+            let d = &t.design[e][AWAKE];
+            let (a, b) = (w[W_AWAKE_HRV] * d[W_AWAKE_HRV], w[W_AWAKE_HR] * d[W_AWAKE_HR]);
+            if !t.clamped[e] || a * b >= 0.0 {
+                continue;
+            }
+            let rest = t.fixed[e][AWAKE]
+                + w[W_AWAKE_MOTION] * d[W_AWAKE_MOTION]
+                + w[W_AWAKE_TURN] * d[W_AWAKE_TURN];
+            let got = t.emission(e, &w)[AWAKE];
+            assert_eq!(rest + (a + b).min(0.0), got, "epoch {e}: the pair is clamped whole");
+            assert!((rest + a.min(0.0) + b.min(0.0) - got).abs() > 1e-9,
+                "epoch {e}: a per-term clamp must be a different emission, not the same one");
+            opposed += 1;
+        }
+        assert!(opposed >= 5, "the fixture must carry clamped epochs whose cardiac terms disagree in sign");
     }
 }
 
@@ -869,23 +958,29 @@ mod tests {
         features(input.start, input.end, &grav, &input.hr, &[], &Params::SHIPPED)
     }
 
-    /// Pins `quiescent_hr_z_max`, which shipped ungated: it appears in `params.rs` and here and in no
-    /// test at all, and its INFINITY default means a mutation sweep that scales constants cannot move
-    /// it either. INFINITY must reproduce the unconditional clamp exactly; a finite value must let a
-    /// still epoch whose heart rate sits above the night mean keep its awake cardiac term.
-    #[test]
-    fn the_quiescent_hr_ceiling_decides_whether_a_still_epoch_keeps_its_cardiac_term() {
-        assert_eq!(Params::SHIPPED.quiescent_hr_z_max, f64::INFINITY, "shipped is the old behaviour");
-
-        // A still night whose second half runs hot: gravity flat throughout, HR stepping up, so the
-        // late epochs are motion-quiescent AND well above the night's own mean.
+    /// A still, hot night, optionally carrying the swinging R-R of `terms_tests::rsa_rr`. R-R feeds
+    /// only `resp_reg`, so the two nights differ in nothing else.
+    fn still_hot_night(with_rr: bool) -> SleepInput {
         let start = 1_749_513_600i64;
         let hr: Vec<HrSample> = (0..600)
             .map(|i| HrSample { ts: start + i, bpm: if i < 300 { 50 } else { 90 } })
             .collect();
         let accel: Vec<AccelSample> =
             (0..600).map(|i| AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 }).collect();
-        let input = SleepInput { start, end: start + 600, hr, rr: Vec::<RrRun>::new(), accel };
+        let rr = if with_rr { super::terms_tests::rsa_rr(start, 600) } else { Vec::new() };
+        SleepInput { start, end: start + 600, hr, rr, accel }
+    }
+
+    /// Pins `quiescent_hr_z_max`: INFINITY must reproduce the unconditional clamp exactly, and a finite
+    /// ceiling must let a still epoch whose heart rate sits above the night mean keep its awake cardiac
+    /// term.
+    #[test]
+    fn the_quiescent_hr_ceiling_decides_whether_a_still_epoch_keeps_its_cardiac_term() {
+        assert_eq!(Params::SHIPPED.quiescent_hr_z_max, f64::INFINITY, "shipped is the old behaviour");
+
+        // Gravity flat throughout and HR stepping up, so the late epochs are motion-quiescent AND well
+        // above the night's own mean.
+        let input = still_hot_night(false);
 
         let awake_of = |z: f64| {
             let p = Params { quiescent_hr_z_max: z, ..Params::SHIPPED };
@@ -899,29 +994,6 @@ mod tests {
         assert!(free > clamped,
             "a hot still epoch must score MORE awake once the ceiling lets its cardiac term through:              {free} vs {clamped}");
         assert_eq!(clamped, awake_of(f64::MAX), "any ceiling above the data clamps identically");
-    }
-
-    /// A still, hot night, optionally carrying R-R. The intervals swing at 0.25 Hz because a flat
-    /// tachogram has no power and yields no respiration term at all. R-R feeds only `resp_reg`, so
-    /// the two nights differ in nothing else.
-    fn still_hot_night(with_rr: bool) -> SleepInput {
-        let start = 1_749_513_600i64;
-        let hr: Vec<HrSample> = (0..600)
-            .map(|i| HrSample { ts: start + i, bpm: if i < 300 { 50 } else { 90 } })
-            .collect();
-        let accel: Vec<AccelSample> =
-            (0..600).map(|i| AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 }).collect();
-        let rr = if with_rr {
-            (0..600)
-                .map(|i| {
-                    let ms = 1000.0 + 40.0 * (2.0 * PI * 0.25 * i as f64).sin();
-                    RrRun { ts: start + i, intervals: vec![ms as u16] }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        SleepInput { start, end: start + 600, hr, rr, accel }
     }
 
     /// Pins BOTH operands of the R-R clamp exemption. Under SHIPPED the exemption is off, so a still
@@ -971,22 +1043,7 @@ mod tests {
     fn a_nonzero_turn_weight_moves_the_awake_emission_on_a_rotating_night() {
         // turn must VARY, not merely be large: it is z-scored per night, so a night that rotates
         // by the same amount every epoch has zero variance and correctly contributes nothing.
-        // Here the wrist holds still for most epochs and rolls over on two of them.
-        let start = 1_749_513_600i64;
-        let hr: Vec<HrSample> = (0..600).map(|i| HrSample { ts: start + i, bpm: 60 }).collect();
-        let accel: Vec<AccelSample> = (0..600)
-            .map(|i| {
-                let e = i / 30;
-                if e == 5 || e == 12 {
-                    AccelSample { ts: start + i, x: 1.0, y: 0.0, z: 0.0 }
-                } else if e > 12 {
-                    AccelSample { ts: start + i, x: 0.0, y: 1.0, z: 0.0 }
-                } else {
-                    AccelSample { ts: start + i, x: 0.0, y: 0.0, z: 1.0 }
-                }
-            })
-            .collect();
-        let input = SleepInput { start, end: start + 600, hr, rr: Vec::new(), accel };
+        let input = super::terms_tests::rotating_night();
         let base = emissions_prepared(&prepare(&input, &Params::SHIPPED), &Params::SHIPPED);
         let weighted = Params { awake_turn: 1.0, ..Params::SHIPPED };
         let moved = emissions_prepared(&prepare(&input, &weighted), &weighted);

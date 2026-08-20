@@ -7,8 +7,12 @@
 //! emission it has a closed-form maximum-likelihood estimate: count the transitions the reference
 //! actually makes and normalise. No optimiser, no hyperparameter, nothing to overfit but the counts.
 //!
-//! The isolation is exact. Both arms decode the SAME shipped emissions over the same epochs; only
-//! the 4x4 matrix differs. Whatever moves is the transition and nothing else.
+//! The isolation is deliberate but PARTIAL: both arms decode the SAME shipped emissions over the
+//! same epochs, so what moves is the path search alone. Adopting a counted matrix into `Params`
+//! would move the emissions too - `cycle_rem_onset_minutes` is non-zero, so `emissions_v2` resolves
+//! its cycle anchor with a probe decode over `p.transition`. That half is held at the shipped matrix
+//! here and is NOT measured; a matrix that loses below could still win, or lose harder, in the
+//! recipe.
 //!
 //! Every cohort takes a turn counting. Counting on one and losing on two others is equally what an
 //! UNREPRESENTATIVE counting cohort looks like, and DREAMT is a clinical apnea set whose dynamics
@@ -19,14 +23,13 @@
 
 mod common;
 
-use common::{dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx};
-use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar, recall, specificity, WAKE};
+use common::{dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx};
+use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar};
 use physio_algo::sleep::{
     decode_v2, emissions_v2, params::Params, prepare_v2, SleepInput, STAGE_ORDER,
 };
 
-/// Every cohort takes a turn as the counting set. Counting on ONE and losing on two others is also
-/// what "this cohort's dynamics are unusual" looks like, and DREAMT is a clinical apnea cohort.
+/// The three PSG cohorts; each takes a turn as the counting set.
 const COHORTS: [&str; 3] = ["dreamt", "aauwss", "sleep-accel"];
 const CLASSES: usize = 4;
 /// Added to every transition count. A stage pair the reference never happens to show is rare, not
@@ -59,15 +62,15 @@ fn load(set: &str) -> Vec<Night> {
         if em.len() < MIN_EPOCHS {
             continue;
         }
+        // `emissions_v2` DROPS an epoch carrying neither HR nor gravity, so positional indexing
+        // into `raw` is only valid while the grid is complete. Unenforced, this misaligns silently.
+        assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
+                   dir.display(), em.len());
         let truth = (0..em.len())
             .map(|k| {
                 raw.get(&k).copied().filter(|t| (0..CLASSES as i32).contains(t)).map(|t| t as usize)
             })
             .collect();
-        // `emissions_v2` DROPS an epoch carrying neither HR nor gravity, so positional indexing
-        // into `raw` is only valid while the grid is complete. Unenforced, this misaligns silently.
-        assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
-                   dir.display(), em.len());
         out.push(Night { em, truth });
     }
     out
@@ -105,9 +108,9 @@ fn count_transitions(nights: &[Night]) -> ([[f64; CLASSES]; CLASSES], usize, usi
     (cnt, pairs, sparse)
 }
 
-/// Per-night kappa, wake recall and wake specificity under one transition matrix.
-fn score(nights: &[Night], t: &[[f64; CLASSES]; CLASSES]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let (mut ks, mut rs, mut ss) = (Vec::new(), Vec::new(), Vec::new());
+/// Per-night kappa under one transition matrix.
+fn score(nights: &[Night], t: &[[f64; CLASSES]; CLASSES]) -> Vec<f64> {
+    let mut ks = Vec::new();
     for nt in nights {
         let path = decode_v2(&nt.em, t);
         let (mut p, mut tr) = (Vec::new(), Vec::new());
@@ -119,28 +122,16 @@ fn score(nights: &[Night], t: &[[f64; CLASSES]; CLASSES]) -> (Vec<f64>, Vec<f64>
         if p.len() < MIN_EPOCHS {
             continue;
         }
-        let cm = confusion4(&p, &tr);
-        ks.push(kappa4(&cm));
-        rs.push(recall(&cm, WAKE).unwrap_or(f64::NAN));
-        ss.push(specificity(&cm, WAKE).unwrap_or(f64::NAN));
+        ks.push(kappa4(&confusion4(&p, &tr)));
     }
-    (ks, rs, ss)
-}
-
-fn median(v: &[f64]) -> f64 {
-    let mut s: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
-    if s.is_empty() {
-        return f64::NAN;
-    }
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    s[s.len() / 2]
+    ks
 }
 
 fn main() {
-    println!("Both arms decode the SAME shipped emissions; only the 4x4 differs, so whatever moves");
-    println!("is the transition. Each cohort takes a turn counting, because counting on ONE and");
-    println!("losing on the others is also what an unrepresentative cohort looks like.
-");
+    println!("Both arms decode the SAME shipped emissions; only the 4x4 differs, so what moves is");
+    println!("the path search alone - the cycle anchor stays resolved under the shipped matrix.");
+    println!("Each cohort takes a turn counting, because counting on ONE and losing on the others");
+    println!("is also what an unrepresentative cohort looks like.\n");
 
     let loaded: Vec<(&str, Vec<Night>)> =
         COHORTS.iter().map(|c| (*c, load(c))).filter(|(_, n)| !n.is_empty()).collect();
@@ -153,7 +144,11 @@ fn main() {
         let (fitted, pairs, sparse) = count_transitions(train);
         println!("=== COUNTED on {from}: {} nights, {pairs} pairs, {sparse}/16 cells under 5 obs",
                  train.len());
-        println!("  {:<7} {:>8} {:>8} {:>8} {:>8}", "from", "deep", "rem", "light", "wake");
+        let head: String = STAGE_ORDER
+            .iter()
+            .map(|s| format!(" {:>8}", format!("{s:?}").to_lowercase()))
+            .collect();
+        println!("  {:<7}{head}", "from");
         for (i, st) in STAGE_ORDER.iter().enumerate() {
             println!("  {:<7} {:>8.4} {:>8.4} {:>8.4} {:>8.4}", format!("{st:?}"),
                      fitted[i][0], fitted[i][1], fitted[i][2], fitted[i][3]);
@@ -161,8 +156,8 @@ fn main() {
         println!("  {:<20} {:>7} {:>7}   {:>10} {:>9} {:>5}   verdict",
                  "scored on", "shipped", "counted", "paired d", "bar +/-", "n");
         for (name, nights) in &loaded {
-            let (bk, _, _) = score(nights, &Params::SHIPPED.transition);
-            let (fk, _, _) = score(nights, &fitted);
+            let mut bk = score(nights, &Params::SHIPPED.transition);
+            let mut fk = score(nights, &fitted);
             let d: Vec<f64> = bk.iter().zip(&fk).map(|(a, b)| b - a).collect();
             let (mean, bar) = paired_bar(&d).unwrap_or((f64::NAN, f64::NAN));
             let role = if name == from { "(counted on)" } else { "(HELD)" };
@@ -175,7 +170,7 @@ fn main() {
                 "inside the bar - noise".to_string()
             };
             println!("  {:<20} {:>7.3} {:>7.3}   {mean:>+10.4} {bar:>9.4} {:>5}   {verdict}",
-                     format!("{name} {role}"), median(&bk), median(&fk), d.len());
+                     format!("{name} {role}"), median(&mut bk), median(&mut fk), d.len());
         }
         println!();
     }

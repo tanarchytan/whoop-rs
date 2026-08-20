@@ -28,13 +28,13 @@ const MIN_EPOCHS: usize = 120;
 const PER_STORE: usize = 40;
 /// Beats in one second above which the second is a storage artefact rather than a rhythm.
 const MAX_BEATS_PER_SEC: usize = 4;
-/// Columns a mean shift CANNOT measure: three are z-scored within the night so their pooled mean is
-/// 0 by construction, and `clock` averages to 0.5 for any whole window by arithmetic. They read
-/// 0.000 for every whole-window cohort but NOT for a trimmed subset, which would flatter every row.
 /// One cohort's distance: mean over columns, its worst column, and the ranked list.
 type Distance = (f64, f64, Vec<(f64, &'static str)>);
 
-const DEGENERATE: [&str; 4] = ["hr_z", "hr_var_z", "resp_z", "clock"];
+/// Columns a mean shift CANNOT measure: four are within-night transforms whose pooled mean is fixed
+/// by construction (0 for a z-score, 0.5 for a rank) and `clock` averages to 0.5 for any whole
+/// window. They read 0.000 for every whole-window cohort but NOT for a trimmed subset.
+const DEGENERATE: [&str; 5] = ["hr_z", "hr_var_z", "hr_flat_pct", "resp_z", "clock"];
 
 /// One night's feature rows, through the same cardiac pipeline the fitter uses.
 fn night_rows(
@@ -57,7 +57,9 @@ fn golden_rows(set: &str, labelled_only: bool) -> Vec<[f64; NCOL]> {
         let truth = read_truth(dir);
         let Some((w0, w1, n_meta)) = read_meta(dir) else { continue };
         let grav = read_accel(dir);
-        if truth.is_empty() || grav.is_empty() {
+        // The store arm's length rule, so both sides of every distance admit the same nights.
+        let epochs = ((w1 - w0) / EPOCH).max(0) as usize;
+        if truth.is_empty() || grav.is_empty() || epochs < MIN_EPOCHS {
             continue;
         }
         let n = n_meta.max(truth.keys().max().copied().unwrap_or(0) + 1);
@@ -71,8 +73,9 @@ fn golden_rows(set: &str, labelled_only: bool) -> Vec<[f64; NCOL]> {
     out
 }
 
-/// Staged nights out of one real backup, EVENLY SPACED across the store's whole span and capped so
-/// a large store cannot decide the cohort. Returns the rows and what was left behind.
+/// Staged nights out of one real backup, EVENLY SPACED across the part of the store its raw streams
+/// cover and capped so a large store cannot decide the cohort. Returns the rows and what was left
+/// behind.
 fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
     let Ok(cx) = rusqlite::Connection::open_with_flags(
         path,
@@ -81,7 +84,7 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
         return (Vec::new(), "unreadable".into());
     };
     let Ok(mut q) = cx.prepare(
-        "SELECT startTs, endTs FROM sleepSession WHERE stagesJSON IS NOT NULL AND stagesJSON != ''          ORDER BY startTs",
+        "SELECT startTs, endTs FROM sleepSession WHERE stagesJSON IS NOT NULL AND stagesJSON != '' ORDER BY startTs",
     ) else {
         return (Vec::new(), "no sleepSession".into());
     };
@@ -92,14 +95,33 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
         .filter_map(Result::ok)
         .collect();
 
-    // Long enough to z-score, then a stride across the WHOLE span. Taking the first N instead reads
-    // one wearer's earliest weeks as if they were the wearer.
-    let long: Vec<(i64, i64)> =
+    // A night outside hrSample/gravitySample can never contribute, so spending the cap on one lets
+    // a store's stream tail, not its size, set how much it weighs.
+    let stream_span = |sql: &str| -> Option<(i64, i64)> {
+        cx.query_row(sql, [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).ok()
+    };
+    let (Some((h0, h1)), Some((g0, g1))) = (
+        stream_span("SELECT MIN(ts), MAX(ts) FROM hrSample"),
+        stream_span("SELECT MIN(ts), MAX(ts) FROM gravitySample"),
+    ) else {
+        return (Vec::new(), format!("{} sessions, no raw streams", all.len()));
+    };
+    let (t0, t1) = (h0.max(g0), h1.min(g1));
+
+    // Long enough to z-score, then evenly spaced across the WHOLE of what the streams cover. Taking
+    // the first N instead reads one wearer's earliest weeks as if they were the wearer.
+    let long_enough: Vec<(i64, i64)> =
         all.iter().copied().filter(|(s, e)| ((e - s) / EPOCH).max(0) as usize >= MIN_EPOCHS).collect();
-    let stride = long.len().div_ceil(PER_STORE).max(1);
-    let picked: Vec<(i64, i64)> = long.iter().copied().step_by(stride).take(PER_STORE).collect();
+    let long: Vec<(i64, i64)> =
+        long_enough.iter().copied().filter(|(s, e)| *e > t0 && *s < t1).collect();
+    let picked: Vec<(i64, i64)> = if long.len() <= PER_STORE {
+        long.clone()
+    } else {
+        (0..PER_STORE).map(|i| long[i * long.len() / PER_STORE]).collect()
+    };
 
     let mut out = Vec::new();
+    let mut contributed: Vec<(i64, i64)> = Vec::new();
     let mut short_stream = 0usize;
     let (mut dropped_secs, mut total_secs) = (0usize, 0usize);
     for (s, e) in &picked {
@@ -147,18 +169,24 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
             short_stream += 1;
             continue;
         }
+        contributed.push((s, e));
         out.extend(night_rows(s, e, n, &hr, &rr, &grav));
     }
     let span_days = all.last().map_or(0, |l| (l.1 - all[0].0) / 86_400);
-    let kept_days = picked.last().map_or(0, |l| (l.1 - picked[0].0) / 86_400);
+    // The span of the nights that actually reached `out`, not of the nights that were picked.
+    let kept_days = contributed.last().map_or(0, |l| (l.1 - contributed[0].0) / 86_400);
     let beat_pct = if total_secs > 0 {
         100.0 * dropped_secs as f64 / total_secs as f64
     } else {
         0.0
     };
+    // The four categories plus the contributed count sum to `all.len()`; drop one and a capped
+    // store reads as a loader fault.
     let note = format!(
-        "{} of {} sessions ({} short, {} no stream), {} of {} days, stride {}, {beat_pct:.2}% impossible beat-seconds",
-        picked.len(), all.len(), all.len() - long.len(), short_stream, kept_days, span_days, stride
+        "{} of {} sessions ({} short, {} off-stream, {} over the {PER_STORE}-night cap, {} no stream), {} of {} days, {beat_pct:.2}% impossible beat-seconds",
+        contributed.len(), all.len(), all.len() - long_enough.len(),
+        long_enough.len() - long.len(), long.len() - picked.len(), short_stream, kept_days,
+        span_days
     );
     (out, note)
 }
@@ -180,10 +208,9 @@ fn stats(x: &[[f64; NCOL]]) -> ([f64; NCOL], [f64; NCOL], [usize; NCOL]) {
 
 fn main() {
     println!("Standardised mean shift from DREAMT, in DREAMT sd units. ALL-EPOCH on both sides.");
-    println!("{DEGENERATE:?} are EXCLUDED: a per-night z-score pools to 0 and clock to 0.5 by");
-    println!("construction, so they read 0.000 for every whole-window cohort but NOT for the");
-    println!("labelled floor - leaving them in would flatter every row against that floor.
-");
+    println!("{DEGENERATE:?} are EXCLUDED: a per-night z-score pools to 0, a rank and clock");
+    println!("to 0.5 by construction, so they read 0.000 for every whole-window cohort but not");
+    println!("for the labelled floor - leaving them in would flatter every row against it.\n");
 
     let train = golden_rows("dreamt", false);
     if train.is_empty() {
@@ -191,8 +218,7 @@ fn main() {
         return;
     }
     let (tm, ts, _) = stats(&train);
-    println!("DREAMT reference: {} rows (all epochs)
-", train.len());
+    println!("DREAMT reference: {} rows (all epochs)\n", train.len());
 
     let mut cohorts: Vec<(String, Vec<[f64; NCOL]>)> = Vec::new();
     // The floor: DREAMT against ITSELF, labelled rows only. Any cohort distance below this one is
@@ -239,21 +265,21 @@ fn main() {
     };
 
     let floor = cohorts.first().and_then(|(_, r)| summarise(r));
-    println!("
-{:<26} {:>7} {:>7} {:>7} {:>7}   worst column",
-             "cohort", "mean", "xfloor", "max", "xfloor");
+    println!("\n{:<26} {:>7} {:>7} {:>7} {:>7} {:>5}   worst column",
+             "cohort", "mean", "xfloor", "max", "xfloor", "cols");
     for (name, rows) in &cohorts {
         let Some((mean, max, d)) = summarise(rows) else {
             println!("{name:<26} {:>7}   too few rows to compare", rows.len());
             continue;
         };
         let (fm, fx) = floor.as_ref().map_or((f64::NAN, f64::NAN), |(a, b, _)| (*a, *b));
-        println!("{name:<26} {mean:>7.3} {:>7.2} {max:>7.3} {:>7.2}   {} {:.2}",
-                 mean / fm, max / fx, d[0].1, d[0].0);
+        println!("{name:<26} {mean:>7.3} {:>7.2} {max:>7.3} {:>7.2} {:>5}   {} {:.2}",
+                 mean / fm, max / fx, d.len(), d[0].1, d[0].0);
     }
 
-    println!("
-Read every row against the FLOOR, not against zero, and read BOTH statistics. A");
+    println!("\nRead every row against the FLOOR, not against zero, and read BOTH statistics. A");
     println!("cohort can match on the mean and be far out on its single worst column, which is what");
     println!("a fitted weight applied off its estimated range actually looks like.");
+    println!("`cols` is how many columns survived: a cohort short of the floor's count is");
+    println!("averaging a different set, so its xfloor is not a like-for-like ratio.");
 }

@@ -17,7 +17,7 @@
 
 mod common;
 
-use common::{dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx};
+use common::{dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx};
 use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar};
 use physio_algo::sleep::{decode_v2, emissions_v2, params::Params, prepare_v2, SleepInput};
 
@@ -25,7 +25,8 @@ const COHORTS: [&str; 3] = ["dreamt", "aauwss", "sleep-accel"];
 const CLASSES: usize = 4;
 /// Fraction of epochs KEPT. 1.00 is today's behaviour.
 const COVERAGE: [f64; 5] = [0.95, 0.90, 0.80, 0.70, 0.60];
-/// Fewest retained epochs before a night is scored at all.
+/// Fewest epochs a night must carry to load, and the fewest retained after abstention - a night
+/// short enough to hit that floor is scored above the printed `keep`.
 const MIN_EPOCHS: usize = 20;
 /// Half-width, in epochs, of the smoothing applied to the margin before ranking. Smoothing is what
 /// turns scattered single-epoch refusals into stretches a hypnogram can draw.
@@ -55,7 +56,9 @@ struct Night {
     pred: Vec<usize>,
     truth: Vec<Option<usize>>,
     margin: Vec<f64>,
-    /// Epochs to the nearest decoded stage change. Needs the path only, no emissions.
+    /// Epochs to the nearest decoded stage change. Needs the path only, no emissions. A night the
+    /// decoder never changes stage on scores every epoch [`f64::INFINITY`], so the index tie-break
+    /// keeps the EARLIEST epochs.
     to_edge: Vec<f64>,
 }
 
@@ -169,15 +172,6 @@ fn scored(nights: &[Night], keep: f64, rule: Rule) -> (Vec<f64>, Vec<usize>) {
     (ks, runs)
 }
 
-fn median(v: &[f64]) -> f64 {
-    let mut s = v.to_vec();
-    if s.is_empty() {
-        return f64::NAN;
-    }
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    s[s.len() / 2]
-}
-
 fn verdict(mean: f64, bar: f64) -> String {
     if !mean.is_finite() {
         "-".into()
@@ -202,29 +196,38 @@ fn main() {
             println!("{set}: no nights\n");
             continue;
         }
-        let (full, _) = scored(&nights, 1.0, Rule::Margin);
-        println!("=== {set} ({} nights), full-coverage kappa {:.3}", nights.len(), median(&full));
+        let (mut full, _) = scored(&nights, 1.0, Rule::Margin);
+        let n_scored = full.len();
+        println!("=== {set} ({n_scored} of {} nights scored), full-coverage kappa {:.3}",
+                 nights.len(), median(&mut full));
         println!("  {:>5} {:<16} {:>7} {:>16} {:>16} {:>7} {:>7}",
                  "keep", "rule", "kappa", "vs random", "vs edge", "1-run%", "runs/n");
         for keep in COVERAGE {
             let (rnd, _) = scored(&nights, keep, Rule::Random);
-            let (edge, _) = scored(&nights, keep, Rule::FarFromTransition);
+            let (edge, edge_runs) = scored(&nights, keep, Rule::FarFromTransition);
             for rule in [Rule::FarFromTransition, Rule::Margin, Rule::SmoothMargin] {
-                let (k, runs) = scored(&nights, keep, rule);
+                let (mut k, runs) = if rule == Rule::FarFromTransition {
+                    (edge.clone(), edge_runs.clone())
+                } else {
+                    scored(&nights, keep, rule)
+                };
                 let dr: Vec<f64> = rnd.iter().zip(&k).map(|(a, b)| b - a).collect();
-                let de: Vec<f64> = edge.iter().zip(&k).map(|(a, b)| b - a).collect();
                 let (mr, br) = paired_bar(&dr).unwrap_or((f64::NAN, f64::NAN));
-                let (me, be) = paired_bar(&de).unwrap_or((f64::NAN, f64::NAN));
                 let ones = runs.iter().filter(|r| **r == 1).count();
                 let pct = 100.0 * ones as f64 / runs.len().max(1) as f64;
                 let vs_edge = if rule == Rule::FarFromTransition {
                     "  (is the null)".to_string()
                 } else {
+                    let de: Vec<f64> = edge.iter().zip(&k).map(|(a, b)| b - a).collect();
+                    let (me, be) = paired_bar(&de).unwrap_or((f64::NAN, f64::NAN));
                     format!("{me:>+8.4} {}", verdict(me, be))
                 };
+                // `runs/n` is per SCORED night; `k` holds one kappa per night that passed the guard.
+                let scored_nights = k.len();
+                let kappa = median(&mut k);
                 println!("  {:>4.0}% {:<16} {:>7.3} {:>+8.4} {:<7} {:>16} {:>6.0}% {:>7.1}",
-                         100.0 * keep, rule.name(), median(&k), mr, verdict(mr, br), vs_edge, pct,
-                         runs.len() as f64 / nights.len() as f64);
+                         100.0 * keep, rule.name(), kappa, mr, verdict(mr, br), vs_edge, pct,
+                         runs.len() as f64 / scored_nights.max(1) as f64);
             }
         }
         println!();

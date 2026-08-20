@@ -7,16 +7,16 @@
 //! shipped recipe too, so crediting it to tanv1 would be double counting.
 //!
 //! So both engines get the same treatment. Same Viterbi, same shipped transition, the same
-//! refuse-nearest-your-own-transition rule at the same coverage, scored on the same epochs. The only
-//! difference is which emissions go in: the shipped ones, or the fitted ones.
+//! refuse-nearest-your-own-transition rule at the same coverage, scored on the same COUNT of
+//! epochs. The only difference is which emissions go in: the shipped ones, or the fitted ones.
 //!
 //! Fitted on DREAMT, so DREAMT is not a result. The two held-out cohorts are.
 
 mod common;
 
-use common::lr::{design, fit, predict, scores, standardiser, NCOL};
+use common::lr::{design, fit, scores, standardiser, NCOL};
 use common::{
-    cardiac_series, dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
+    cardiac_series, dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
 };
 use physio_algo::sleep::features::extract;
 use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar};
@@ -28,10 +28,18 @@ const EPOCH: i64 = 30;
 const FIT: &str = "dreamt";
 const CLASSES: usize = 4;
 const COVERAGE: [f64; 5] = [1.00, 0.95, 0.90, 0.80, 0.70];
+/// Fewest epochs a night must carry to load, and the fewest retained after abstention - a night
+/// short enough to hit that floor is scored above the printed `keep`.
 const MIN_EPOCHS: usize = 20;
-/// Chosen inside the fit cohort by `fit_tanv1`'s own inner split; fixed here so this harness does
-/// not re-select it against the cohorts it reports.
+/// The DECODED-arm exponent `fit_tanv1` selected on the fit cohort's inner split; fixed here so this
+/// harness does not re-select it against the cohorts it reports. A repin can move that selection and
+/// this literal does not follow, so `TANV1_WEIGHT_POWER` overrides it as it does there.
 const WEIGHT_POWER: f64 = 0.5;
+
+/// [`WEIGHT_POWER`] unless `TANV1_WEIGHT_POWER` is set, matching `fit_tanv1`'s own override.
+fn weight_power() -> f64 {
+    std::env::var("TANV1_WEIGHT_POWER").ok().and_then(|v| v.parse().ok()).unwrap_or(WEIGHT_POWER)
+}
 
 struct Night {
     x: Vec<[f64; NCOL]>,
@@ -57,11 +65,16 @@ fn load(set: &str) -> Vec<Night> {
         let input = SleepInput { start: w0, end: w1, hr, rr, accel };
         let prep = prepare_v2(&input, &Params::SHIPPED);
         let em = emissions_v2(&prep, &Params::SHIPPED);
-        if em.len() < MIN_EPOCHS || f.len() < em.len() {
+        if em.len() < MIN_EPOCHS {
             continue;
         }
         assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
                    dir.display(), em.len());
+        // `extract` derives its own count from `[w0, w1)`. A grid shorter than the emission grid is
+        // the same misalignment the assert above catches, so it fails here rather than dropping the
+        // night out of both arms unannounced.
+        assert!(f.len() >= em.len(), "{}: {} features against {} emissions",
+                dir.display(), f.len(), em.len());
         let truth = (0..em.len())
             .map(|k| {
                 raw.get(&k).copied().filter(|t| (0..CLASSES as i32).contains(t)).map(|t| t as usize)
@@ -92,7 +105,8 @@ fn fitted_emissions(
         .collect()
 }
 
-/// Distance in epochs to the nearest change in `pred`.
+/// Distance in epochs to the nearest change in `pred`. A night the decoder never changes stage on
+/// scores every epoch [`f64::INFINITY`], so the index tie-break keeps the EARLIEST epochs.
 fn to_edge(pred: &[usize]) -> Vec<f64> {
     let edges: Vec<usize> = (1..pred.len()).filter(|k| pred[*k] != pred[k - 1]).collect();
     (0..pred.len())
@@ -126,15 +140,6 @@ fn scored(nights: &[Night], em_of: impl Fn(&Night) -> Vec<[f64; CLASSES]>, keep:
     out
 }
 
-fn median(v: &[f64]) -> f64 {
-    let mut s = v.to_vec();
-    if s.is_empty() {
-        return f64::NAN;
-    }
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    s[s.len() / 2]
-}
-
 fn main() {
     let train = load(FIT);
     if train.is_empty() {
@@ -150,10 +155,10 @@ fn main() {
     let y: Vec<usize> = rows.iter().map(|(_, t)| *t).collect();
     let (m, sd) = standardiser(&x);
     let dx: Vec<Vec<f64>> = x.iter().map(|r| design(r, &m, &sd, &[])).collect();
-    println!("FIT on {FIT}: {} nights, {} labelled epochs, weight power {WEIGHT_POWER}\n",
+    let power = weight_power();
+    println!("FIT on {FIT}: {} nights, {} labelled epochs, weight power {power}\n",
              train.len(), x.len());
-    let w = fit(&dx, &y, WEIGHT_POWER);
-    let _ = predict(&w, &dx[0]);
+    let w = fit(&dx, &y, power);
 
     println!("Both engines: same decoder, same shipped transition, each abstaining on ITS OWN");
     println!("stage boundaries at the SAME coverage. Only the emissions differ.\n");
@@ -161,15 +166,16 @@ fn main() {
              "cohort", "keep", "shipped", "tanv1", "paired d", "bar +/-", "n");
 
     for set in [FIT, "aauwss", "sleep-accel"] {
-        let nights = if set == FIT { train.clone_ref() } else { load(set) };
+        let loaded = (set != FIT).then(|| load(set));
+        let nights: &[Night] = loaded.as_deref().unwrap_or(train.as_slice());
         if nights.is_empty() {
             println!("  {set:<20} no nights");
             continue;
         }
         let role = if set == FIT { "(FITTED)" } else { "(HELD)" };
         for keep in COVERAGE {
-            let base = scored(&nights, |nt| nt.em.clone(), keep);
-            let tan = scored(&nights, |nt| fitted_emissions(nt, &w, &m, &sd), keep);
+            let mut base = scored(nights, |nt| nt.em.clone(), keep);
+            let mut tan = scored(nights, |nt| fitted_emissions(nt, &w, &m, &sd), keep);
             let d: Vec<f64> = base.iter().zip(&tan).map(|(a, b)| b - a).collect();
             let (mean, bar) = paired_bar(&d).unwrap_or((f64::NAN, f64::NAN));
             let verdict = if !mean.is_finite() {
@@ -182,21 +188,9 @@ fn main() {
             };
             println!("  {:<20} {:>4.0}% {:>8.3} {:>8.3}   {mean:>+10.4} {bar:>9.4} {:>5}   {verdict}",
                      if keep == COVERAGE[0] { format!("{set} {role}") } else { String::new() },
-                     100.0 * keep, median(&base), median(&tan), d.len());
+                     100.0 * keep, median(&mut base), median(&mut tan), d.len());
         }
     }
     println!("\nA lever may start behind. The question is whether the STACK ends ahead, and the");
     println!("shipped stack gets the same abstention, so no gain is credited to tanv1 twice.");
-}
-
-/// Cheap re-borrow so the fit cohort is not loaded twice.
-trait CloneRef {
-    fn clone_ref(&self) -> Vec<Night>;
-}
-impl CloneRef for Vec<Night> {
-    fn clone_ref(&self) -> Vec<Night> {
-        self.iter()
-            .map(|n| Night { x: n.x.clone(), em: n.em.clone(), truth: n.truth.clone() })
-            .collect()
-    }
 }

@@ -9,20 +9,21 @@
 //!   em[DEEP]  = 3 z-scored features + a hinge on the flatness RANK + a respiration term
 //!   em[REM]   = 3 z-scored features - the same respiration term
 //!   em[AWAKE] = motion + a DEADZONED cardiac term that a stillness test can CLAMP + a centred
-//!               rotation RANK + a jerk gate
+//!               rotation RANK that SHIPPED weights at 0.0 + a jerk gate
 //!
-//! Twelve free weights, four hand-placed non-linearities, and one class pinned to its prior. The fit
-//! has 4 x 29 = 116 free parameters, no non-linearity, and nothing pinned - it must LEARN that light
-//! is the default from data that is 49-61% light.
+//! Twelve weight slots, ELEVEN live under SHIPPED, four hand-placed non-linearities, and one class
+//! pinned to its prior. The fit has 4 x 29 = 116 free parameters, no non-linearity, and nothing
+//! pinned - it must LEARN that light is the default from data that is 49-61% light.
 //!
 //! This prints the fitted weight matrix, per-class recall and precision for both engines, and an arm
-//! with LIGHT pinned to bias-only, which is the shipped structure's single biggest prior.
+//! with LIGHT's fitted weights zeroed AFTER the fit: a post-hoc ablation of the shipped structure's
+//! single biggest prior, not a refit under that constraint.
 
 mod common;
 
 use common::lr::{design, fit, scores, standardiser, NCOL};
 use common::{
-    cardiac_series, dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
+    cardiac_series, dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
 };
 use physio_algo::sleep::features::{extract, Features};
 use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar, precision, recall};
@@ -60,9 +61,14 @@ fn load(set: &str) -> Vec<Night> {
         let f = extract(&accel, w0, w1, &cardiac_series(w0, n, EPOCH, &hr, &rr));
         let input = SleepInput { start: w0, end: w1, hr, rr, accel };
         let em = emissions_v2(&prepare_v2(&input, &Params::SHIPPED), &Params::SHIPPED);
-        if em.len() < MIN_EPOCHS || f.len() < em.len() {
+        if em.len() < MIN_EPOCHS {
             continue;
         }
+        // `emissions_v2` DROPS an epoch with neither HR nor gravity. Truncating features to the
+        // emission length would then misalign everything after the hole rather than failing.
+        assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
+                   dir.display(), em.len());
+        assert!(f.len() >= em.len(), "{}: fewer feature rows than emissions", dir.display());
         let truth = (0..em.len())
             .map(|k| {
                 raw.get(&k).copied().filter(|t| (0..CLASSES as i32).contains(t)).map(|t| t as usize)
@@ -87,7 +93,8 @@ fn fitted_em(nt: &Night, w: &[Vec<f64>], m: &[f64; NCOL], sd: &[f64; NCOL]) -> V
         .collect()
 }
 
-/// Pooled confusion over a cohort, plus per-night kappas for the paired test.
+/// Pooled confusion over a cohort, plus per-night kappas for the paired test. A night under
+/// MIN_EPOCHS labelled epochs enters neither, so both cover the same nights.
 fn confuse(
     nights: &[Night],
     em_of: impl Fn(&Night) -> Vec<[f64; CLASSES]>,
@@ -102,12 +109,17 @@ fn confuse(
         let (mut p, mut t) = (Vec::new(), Vec::new());
         for (k, want) in nt.truth.iter().enumerate() {
             let Some(want) = want else { continue };
-            cm[*want][pred[k]] += 1;
             p.push(pred[k]);
             t.push(*want);
         }
         if p.len() >= MIN_EPOCHS {
-            ks.push(kappa4(&confusion4(&p, &t)));
+            let night = confusion4(&p, &t);
+            for (row, add) in cm.iter_mut().zip(&night) {
+                for (cell, v) in row.iter_mut().zip(add) {
+                    *cell += v;
+                }
+            }
+            ks.push(kappa4(&night));
         }
     }
     (cm, ks)
@@ -122,15 +134,6 @@ fn per_class(cm: &[[i64; CLASSES]; CLASSES]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn median(v: &[f64]) -> f64 {
-    let mut s = v.to_vec();
-    if s.is_empty() {
-        return f64::NAN;
-    }
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    s[s.len() / 2]
 }
 
 fn main() {
@@ -149,9 +152,11 @@ fn main() {
     let dx: Vec<Vec<f64>> = x.iter().map(|r| design(r, &m, &sd, &[])).collect();
     let w = fit(&dx, &y, WEIGHT_POWER);
 
-    // LIGHT pinned to bias only, the shipped emission's single largest structural prior.
-    let mut pinned = w.clone();
-    for v in pinned[LIGHT].iter_mut().take(NCOL) {
+    // LIGHT's feature weights zeroed AFTER the joint fit: a post-hoc ablation, not a refit under
+    // the constraint. The other three rows keep values optimised WITH a free light row, so this is
+    // what the shipped pin costs THIS fit, not what a light-pinned fit could reach.
+    let mut ablated = w.clone();
+    for v in ablated[LIGHT].iter_mut().take(NCOL) {
         *v = 0.0;
     }
 
@@ -175,31 +180,37 @@ fn main() {
     println!("\n  total |weight| on LIGHT {light_mass:.1}, on the other three {other_mass:.1}");
     println!("  the shipped emission spends ZERO on light and lets the prior carry it.");
 
-    println!("\n=== PER-CLASS recall/precision, and what pinning LIGHT does");
+    println!("\n=== PER-CLASS recall/precision, and what ablating LIGHT does");
     println!("  {:<22} {:>7}   {}", "cohort / engine", "kappa",
-             CLASS_NAME.map(|c| format!("{c:>5}      ")).join(""));
+             CLASS_NAME.map(|c| format!("{c:>5}      ")).join(" "));
     for set in [FIT, HELD[0], HELD[1]] {
-        let nights = if set == FIT { load(FIT) } else { load(set) };
+        // The fit cohort is already in `train`; only the held-out sets need loading.
+        let held = (set != FIT).then(|| load(set));
+        let nights: &[Night] = held.as_deref().unwrap_or(&train);
         if nights.is_empty() {
             continue;
         }
         let role = if set == FIT { "FITTED" } else { "HELD" };
-        let (cb, kb) = confuse(&nights, |nt| nt.em.clone());
-        let (cf, kf) = confuse(&nights, |nt| fitted_em(nt, w.as_slice(), &m, &sd));
-        let (cp, kp) = confuse(&nights, |nt| fitted_em(nt, pinned.as_slice(), &m, &sd));
-        println!("  {:<22} {:>7.3}   {}", format!("{set} ({role}) shipped"), median(&kb),
-                 per_class(&cb));
-        println!("  {:<22} {:>7.3}   {}", "  tanv1", median(&kf), per_class(&cf));
-        println!("  {:<22} {:>7.3}   {}", "  tanv1, LIGHT pinned", median(&kp), per_class(&cp));
-        let d: Vec<f64> = kf.iter().zip(&kp).map(|(a, b)| b - a).collect();
+        let (cb, kb) = confuse(nights, |nt| nt.em.clone());
+        let (cf, kf) = confuse(nights, |nt| fitted_em(nt, w.as_slice(), &m, &sd));
+        let (ca, ka) = confuse(nights, |nt| fitted_em(nt, ablated.as_slice(), &m, &sd));
+        println!("  {:<22} {:>7.3}   {}", format!("{set} ({role}) shipped"),
+                 median(&mut kb.clone()), per_class(&cb));
+        println!("  {:<22} {:>7.3}   {}", "  tanv1", median(&mut kf.clone()), per_class(&cf));
+        println!("  {:<22} {:>7.3}   {}", "  tanv1, LIGHT ablated", median(&mut ka.clone()),
+                 per_class(&ca));
+        let d: Vec<f64> = kf.iter().zip(&ka).map(|(a, b)| b - a).collect();
         let (mean, bar) = paired_bar(&d).unwrap_or((f64::NAN, f64::NAN));
-        let v = if mean.abs() > bar {
-            format!("{} {:.2}x", if mean > 0.0 { "PINNING HELPS" } else { "pinning hurts" },
+        let v = if !mean.is_finite() {
+            "-".to_string()
+        } else if mean.abs() > bar {
+            format!("{} {:.2}x", if mean > 0.0 { "ABLATION HELPS" } else { "ablation hurts" },
                     mean.abs() / bar)
         } else {
             "inside the bar".into()
         };
-        println!("  {:<22} {mean:>+7.4} +/-{bar:.4}   {v}", "  pinning, paired");
+        println!("  {:<22} {mean:>+7.4} +/-{bar:.4}   {} of {} nights   {v}",
+                 "  ablation, paired", d.len(), nights.len());
     }
     println!("\nrecall/precision per class. The shipped engine's structure says light is what you");
     println!("get when nothing argues otherwise; the fit has to learn that from the data.");
