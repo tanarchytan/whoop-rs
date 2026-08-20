@@ -28,11 +28,13 @@
 //! held-out exposure the fit did not, and part of its held-out margin is that exposure rather than
 //! a better recipe. The direction of the bias is knowable; its size is not.
 //!
-//! Two more caveats. The class weighting rebalances the loss while `predict` takes a plain argmax,
+//! Three more caveats. The class weighting rebalances the loss while `predict` takes a plain argmax,
 //! so the printed call rates are not calibrated probabilities; undoing it post hoc bakes in DREAMT's
-//! prevalence and makes held-out worse. And `clock` is a fraction of the fixture window, whose
-//! labelled part starts ~24% in on DREAMT and at zero on both held-out cohorts, so its coefficient
-//! is extrapolated over every held-out sleep onset.
+//! prevalence and makes held-out worse. `clock` is a fraction of the fixture window, whose labelled
+//! part starts ~24% in on DREAMT and at zero on both held-out cohorts, so its coefficient is
+//! extrapolated over every held-out sleep onset. And the class-weight exponent is selected ONCE, on
+//! the full column set, then reused by the two ablation arms that are missing columns - holding the
+//! weighting fixed across arms is the point, but it favours MAIN+INT, the comparand in both.
 //!
 //! The output is weights. Nothing is wired and `Params::SHIPPED` is untouched.
 
@@ -161,10 +163,9 @@ fn design(r: &[f64; NCOL], m: &[f64; NCOL], s: &[f64; NCOL], drop: &[usize]) -> 
     out
 }
 
-/// Inverse-frequency weight per class, normalised so the TOTAL weighted mass equals the sample count
-/// at every `WEIGHT_POWER`. The divisor is the SAMPLE-weighted mean; the arithmetic mean across four
-/// classes is dominated by the rare ones and rescales total mass differently at every power, which
-/// would change the data-fit-versus-L2 balance between the settings a sweep compares.
+/// Inverse-frequency weight per class, normalised so the TOTAL weighted mass equals the sample
+/// count at every power. The divisor is the SAMPLE-weighted mean: an arithmetic mean across four
+/// classes is dominated by the rare ones and rescales mass differently at each power.
 fn class_weights(y: &[usize], power: f64) -> [f64; CLASSES] {
     let mut n = [0usize; CLASSES];
     for &c in y {
@@ -299,9 +300,8 @@ fn select_power(train: &Set, decoded: bool) -> f64 {
     let mut best = (POWERS[0], f64::MIN);
     for p in POWERS {
         let w = fit(&dx, &iy, p);
-        // Selected against the statistic it will be REPORTED against. Optimising one decode and
-        // reporting the other tunes a hyperparameter for a different objective, and the winner
-        // genuinely differs between the two.
+        // Selected against the statistic it is REPORTED against. Both decodes currently pick the
+        // same exponent, so this is a precaution rather than a live correction.
         let k = if decoded {
             score_decoded(&w, &inner_val, &m, &sd, &[]).kappa
         } else {
@@ -539,8 +539,8 @@ fn main() {
         show(&format!("{name} (HELD)"), sc);
     }
 
-    // Both interaction columns. v2's clamp reads the HR-level AND the HR-variability term, so
-    // withholding one of the two products would leave half the branch in the "withheld" arm.
+    // Both interaction columns: the clamp reads the HR-level AND the HR-variability term, so
+    // withholding one leaves half the branch in the "withheld" arm.
     let int_cols = [col("still_x_cardiac"), col("still_x_hrvar")];
     println!("\ninteraction columns {:?} at indices {int_cols:?}",
              int_cols.map(|c| Features::NAMES[c]));

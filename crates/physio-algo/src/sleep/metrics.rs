@@ -327,11 +327,9 @@ mod tests {
     }
 }
 
-/// Two-sided 95% critical value at `n-1` degrees of freedom. The normal 1.96 is ~11% too narrow at
-/// n=13, inflating significance exactly where a cohort is smallest.
-///
-/// Rounds df DOWN to the previous row. The value FALLS as df rises, so the previous row is the
-/// larger, conservative one; taking the next row up returns a bar narrower than the truth.
+/// Two-sided 95% critical value at `n-1` degrees of freedom; 1.96 is ~11% too narrow at n=13.
+/// Rounds df DOWN to the previous row - the value falls as df rises, so the previous row is the
+/// conservative one and rounding up returns a bar narrower than the truth.
 fn t95(n: usize) -> f64 {
     const T: [(usize, f64); 12] = [
         (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
@@ -341,10 +339,9 @@ fn t95(n: usize) -> f64 {
     T.iter().rev().find(|(k, _)| *k <= df).map_or(T[0].1, |(_, v)| *v)
 }
 
-/// Mean paired difference and the delta a sample of this size can resolve, `t * sd / sqrt(n)`.
-///
-/// Two arms' MEDIANS are separate order statistics and their difference moves when one subject
-/// changes rank; pair per subject instead. A mean inside the bar is noise whatever the medians say.
+/// Mean paired difference and the delta this sample size can resolve, `t * sd / sqrt(n)`. Two arms'
+/// MEDIANS are separate order statistics whose difference moves when one subject changes rank; a
+/// mean inside the bar is noise whatever those medians say.
 pub fn paired_bar(deltas: &[f64]) -> Option<(f64, f64)> {
     let n = deltas.len();
     if n < 2 {

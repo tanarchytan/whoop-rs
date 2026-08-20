@@ -60,9 +60,6 @@ pub fn rank_pct(v: &[Option<f64>]) -> Vec<Option<f64>> {
 }
 
 /// The four cardiac columns of the tanv1 feature vector, over `n` epochs from `w0`.
-///
-/// ONE implementation. Two harnesses carried a copy each and they had already drifted by a clamp;
-/// a drift that mattered would have shown up as a finding about the data.
 pub fn cardiac_series(
     w0: i64,
     n: usize,

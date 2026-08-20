@@ -144,12 +144,9 @@ fn deltas(grav: &[AccelSample], a: i64, b: i64) -> Vec<f64> {
         .collect()
 }
 
-/// Per-epoch features over `[start, end)`. `card` is the caller's per-night cardiac series, one entry
-/// per epoch; a short slice leaves the tail's cardiac columns missing rather than shifting them.
-///
-/// `clock` is a fraction of THIS span, so what it means depends entirely on where the caller puts
-/// the boundaries. A span that opens well before sleep and one that opens at sleep give the same
-/// epoch different values, and a model fitted on one distribution extrapolates on the other.
+/// Per-epoch features over `[start, end)`. `card` is one entry per epoch; a short slice leaves the
+/// tail's cardiac columns missing rather than shifting them. `clock` is a fraction of THIS span, so
+/// a span opening before sleep and one opening at sleep give the same epoch different values.
 pub fn extract(grav: &[AccelSample], start: i64, end: i64, card: &[Cardiac]) -> Vec<Features> {
     if end <= start {
         return Vec::new();
@@ -251,8 +248,8 @@ mod tests {
 
     /// The failure this prevents: a fitted weight vector silently transposed against the wrong
     /// column, which no test of the model's accuracy would ever catch.
-    /// A width-only assertion passes with two fields swapped, so every field carries a UNIQUE
-    /// marker and is asserted against its own name.
+    /// A width-only assertion passes with two fields swapped, so every field carries a unique
+    /// marker asserted against its own name.
     #[test]
     fn every_value_lands_in_the_column_its_name_claims() {
         let mut f = Features::default();
