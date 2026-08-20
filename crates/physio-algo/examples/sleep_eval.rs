@@ -22,7 +22,8 @@ use common::{
     stage_idx,
 };
 
-use physio_algo::sleep::metrics::{bout_score, confusion4, kappa4, recall, specificity, BoutScore, WAKE};
+use physio_algo::sleep::metrics::{bout_score, confusion4, kappa4, paired_bar, recall,
+    specificity, BoutScore, WAKE};
 use physio_algo::sleep::{params::Params, prepare_v2, stage_v2_prepared, Prepared, SleepInput};
 
 const EPOCH: i64 = 30;
@@ -193,6 +194,12 @@ fn score_subject(pred_raw: &[usize], truth: &[usize]) -> Subject {
     }
 }
 
+/// The delta this many subjects can resolve, through the shared primitive. A hand-rolled `1.96 *
+/// sd / sqrt(n)` is ~11% too narrow at n=13, in the direction that turns noise into a finding.
+fn bar(d: &[f64]) -> f64 {
+    paired_bar(d).map_or(f64::NAN, |(_, b)| b)
+}
+
 fn sd(v: &[f64]) -> f64 {
     if v.len() < 2 {
         return 0.0;
@@ -296,7 +303,7 @@ fn main() {
                 format!("  {} (kappa)", arms[i].0),
                 mean(&d),
                 sd(&d),
-                1.96 * sd(&d) / (n as f64).sqrt()
+                bar(&d)
             );
         }
         // The headline moves on a different scale from kappa, so it needs its own bar.
@@ -310,7 +317,7 @@ fn main() {
             format!("  {} (bout coverage)", arms[CAND_ARM].0),
             mean(&bd),
             sd(&bd),
-            1.96 * sd(&bd) / (bd.len() as f64).sqrt()
+            bar(&bd)
         );
 
         // The calibration ladder. Each rung recovers a KNOWN fraction of the wake we miss, so the first
@@ -327,8 +334,7 @@ fn main() {
                 .zip(&per_arm[r])
                 .filter_map(|(a, b)| Some(b.bout.coverage()? - a.bout.coverage()?))
                 .collect();
-            let (rk, rb) =
-                (1.96 * sd(&dk) / (n as f64).sqrt(), 1.96 * sd(&db) / (db.len().max(1) as f64).sqrt());
+            let (rk, rb) = (bar(&dk), bar(&db));
             println!("{:<24} {:>+9.4} {:>13.4} {:>7}   {:>+9.4} {:>13.4} {:>7}",
                 format!("  {:.0}% of missed wake", frac * 100.0),
                 mean(&dk), rk, if mean(&dk).abs() > rk { "yes" } else { "NO" },

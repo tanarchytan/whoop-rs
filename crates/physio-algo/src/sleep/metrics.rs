@@ -328,17 +328,17 @@ mod tests {
 }
 
 /// Two-sided 95% critical value at `n-1` degrees of freedom. The normal 1.96 is ~11% too narrow at
-/// n=13 and inflates apparent significance exactly where a cohort is smallest.
+/// n=13, inflating significance exactly where a cohort is smallest.
 ///
-/// Keyed on DEGREES OF FREEDOM and rounded DOWN to the next row, so an off-table size gets a
-/// CONSERVATIVE bar. Keying the same constants on `n` makes every off-anchor size too narrow.
+/// Rounds df DOWN to the previous row. The value FALLS as df rises, so the previous row is the
+/// larger, conservative one; taking the next row up returns a bar narrower than the truth.
 fn t95(n: usize) -> f64 {
     const T: [(usize, f64); 12] = [
         (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
         (19, 2.093), (30, 2.042), (39, 2.023), (59, 2.001), (119, 1.980),
     ];
     let df = n.saturating_sub(1).max(1);
-    T.iter().find(|(k, _)| df <= *k).map_or(1.96, |(_, v)| *v)
+    T.iter().rev().find(|(k, _)| *k <= df).map_or(T[0].1, |(_, v)| *v)
 }
 
 /// Mean paired difference and the delta a sample of this size can resolve, `t * sd / sqrt(n)`.
@@ -359,14 +359,27 @@ pub fn paired_bar(deltas: &[f64]) -> Option<(f64, f64)> {
 mod paired_tests {
     use super::*;
 
-    /// The bar must never be NARROWER than the true critical value, which is the direction that
-    /// turns noise into a finding.
+    /// The bar must never be NARROWER than the true critical value - the direction that turns noise
+    /// into a finding. Every value here is the textbook two-sided 95% point at that df.
     #[test]
     fn the_bar_is_never_narrower_than_the_true_critical_value() {
-        assert!((t95(13) - 2.179).abs() < 1e-9, "n=13 is df=12");
-        assert!((t95(31) - 2.042).abs() < 1e-9, "n=31 is df=30");
-        assert!(t95(4) >= 3.182, "n=4 is df=3, true value 3.182, got {}", t95(4));
-        assert!(t95(22) >= 2.042, "n=22 is df=21, wider than df=30, got {}", t95(22));
+        for (n, truth) in [(13usize, 2.179), (31, 2.042), (7, 2.447), (14, 2.160), (22, 2.080),
+                           (36, 2.030), (4, 3.182), (3, 4.303)] {
+            assert!(t95(n) >= truth - 1e-9,
+                    "n={n} (df={}) needs at least {truth}, got {}", n - 1, t95(n));
+        }
+    }
+
+    /// Against a hand-computed value, on a series with real spread. The degenerate cases below
+    /// cannot see the formula: a constant series has bar 0 for ANY scale factor, and a mean-zero
+    /// one satisfies `|m| < bar` for any positive bar.
+    #[test]
+    fn the_bar_matches_a_hand_computed_value() {
+        // n=5, mean 0.03. Deviations -0.02,-0.01,0,0.01,0.02 -> sample sd = sqrt(0.001/4) = 0.015811.
+        // df=4, t=2.776, so bar = 2.776 * 0.015811 / sqrt(5) = 0.019631.
+        let (m, bar) = paired_bar(&[0.01, 0.02, 0.03, 0.04, 0.05]).expect("n=5");
+        assert!((m - 0.03).abs() < 1e-12, "mean {m}");
+        assert!((bar - 0.019631).abs() < 1e-5, "bar {bar}, want 0.019631");
     }
 
     #[test]

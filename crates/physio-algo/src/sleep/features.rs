@@ -55,7 +55,9 @@ pub struct Features {
     pub motion_mean: [Option<f64>; 4],
     pub motion_max: [Option<f64>; 4],
     pub motion_frac: [Option<f64>; 4],
-    /// Per-window rotation: total turn and the largest single inter-epoch turn.
+    /// Per-window rotation: total turn and the largest single inter-epoch turn. `turn_sum[0]` is
+    /// NOT emitted - the 30 s window spans exactly one inter-epoch turn, so its sum and its max are
+    /// the same number, and a fitted model would spend four parameters on a duplicate column.
     pub turn_sum: [Option<f64>; 4],
     pub turn_max: [Option<f64>; 4],
     /// Within-epoch orientation spread.
@@ -88,7 +90,7 @@ impl Features {
         "motion_mean_30", "motion_mean_120", "motion_mean_300", "motion_mean_600",
         "motion_max_30", "motion_max_120", "motion_max_300", "motion_max_600",
         "motion_frac_30", "motion_frac_120", "motion_frac_300", "motion_frac_600",
-        "turn_sum_30", "turn_sum_120", "turn_sum_300", "turn_sum_600",
+        "turn_sum_120", "turn_sum_300", "turn_sum_600",
         "turn_max_30", "turn_max_120", "turn_max_300", "turn_max_600",
         "swing", "still_x_cardiac", "still_x_hrvar", "hr_z", "hr_var_z", "hr_flat_pct", "resp_z",
         "clock", "win_cov_600",
@@ -96,7 +98,7 @@ impl Features {
 
     /// Column count. One constant so a consumer sizes its design matrix from here rather than
     /// repeating the number and drifting when a column is added.
-    pub const N: usize = 29;
+    pub const N: usize = 28;
 
     /// The vector, in [`Features::NAMES`] order. `None` becomes `f64::NAN` so a caller must decide
     /// what missing means rather than inheriting a silent zero.
@@ -106,7 +108,7 @@ impl Features {
             n(self.motion_mean[0]), n(self.motion_mean[1]), n(self.motion_mean[2]), n(self.motion_mean[3]),
             n(self.motion_max[0]), n(self.motion_max[1]), n(self.motion_max[2]), n(self.motion_max[3]),
             n(self.motion_frac[0]), n(self.motion_frac[1]), n(self.motion_frac[2]), n(self.motion_frac[3]),
-            n(self.turn_sum[0]), n(self.turn_sum[1]), n(self.turn_sum[2]), n(self.turn_sum[3]),
+            n(self.turn_sum[1]), n(self.turn_sum[2]), n(self.turn_sum[3]),
             n(self.turn_max[0]), n(self.turn_max[1]), n(self.turn_max[2]), n(self.turn_max[3]),
             n(self.swing), n(self.still_x_cardiac), n(self.still_x_hrvar), n(self.hr_z),
             n(self.hr_var_z), n(self.hr_flat_pct), n(self.resp_z),
@@ -282,14 +284,15 @@ mod tests {
             ("motion_max_300", 202.0), ("motion_max_600", 203.0),
             ("motion_frac_30", 300.0), ("motion_frac_120", 301.0),
             ("motion_frac_300", 302.0), ("motion_frac_600", 303.0),
-            ("turn_sum_30", 400.0), ("turn_sum_120", 401.0),
-            ("turn_sum_300", 402.0), ("turn_sum_600", 403.0),
+            ("turn_sum_120", 401.0), ("turn_sum_300", 402.0), ("turn_sum_600", 403.0),
             ("turn_max_30", 500.0), ("turn_max_120", 501.0),
             ("turn_max_300", 502.0), ("turn_max_600", 503.0),
             ("swing", 600.0), ("still_x_cardiac", 700.0), ("still_x_hrvar", 750.0),
             ("hr_z", 800.0), ("hr_var_z", 900.0), ("hr_flat_pct", 950.0), ("resp_z", 955.0),
             ("clock", 960.0), ("win_cov_600", 1000.0),
         ];
+        // The 30 s rotation sum is deliberately absent: it equals turn_max_30 on every epoch.
+        assert!(!Features::NAMES.contains(&"turn_sum_30"), "a duplicate column must not be emitted");
         for (i, (name, want)) in expect.iter().enumerate() {
             assert_eq!(Features::NAMES[i], *name, "column {i} is misnamed");
             assert_eq!(v[i], *want, "column {i} ({name}) carries the wrong field");

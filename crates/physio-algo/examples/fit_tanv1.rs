@@ -2,39 +2,37 @@
 //!
 //!   cargo run --release -p physio-algo --example fit_tanv1
 //!
-//! The plan's §6.0 says "fit it" is NOT by itself a difference: v2's emission is already a weighted
-//! sum of z-scored features plus a bias, so a linear fit over the same inputs is the same functional
-//! form with better numbers. Two things could make tanv1 real - a model class that can represent
-//! INTERACTIONS, and many more features - and nobody has measured how much of the gain comes from
-//! which.
+//! The shipped emission is ALREADY a weighted sum of z-scored features plus a bias, so a linear fit
+//! over the same inputs is the same functional form with better numbers. Two things could make this
+//! different - a model class that can represent INTERACTIONS, and many more features - and nobody
+//! has measured how much of any gain comes from which.
 //!
-//! This measures exactly that, by fitting the same model twice:
-//!   MAIN     - the feature columns with both interaction products withheld.
-//!   MAIN+INT - the same, plus `still_x_cardiac` and `still_x_hrvar`, the two products v2 hard-codes
-//!              as one branch. Withholding only one leaves half the branch in the "withheld" arm.
-//! The difference between them IS the interaction's contribution, on identical data and optimiser.
+//! Three arms, fitted identically, differing only in which columns are zeroed:
+//!   MAIN       - both interaction products withheld.
+//!   MAIN+INT   - everything. The difference from MAIN is the interaction's contribution.
+//!   NO R-R     - `resp_z` withheld. The difference from MAIN+INT is the R-R channel's.
 //!
-//! Discipline, all six from the plan's rules:
+//! Discipline:
 //!   - Fit on DREAMT. Report HELD-OUT on aauwss and sleep-accel. A train number is never a result.
-//!   - DREAMT is CLINICAL: per-epoch stage labels only, never onset/offset. Nothing here reads a
-//!     boundary.
+//!   - DREAMT is CLINICAL: per-epoch stage labels only, never onset/offset. Nothing reads a boundary.
 //!   - Standardisation uses TRAIN statistics applied to held-out, never per-cohort - that leaks.
-//!   - The rate-matched null is the floor: a fit that only calls more wake has done nothing.
-//!   - Both arms must CONVERGE. Two fits stopped at a shared iteration cap sit at unequal distances
-//!     from their own optima, and the whole result here is a small delta between them.
-//!   - EVERY hyperparameter is chosen inside the fit cohort. Picking one on held-out kappa spends
-//!     researcher freedom against the only clean estimate there is.
+//!   - Both arms must CONVERGE. Two fits stopped at a shared cap sit at unequal distances from their
+//!     own optima, and the results here are small deltas between them.
+//!   - EVERY hyperparameter is chosen inside the fit cohort.
+//!   - Every claim is a PAIRED per-night difference against its own bar. Two arms' medians are
+//!     separate order statistics and subtracting them is a rank artefact.
 //!
-//! The shipped recipe is scored FIRST, on the same rows through the same function, and both are
-//! reported per-epoch and Viterbi-decoded. This project carries three incompatible kappa formulas,
-//! so a number from here read against a published one compares different statistics.
+//! THE BASELINE IS NOT BLIND, and this is the largest caveat on every number here. The shipped
+//! params were selected by a process that watched kappa on ALL THREE cohorts and rejected changes
+//! that hurt the other two. This fit never sees either held-out cohort. So the baseline had
+//! held-out exposure the fit did not, and part of its held-out margin is that exposure rather than
+//! a better recipe. The direction of the bias is knowable; its size is not.
 //!
-//! Two caveats are NOT closed and qualify every number. The class weighting rebalances the loss but
-//! `predict` takes a plain argmax, so the printed call rates are not calibrated probabilities;
-//! undoing it post hoc bakes in DREAMT's own prevalence and makes held-out kappa worse. And `clock`
-//! is a fraction of the fixture window, whose labelled part starts ~24% in on DREAMT and at zero on
-//! both held-out cohorts - so its coefficient is extrapolated over every held-out sleep onset. v2
-//! reads the same quantity off the same span, so the comparison is fair; the transfer claim is not.
+//! Two more caveats. The class weighting rebalances the loss while `predict` takes a plain argmax,
+//! so the printed call rates are not calibrated probabilities; undoing it post hoc bakes in DREAMT's
+//! prevalence and makes held-out worse. And `clock` is a fraction of the fixture window, whose
+//! labelled part starts ~24% in on DREAMT and at zero on both held-out cohorts, so its coefficient
+//! is extrapolated over every held-out sleep onset.
 //!
 //! The output is weights. Nothing is wired and `Params::SHIPPED` is untouched.
 

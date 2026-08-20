@@ -14,6 +14,7 @@
 //! engine, so any agreement was not put there by construction. The labelled nights below it DO carry
 //! wearer truth and are the part that can falsify anything.
 
+use physio_algo::sleep::metrics::paired_bar;
 use physio_algo::sleep::AccelSample;
 use physio_algo::sleep::posture::posture_series;
 use physio_algo::sleep::posture::turn as turn_of;
@@ -299,14 +300,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  pct(v, 0.10), pct(v, 0.25), pct(v, 0.50), pct(v, 0.75), pct(v, 0.90));
     }
     let deltas: Vec<f64> = turn_aucs.iter().zip(&jerk_aucs).map(|(t, j)| t - j).collect();
-    let mean_d = deltas.iter().sum::<f64>() / deltas.len() as f64;
-    let sd = (deltas.iter().map(|d| (d - mean_d).powi(2)).sum::<f64>()
-        / (deltas.len() as f64 - 1.0).max(1.0))
-        .sqrt();
-    println!("\nturn beats jerk on {wins} of {scored} nights ({:.0}%)",
+    let (mean_d, bar) = paired_bar(&deltas).unwrap_or((f64::NAN, f64::NAN));
+    println!("
+turn beats jerk on {wins} of {scored} nights ({:.0}%)",
              100.0 * wins as f64 / scored as f64);
-    println!("paired delta: mean {mean_d:+.4}, sd {sd:.4}, resolvable +/-{:.4}",
-             1.96 * sd / (deltas.len() as f64).sqrt());
+    println!("paired delta: mean {mean_d:+.4}, resolvable +/-{bar:.4}");
     let axn: usize = ax_win.iter().sum();
     if axn > 0 {
         println!("
