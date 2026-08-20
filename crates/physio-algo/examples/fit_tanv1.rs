@@ -622,10 +622,24 @@ fn main() {
 
     println!("
 === THE R-R CHANNEL, paired per night (MAIN+INT minus the same fit without resp_z)");
+    println!("  A cohort with no beats is NOT a test: resp_z is missing on every epoch, `design`");
+    println!("  imputes it to the same zero a withheld column gets, and both arms see the same");
+    println!("  input. Its near-zero is arithmetic, not evidence.");
     println!("  {:<18} {:>10} {:>10} {:>6}   verdict", "cohort", "mean d", "bar +/-", "n");
+    let beatless: Vec<bool> = std::iter::once(&train)
+        .chain(held.iter().map(|(_, h)| h))
+        .map(|s| {
+            let c = col("resp_z");
+            !s.x.iter().any(|r| r[c].is_finite())
+        })
+        .collect();
     for (d, how) in ["per-epoch", "VITERBI-decoded"].iter().enumerate() {
         println!("  {how}");
         for (i, name) in names.iter().enumerate() {
+            if beatless[i] {
+                println!("  {name:<18} {:>10} {:>10} {:>6}   NO BEATS - not a test", "-", "-", "-");
+                continue;
+            }
             paired_row(name, &by_arm[2][d][i], &by_arm[1][d][i]);
         }
     }

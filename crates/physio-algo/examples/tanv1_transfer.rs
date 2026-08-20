@@ -28,6 +28,11 @@ const MIN_EPOCHS: usize = 120;
 const PER_STORE: usize = 40;
 /// Beats in one second above which the second is a storage artefact rather than a rhythm.
 const MAX_BEATS_PER_SEC: usize = 4;
+/// Columns a mean shift CANNOT measure. `hr_z`, `hr_var_z` and `resp_z` are z-scored inside each
+/// night, so their pooled mean is 0 by construction; `clock` averages to exactly 0.5 for any whole
+/// window by arithmetic alone. They read 0.000 for every whole-window cohort whatever the data does
+/// - but NOT for a trimmed subset like the labelled floor, which would flatter every other row.
+const DEGENERATE: [&str; 4] = ["hr_z", "hr_var_z", "resp_z", "clock"];
 
 /// One night's feature rows, through the same cardiac pipeline the fitter uses.
 fn night_rows(
@@ -94,6 +99,7 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
 
     let mut out = Vec::new();
     let mut short_stream = 0usize;
+    let (mut dropped_secs, mut total_secs) = (0usize, 0usize);
     for (s, e) in &picked {
         let (s, e) = (*s, *e);
         let n = ((e - s) / EPOCH).max(0) as usize;
@@ -129,7 +135,10 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
         }
         // A second holding more beats than a heart can produce is a storage artefact, not a rhythm.
         // Dropped: this arm reads RAW stores while the fixture corpus is already repaired.
+        let before = by.len();
         by.retain(|_, v| v.len() <= MAX_BEATS_PER_SEC);
+        dropped_secs += before - by.len();
+        total_secs += before;
         let rr: Vec<RrRun> =
             by.into_iter().map(|(ts, intervals)| RrRun { ts, intervals }).collect();
         if hr.is_empty() || grav.is_empty() {
@@ -140,8 +149,13 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
     }
     let span_days = all.last().map_or(0, |l| (l.1 - all[0].0) / 86_400);
     let kept_days = picked.last().map_or(0, |l| (l.1 - picked[0].0) / 86_400);
+    let beat_pct = if total_secs > 0 {
+        100.0 * dropped_secs as f64 / total_secs as f64
+    } else {
+        0.0
+    };
     let note = format!(
-        "{} of {} sessions ({} short, {} no stream), {} of {} days spanned, stride {}",
+        "{} of {} sessions ({} short, {} no stream), {} of {} days, stride {}, {beat_pct:.2}% impossible beat-seconds",
         picked.len(), all.len(), all.len() - long.len(), short_stream, kept_days, span_days, stride
     );
     (out, note)
@@ -163,7 +177,10 @@ fn stats(x: &[[f64; NCOL]]) -> ([f64; NCOL], [f64; NCOL], [usize; NCOL]) {
 }
 
 fn main() {
-    println!("Standardised mean shift from DREAMT, in DREAMT sd units. ALL-EPOCH on both sides.
+    println!("Standardised mean shift from DREAMT, in DREAMT sd units. ALL-EPOCH on both sides.");
+    println!("{DEGENERATE:?} are EXCLUDED: a per-night z-score pools to 0 and clock to 0.5 by");
+    println!("construction, so they read 0.000 for every whole-window cohort but NOT for the");
+    println!("labelled floor - leaving them in would flatter every row against that floor.
 ");
 
     let train = golden_rows("dreamt", false);
@@ -207,6 +224,7 @@ fn main() {
         }
         let (m, _, cnt) = stats(rows);
         let mut d: Vec<(f64, &str)> = (0..NCOL)
+            .filter(|c| !DEGENERATE.contains(&Features::NAMES[*c]))
             .filter(|c| cnt[*c] > 100 && ts[*c].is_finite() && ts[*c] > 1e-12)
             .map(|c| (((m[c] - tm[c]) / ts[c]).abs(), Features::NAMES[c]))
             .filter(|(v, _)| v.is_finite())
