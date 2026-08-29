@@ -59,13 +59,14 @@ fn load(set: &str) -> Vec<Night> {
             SleepInput { start: w0, end: w1, hr: read_hr(dir), rr: read_rr(dir), accel };
         let prep = prepare_v2(&input, &Params::SHIPPED);
         let em = emissions_v2(&prep, &Params::SHIPPED);
+        // `emissions_v2` DROPS an epoch carrying neither HR nor gravity, so positional indexing
+        // into `raw` is only valid while the grid is complete. Checked BEFORE the length skip, or
+        // the hardest-collapsed grid is the one that leaves silently instead of tripping it.
+        assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
+                   dir.display(), em.len());
         if em.len() < MIN_EPOCHS {
             continue;
         }
-        // `emissions_v2` DROPS an epoch carrying neither HR nor gravity, so positional indexing
-        // into `raw` is only valid while the grid is complete. Unenforced, this misaligns silently.
-        assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
-                   dir.display(), em.len());
         let truth = (0..em.len())
             .map(|k| {
                 raw.get(&k).copied().filter(|t| (0..CLASSES as i32).contains(t)).map(|t| t as usize)
@@ -133,12 +134,31 @@ fn main() {
     println!("Each cohort takes a turn counting, because counting on ONE and losing on the others");
     println!("is also what an unrepresentative cohort looks like.\n");
 
-    let loaded: Vec<(&str, Vec<Night>)> =
-        COHORTS.iter().map(|c| (*c, load(c))).filter(|(_, n)| !n.is_empty()).collect();
+    let mut loaded: Vec<(&str, Vec<Night>)> = Vec::new();
+    for set in COHORTS {
+        let nights = load(set);
+        if nights.is_empty() {
+            println!("  {set:<20} no nights - not in the rotation\n");
+            continue;
+        }
+        loaded.push((set, nights));
+    }
     if loaded.is_empty() {
         println!("no nights - check the fixture root");
         return;
     }
+
+    // The shipped arm does not depend on the counting cohort, so it is decoded once per scored
+    // cohort. `median` sorts, so it takes a copy and leaves the scores in night order for pairing.
+    let shipped: Vec<(Vec<f64>, f64)> = loaded
+        .iter()
+        .map(|(_, nights)| {
+            let ks = score(nights, &Params::SHIPPED.transition);
+            let mut sorted = ks.clone();
+            let m = median(&mut sorted);
+            (ks, m)
+        })
+        .collect();
 
     for (from, train) in &loaded {
         let (fitted, pairs, sparse) = count_transitions(train);
@@ -153,10 +173,10 @@ fn main() {
             println!("  {:<7} {:>8.4} {:>8.4} {:>8.4} {:>8.4}", format!("{st:?}"),
                      fitted[i][0], fitted[i][1], fitted[i][2], fitted[i][3]);
         }
-        println!("  {:<20} {:>7} {:>7}   {:>10} {:>9} {:>5}   verdict",
+        println!("  {:<24} {:>7} {:>7}   {:>10} {:>9} {:>5}   verdict",
                  "scored on", "shipped", "counted", "paired d", "bar +/-", "n");
-        for (name, nights) in &loaded {
-            let mut bk = score(nights, &Params::SHIPPED.transition);
+        for (i, (name, nights)) in loaded.iter().enumerate() {
+            let (bk, bmed) = &shipped[i];
             let mut fk = score(nights, &fitted);
             let d: Vec<f64> = bk.iter().zip(&fk).map(|(a, b)| b - a).collect();
             let (mean, bar) = paired_bar(&d).unwrap_or((f64::NAN, f64::NAN));
@@ -169,8 +189,8 @@ fn main() {
             } else {
                 "inside the bar - noise".to_string()
             };
-            println!("  {:<20} {:>7.3} {:>7.3}   {mean:>+10.4} {bar:>9.4} {:>5}   {verdict}",
-                     format!("{name} {role}"), median(&mut bk), median(&mut fk), d.len());
+            println!("  {:<24} {:>7.3} {:>7.3}   {mean:>+10.4} {bar:>9.4} {:>5}   {verdict}",
+                     format!("{name} {role}"), bmed, median(&mut fk), d.len());
         }
         println!();
     }

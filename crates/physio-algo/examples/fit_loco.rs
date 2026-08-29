@@ -15,6 +15,10 @@
 //!   BASE  - the measured columns alone.
 //!   +NL   - plus the shipped recipe's transforms, read off `emission_terms` so they cannot drift.
 //!
+//! And each is scored at three COVERAGES, because abstention is the other lever that worked and the
+//! two have never been combined. Each engine refuses the epochs nearest ITS OWN decoded transitions,
+//! so both give up the same number of epochs and the comparison stays matched.
+//!
 //! Every number is a PAIRED per-night difference against the shipped recipe on the same nights.
 
 mod common;
@@ -40,6 +44,9 @@ const N_BASE: usize = Features::N;
 /// The shipped transforms a linear model cannot invent: the deep-gate hinge, the deadzoned cardiac
 /// pair, the centred rotation rank, the respiration z and the stillness-clamp indicator.
 const N_NL: usize = 6;
+/// Fractions of epochs KEPT. 1.00 is today's behaviour; below it each engine refuses its own
+/// boundary epochs, which is the rule that beat the emission margin on both held-out cohorts.
+const COVERAGE: [f64; 3] = [1.00, 0.90, 0.80];
 
 struct Night {
     /// Base columns, then the shipped transforms.
@@ -111,6 +118,31 @@ fn cols(full: &[f64], with_nl: bool) -> Vec<f64> {
     if with_nl { full.to_vec() } else { full[..N_BASE].to_vec() }
 }
 
+/// Distance in epochs to the nearest change in `pred`. A path that never changes stage scores every
+/// epoch infinite, and the index tie-break then keeps the earliest.
+fn to_edge(pred: &[usize]) -> Vec<f64> {
+    let edges: Vec<usize> = (1..pred.len()).filter(|k| pred[*k] != pred[k - 1]).collect();
+    (0..pred.len())
+        .map(|k| {
+            edges.iter().map(|e| (*e as i64 - k as i64).abs() as f64).fold(f64::INFINITY, f64::min)
+        })
+        .collect()
+}
+
+/// Kappa over the `keep` fraction of labelled epochs furthest from `pred`'s own transitions.
+fn kappa_at(pred: &[usize], truth: &[Option<usize>], keep: f64) -> Option<f64> {
+    let dist = to_edge(pred);
+    let mut idx: Vec<usize> = (0..pred.len()).filter(|k| truth[*k].is_some()).collect();
+    idx.sort_by(|a, b| dist[*b].partial_cmp(&dist[*a]).unwrap().then(a.cmp(b)));
+    let take = ((idx.len() as f64 * keep).round() as usize).max(MIN_EPOCHS).min(idx.len());
+    if take < MIN_EPOCHS {
+        return None;
+    }
+    let (p, t): (Vec<usize>, Vec<usize>) =
+        idx[..take].iter().map(|k| (pred[*k], truth[*k].unwrap())).unzip();
+    Some(kappa4(&confusion4(&p, &t)))
+}
+
 /// Kappa per night for the shipped recipe, and for a fitted weight vector, on the same nights.
 fn score(
     nights: &[Night],
@@ -118,6 +150,7 @@ fn score(
     w: &[Vec<f64>],
     m: &[f64],
     sd: &[f64],
+    keep: f64,
 ) -> (Vec<f64>, Vec<f64>) {
     let to_order: [usize; CLASSES] = std::array::from_fn(|c| stage_idx(STAGE_ORDER[c]));
     let (mut bk, mut fk) = (Vec::new(), Vec::new());
@@ -134,16 +167,13 @@ fn score(
             .collect();
         let path: Vec<usize> =
             decode_v2(&em, &Params::SHIPPED.transition).iter().map(|s| stage_idx(*s)).collect();
-        let (mut bp, mut fp, mut t) = (Vec::new(), Vec::new(), Vec::new());
-        for (k, want) in nt.truth.iter().enumerate() {
-            let Some(want) = want else { continue };
-            bp.push(nt.base[k]);
-            fp.push(path[k]);
-            t.push(*want);
-        }
-        if t.len() >= MIN_EPOCHS {
-            bk.push(kappa4(&confusion4(&bp, &t)));
-            fk.push(kappa4(&confusion4(&fp, &t)));
+        // Each engine abstains on ITS OWN boundaries, which is what either would do in the product,
+        // and both give up the same COUNT so the pairing stays matched.
+        if let (Some(b), Some(f)) =
+            (kappa_at(&nt.base, &nt.truth, keep), kappa_at(&path, &nt.truth, keep))
+        {
+            bk.push(b);
+            fk.push(f);
         }
     }
     (bk, fk)
@@ -161,8 +191,8 @@ fn main() {
              loaded.len());
     println!("of two and reports the third - transfer becomes the training signal rather than an");
     println!("afterthought. Every fit so far used ONE cohort, which is the confound this removes.\n");
-    println!("  {:<14} {:<20} {:>7} {:>7}   {:>10} {:>9} {:>5}   verdict",
-             "arm", "held-out cohort", "shipped", "fitted", "paired d", "bar +/-", "n");
+    println!("  {:<10} {:>5} {:<18} {:>7} {:>7}   {:>10} {:>9} {:>4}   verdict",
+             "arm", "keep", "held-out cohort", "shipped", "fitted", "paired d", "bar +/-", "n");
 
     for with_nl in [false, true] {
         let arm = if with_nl { "BASE +NL" } else { "BASE" };
@@ -186,20 +216,22 @@ fn main() {
             let w = fit(&dx, &y, WEIGHT_POWER);
 
             let nights = &loaded.iter().find(|(c, _)| c == held).expect("held cohort").1;
-            let (bk, fk) = score(nights, with_nl, &w, &m, &sd);
-            let d: Vec<f64> = bk.iter().zip(&fk).map(|(a, b)| b - a).collect();
-            let (mean, bar) = paired_bar(&d).unwrap_or((f64::NAN, f64::NAN));
-            let v = if !mean.is_finite() {
-                "-".to_string()
-            } else if mean.abs() > bar {
-                format!("{} ({:.2}x)", if mean > 0.0 { "BEATS SHIPPED" } else { "worse" },
-                        mean.abs() / bar)
-            } else {
-                "inside the bar".to_string()
-            };
-            println!("  {:<14} {:<20} {:>7.3} {:>7.3}   {mean:>+10.4} {bar:>9.4} {:>5}   {v}",
-                     arm, format!("{held} ({} nights)", nights.len()),
-                     median(&mut bk.clone()), median(&mut fk.clone()), d.len());
+            for keep in COVERAGE {
+                let (bk, fk) = score(nights, with_nl, &w, &m, &sd, keep);
+                let d: Vec<f64> = bk.iter().zip(&fk).map(|(a, b)| b - a).collect();
+                let (mean, bar) = paired_bar(&d).unwrap_or((f64::NAN, f64::NAN));
+                let v = if !mean.is_finite() {
+                    "-".to_string()
+                } else if mean.abs() > bar {
+                    format!("{} ({:.2}x)", if mean > 0.0 { "BEATS SHIPPED" } else { "worse" },
+                            mean.abs() / bar)
+                } else {
+                    "inside the bar".to_string()
+                };
+                println!("  {:<10} {:>4.0}% {:<18} {:>7.3} {:>7.3}   {mean:>+10.4} {bar:>9.4} {:>4}   {v}",
+                         arm, 100.0 * keep, format!("{held} n={}", nights.len()),
+                         median(&mut bk.clone()), median(&mut fk.clone()), d.len());
+            }
         }
         println!();
     }

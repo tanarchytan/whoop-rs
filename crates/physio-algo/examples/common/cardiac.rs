@@ -8,7 +8,8 @@ use physio_algo::sleep::features::{Cardiac, EPOCH_S};
 use physio_algo::sleep::{flatten_rr, resp_regularity, HrSample, RrRun};
 use physio_algo::stats::{mean, population_sd};
 
-/// Per-night z-score of a per-epoch series, missing where the series is.
+/// Per-night z-score of a per-epoch series. Missing stays missing; a series with fewer than two present
+/// values, or a flat one, returns all-missing rather than a manufactured zero.
 pub fn zscore(v: &[Option<f64>]) -> Vec<Option<f64>> {
     let present: Vec<f64> = v.iter().flatten().copied().collect();
     if present.len() < 2 {

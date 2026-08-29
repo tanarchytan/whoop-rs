@@ -10,6 +10,11 @@
 //!   the centred rotation RANK, and the stillness-clamp indicator. The plain hr, hr_var and
 //!   respiration z columns are absent because TANV1 already carries them, to 1e-14.
 //!
+//! Five of those six are the exact per-epoch transform. The clamp is the exception and is
+//! APPROXIMATED, not supplied: it adds `-max(0, weighted cardiac sum)` to AWAKE, an epoch-varying
+//! hinge, and a 0/1 column can only add a per-class constant on the clamped epochs. A flat
+//! +TRANSFORM therefore says nothing about whether the fit could have used the clamp.
+//!
 //! `terms.fixed` is not handed as a TRANSFORM column: its cycle prior and its jerk gate are
 //! epoch-varying per-class biases, so the TANV1 and +TRANSFORM arms cannot express them. The
 //! emission columns carry them already - `Terms::emission` starts each class at `fixed`.
@@ -26,20 +31,19 @@
 
 mod common;
 
-use common::lr::{design_row, fit, scores, standardise_cols};
+use common::lr::{design_row, fit, scores, standardise_cols, CLASSES};
 use common::{
     cardiac_series, dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
 };
-use physio_algo::sleep::features::{extract, Features};
+use physio_algo::sleep::features::{extract, Features, EPOCH_S};
 use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar};
 use physio_algo::sleep::{
-    decode_v2, emission_terms, params::Params, prepare_v2, SleepInput, STAGE_ORDER,
+    decode_v2, emission_terms, emissions_v2, epoch_starts_v2, params::Params, prepare_v2,
+    weights_of, SleepInput, SleepStage, STAGE_ORDER, WEIGHT_NAMES,
 };
 
-const EPOCH: i64 = 30;
 const FIT: &str = "dreamt";
 const HELD: [&str; 2] = ["aauwss", "sleep-accel"];
-const CLASSES: usize = 4;
 const MIN_EPOCHS: usize = 20;
 /// Class-weight exponents to sweep. 0 = the plain likelihood; higher rebalances the loss toward the
 /// rare classes, and away from the prior the data actually has.
@@ -82,11 +86,11 @@ fn load(set: &str) -> Vec<Night> {
         }
         let n = n_meta.max(raw.keys().max().copied().unwrap_or(0) + 1);
         let (hr, rr) = (read_hr(dir), read_rr(dir));
-        let f = extract(&accel, w0, w1, &cardiac_series(w0, n, EPOCH, &hr, &rr));
+        let f = extract(&accel, w0, w1, &cardiac_series(w0, n, EPOCH_S, &hr, &rr));
         let input = SleepInput { start: w0, end: w1, hr, rr, accel };
         let prep = prepare_v2(&input, &Params::SHIPPED);
         let terms = emission_terms(&prep, &Params::SHIPPED);
-        let em = physio_algo::sleep::emissions_v2(&prep, &Params::SHIPPED);
+        let em = emissions_v2(&prep, &Params::SHIPPED);
         if em.len() < MIN_EPOCHS {
             continue;
         }
@@ -94,25 +98,51 @@ fn load(set: &str) -> Vec<Night> {
         // emission length would then misalign everything after the hole rather than failing.
         assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
                    dir.display(), em.len());
-        assert!(f.len() >= em.len(), "{}: fewer feature rows than emissions", dir.display());
-        let (deep, awake) = (
-            stage_col(physio_algo::sleep::SleepStage::Deep),
-            stage_col(physio_algo::sleep::SleepStage::Wake),
-        );
+        assert_eq!(f.len(), em.len(), "{}: {} feature rows against {} emissions",
+                   dir.display(), f.len(), em.len());
+        // `extract` opens its grid at the window; `prepare_v2` opens at the first 30 s boundary at
+        // or after it. An off-grid window emits the same COUNT from an origin up to 29 s away, so
+        // the count above cannot see it - pair the two grids by epoch start.
+        let starts = epoch_starts_v2(&prep);
+        if let Some(k) = (0..f.len()).find(|&k| f[k].start != starts[k]) {
+            panic!("{}: feature epoch {k} opens at {} against {} prepared",
+                   dir.display(), f[k].start, starts[k]);
+        }
+        // `em` and the decomposition are the same recipe reached two ways. Requiring them equal
+        // gates the emission columns AND the design the transform columns are read out of.
+        let sw = weights_of(&Params::SHIPPED);
+        for (e, want) in em.iter().enumerate() {
+            let got = terms.emission(e, &sw);
+            assert_eq!(*want, got, "{} epoch {e}: the decomposition does not reproduce emissions_v2",
+                       dir.display());
+        }
+        let (deep, awake) = (stage_col(SleepStage::Deep), stage_col(SleepStage::Wake));
+        // The transform columns are picked out of the decomposition BY NAME, so reordering the
+        // twelve weight slots moves them with it instead of silently rewiring the arm.
+        let (w_motion, w_gate) = (slot("deep_motion"), slot("deep_gate_slope"));
+        let (w_hrv, w_hr, w_turn) = (slot("awake_hrv"), slot("awake_hr"), slot("awake_turn"));
+        // `awake_turn` ships at 0.0, so the check above multiplies the turn column away and cannot
+        // see it. Bump that one slot and require the emission to move, which gates the column the
+        // fit is handed as the centred rotation rank.
+        let mut bumped = sw;
+        bumped[w_turn] += 1.0;
+        assert!((0..em.len()).any(|e| terms.emission(e, &bumped) != terms.emission(e, &sw)),
+                "{}: the turn column is dead - the check above cannot see it", dir.display());
         let row = (0..em.len())
             .map(|e| {
                 let d = &terms.design[e];
                 let mut v = f[e].values().to_vec();
-                // The shipped transforms, read straight off the decomposition so they cannot drift
-                // from what the recipe actually computes. The width is `N_TRANSFORM` by type. The
-                // plain hr, hr_var and respiration z are omitted - they duplicate TANV1 columns.
+                // The shipped transforms, read straight off the decomposition. The width is
+                // `N_TRANSFORM` by type. The plain hr, hr_var and respiration z are omitted -
+                // they duplicate TANV1 columns.
                 let transform: [f64; N_TRANSFORM] = [
-                    d[deep][2],                                  // move_frac z
-                    -d[deep][3],                                 // the deep-gate HINGE
-                    d[awake][8],                                 // deadzoned hr_var z
-                    d[awake][9],                                 // deadzoned hr z
-                    d[awake][10],                                // centred rotation RANK
-                    if terms.clamped[e] { 1.0 } else { 0.0 },    // the stillness clamp indicator
+                    d[deep][w_motion],                        // move_frac z
+                    -d[deep][w_gate],                         // the deep-gate HINGE
+                    d[awake][w_hrv],                          // deadzoned hr_var z
+                    d[awake][w_hr],                           // deadzoned hr z
+                    d[awake][w_turn],                         // centred rotation RANK
+                    // The clamp as a 0/1 INDICATOR - a per-class constant, not its hinge.
+                    if terms.clamped[e] { 1.0 } else { 0.0 },
                 ];
                 v.extend_from_slice(&transform);
                 v.extend_from_slice(&em[e]);
@@ -129,8 +159,16 @@ fn load(set: &str) -> Vec<Night> {
     out
 }
 
-fn stage_col(s: physio_algo::sleep::SleepStage) -> usize {
+fn stage_col(s: SleepStage) -> usize {
     STAGE_ORDER.iter().position(|x| *x == s).expect("stage in STAGE_ORDER")
+}
+
+/// Where one weight sits in `WEIGHT_NAMES`, which is the order the decomposition's design uses.
+fn slot(name: &str) -> usize {
+    WEIGHT_NAMES
+        .iter()
+        .position(|w| *w == name)
+        .unwrap_or_else(|| panic!("{name} is not in WEIGHT_NAMES"))
 }
 
 /// The columns an arm keeps, out of a full row.
@@ -148,9 +186,9 @@ fn row_of(full: &[f64], a: Arm) -> Vec<f64> {
     v
 }
 
-/// Hand-built weights over the four emission columns. Standardisation is per column and invertible,
-/// so `sd[c] * (em[c]-m[c])/sd[c] + m[c]` is `em[c]` again and the log-softmax only subtracts a
-/// per-epoch constant, which no Viterbi path can see.
+/// Hand-built weights over the four emission columns, on the EMISSION ONLY geometry alone:
+/// `row[j] = sd[j]` inverts the standardiser only where emission column `j` IS design column `j`,
+/// and the log-softmax then subtracts a per-epoch constant, which no Viterbi path can see.
 fn control_weights(m: &[f64], sd: &[f64]) -> Vec<Vec<f64>> {
     let n = m.len();
     let to_order: [usize; CLASSES] = std::array::from_fn(|c| stage_idx(STAGE_ORDER[c]));
@@ -167,8 +205,10 @@ fn control_weights(m: &[f64], sd: &[f64]) -> Vec<Vec<f64>> {
 }
 
 /// Stop unless the control decodes the shipped path epoch for epoch, on every night. A negative
-/// result is only worth reading once the positive control passes.
-fn assert_control(cohorts: &[(String, Vec<Night>)], arm: Arm, m: &[f64], sd: &[f64]) {
+/// result is only worth reading once the positive control passes. EMISSION ONLY is not a parameter:
+/// [`control_weights`] lays its weights out on that arm's geometry and no other.
+fn assert_control(cohorts: &[(String, Vec<Night>)], m: &[f64], sd: &[f64]) {
+    let arm = ARMS[3];
     let w = control_weights(m, sd);
     for (name, nights) in cohorts {
         let (_, want) = score(nights, |nt| nt.em.clone());
@@ -183,8 +223,11 @@ fn assert_control(cohorts: &[(String, Vec<Night>)], arm: Arm, m: &[f64], sd: &[f
             }
         }
     }
-    println!("  CONTROL passes: hand-set weights over the emission columns reproduce the shipped");
-    println!("  staging exactly on every night, so the arms measure the FIT, not the wiring.\n");
+    println!("  CONTROL passes: hand-set weights over the four emission columns reproduce the");
+    println!("  shipped staging exactly on every night. That covers the EMISSION block only - the");
+    println!("  transform columns are gated by the decomposition check in `load` except the clamp");
+    println!("  FLAG, which moves an emission only where the weighted cardiac pair is positive.");
+    println!("  Nothing here gates the tanv1 columns.\n");
 }
 
 /// Log-softmax emissions from one arm's fitted weights, in STAGE_ORDER columns.
@@ -247,7 +290,7 @@ fn main() {
             .flat_map(|nt| nt.row.iter().map(|r| row_of(r, a)))
             .collect();
         let (m, sd) = standardise_cols(&x);
-        assert_control(&cohorts, a, &m, &sd);
+        assert_control(&cohorts, &m, &sd);
     }
 
     // The baseline reads only each night's emissions and truth, so it is the same under every arm
@@ -257,9 +300,11 @@ fn main() {
 
     println!("Every arm: same optimiser, same decoder, same shipped transition. Only the COLUMNS");
     println!("differ. EMISSION ONLY can reproduce the shipped recipe exactly, so what it falls");
-    println!("short by is objective mismatch, not a capacity bound.\n");
-    println!("  {:<14} {:>4} {:>5} {:<20} {:>7} {:>7}   {:>10} {:>9} {:>4}   verdict",
-             "arm", "cols", "pow", "cohort", "shipped", "arm", "paired d", "bar +/-", "n");
+    println!("short by is objective mismatch, not a capacity bound.");
+    println!("The two kappa columns are per-cohort MEDIANS; `paired d` is the MEAN of the per-night");
+    println!("deltas over those same nights, so it is not the difference of the two printed medians.\n");
+    println!("  {:<14} {:>4} {:>5} {:<20} {:>8} {:>8}   {:>10} {:>9} {:>4}   verdict",
+             "arm", "cols", "pow", "cohort", "ship med", "arm med", "paired d", "bar +/-", "n");
 
     // EMISSION ONLY's most favourable HELD-OUT row - mean, bar, cohort, power - so the closing
     // verdict is read off the table instead of asserted. The FIT cohort is excluded: the fit trains
@@ -300,7 +345,7 @@ fn main() {
                 } else {
                     "inside the bar".to_string()
                 };
-                println!("  {:<14} {:>4} {:>5} {:<20} {:>7.3} {:>7.3}   {mean:>+10.4} {bar:>9.4} {:>4}   {v}",
+                println!("  {:<14} {:>4} {:>5} {:<20} {:>8.3} {:>8.3}   {mean:>+10.4} {bar:>9.4} {:>4}   {v}",
                          if first { a.name } else { "" },
                          if first { ncol.to_string() } else { String::new() },
                          if first { format!("{power:.2}") } else { String::new() },
@@ -309,7 +354,9 @@ fn main() {
         }
         println!();
     }
-    println!("If +TRANSFORM beats TANV1, those transform columns were the missing part.");
+    println!("Every arm is paired against SHIPPED, never against another arm. +TRANSFORM's");
+    println!("`paired d` minus TANV1's IS the paired mean of what the transform columns add, but");
+    println!("each bar is on that arm's delta from shipped - none is a bar on that contrast.");
     match best {
         None => {
             println!("EMISSION ONLY produced no comparable held-out row, so it says nothing here.")

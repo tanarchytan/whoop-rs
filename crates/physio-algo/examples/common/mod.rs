@@ -535,3 +535,117 @@ pub fn user_cohort() -> Vec<(String, String)> {
         })
         .collect()
 }
+
+/// Where a baseline's parameters came from, relative to the nights it is being scored on.
+///
+/// A baseline tuned on its own evaluation set is an UPPER BOUND, not an opponent, and a challenger
+/// measured against it is understated by whatever that tuning was worth. [`compare`] cannot be called
+/// without stating this, because three separate conclusions have been drawn against `Params::SHIPPED`
+/// as if its cohort kappas were out-of-sample. They are not.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Provenance {
+    /// Fitted or selected without seeing any night in the cohort being scored.
+    HeldOut,
+    /// Selected while watching these nights. `what` names which parameters, so the reader can judge
+    /// how much of any gap is the privilege rather than the model.
+    InSample(&'static str),
+}
+
+/// A paired per-night comparison that refuses to be formatted without naming its baseline's
+/// provenance. Returns `(mean, bar, line)`; the line carries a loud marker when the baseline is
+/// in-sample, so an invalid comparison cannot be quoted as a clean one.
+pub fn compare(base: &[f64], arm: &[f64], base_from: Provenance) -> (f64, f64, String) {
+    assert_eq!(base.len(), arm.len(), "a paired comparison needs the same nights on both sides");
+    let d: Vec<f64> = base.iter().zip(arm).map(|(a, b)| b - a).collect();
+    let Some((mean, bar)) = physio_algo::sleep::metrics::paired_bar(&d) else {
+        return (f64::NAN, f64::NAN, "too few paired nights".to_string());
+    };
+    let tag = if mean.abs() <= bar {
+        "matches".to_string()
+    } else {
+        format!("{} ({:.2}x)", if mean > 0.0 { "AHEAD" } else { "behind" }, mean.abs() / bar)
+    };
+    let line = match base_from {
+        Provenance::HeldOut => format!("{mean:>+8.4} {bar:>7.4}  {tag}"),
+        Provenance::InSample(what) => format!(
+            "{mean:>+8.4} {bar:>7.4}  {tag}   <<< BASELINE IS IN-SAMPLE ({what}) - NOT A VALID GAP"
+        ),
+    };
+    (mean, bar, line)
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    /// The marker is the whole point of the type, so a silent in-sample line is a failure.
+    #[test]
+    fn an_in_sample_baseline_is_labelled_and_a_held_out_one_is_not() {
+        let (base, arm) = ([0.30, 0.32, 0.28, 0.31], [0.34, 0.35, 0.33, 0.36]);
+        let (m1, _, held) = compare(&base, &arm, Provenance::HeldOut);
+        let (m2, _, sample) = compare(&base, &arm, Provenance::InSample("12 emission weights"));
+        assert_eq!(m1, m2, "provenance must not change the arithmetic, only how it is reported");
+        assert!(!held.contains("IN-SAMPLE"), "a held-out baseline needs no warning: {held}");
+        assert!(sample.contains("IN-SAMPLE") && sample.contains("12 emission weights"),
+                "an in-sample baseline must name itself: {sample}");
+    }
+}
+
+/// What a cohort's `truth.csv` actually IS. The filename says "truth" on every one of them.
+///
+/// `strap`, `whoop4` and `killa5` take theirs from `sleepSession.stagesJSON`, which is our OWN
+/// on-board staging, so scoring a staging change against them measures how close the change is to v2
+/// and the incumbent scores ~1.0 by construction. Nothing on disk distinguishes those 83 nights from
+/// the 144 PSG ones, which is why this mapping exists in code rather than in a comment.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Reference {
+    /// An independent per-epoch hypnogram. The only thing that can settle a staging verdict.
+    Psg,
+    /// Our own on-board output, kept as a port-versus-onboard consistency check. CIRCULAR for scoring.
+    OurOwnOutput,
+    /// The strap's `sleep_state`: two classes, and a sleep-PERIOD marker rather than per-epoch sleep.
+    BandPeriod,
+    /// No labels.
+    Unlabelled,
+}
+
+/// The reference a fixture set carries. An unknown set is fatal rather than assumed labelled.
+pub fn reference_of(set: &str) -> Reference {
+    match set {
+        "dreamt" | "aauwss" | "sleep-accel" => Reference::Psg,
+        "strap" | "whoop4" | "killa5" => Reference::OurOwnOutput,
+        "ours" => Reference::BandPeriod,
+        "continuous" | "e9night" => Reference::Unlabelled,
+        other => panic!("{other}: no declared reference. Read its builder before scoring against it"),
+    }
+}
+
+/// Refuse to score a staging verdict against anything but an independent hypnogram.
+pub fn require_psg(set: &str) {
+    let r = reference_of(set);
+    assert_eq!(r, Reference::Psg,
+               "{set} carries {r:?}, not PSG. A 4-class verdict against it is not a verdict: \
+                OurOwnOutput is circular and BandPeriod is a two-class period marker");
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    /// The whole point is refusing the circular sets, so a silent pass on `strap` is a failure.
+    #[test]
+    fn the_our_own_output_cohorts_are_refused_and_psg_is_allowed() {
+        for set in ["dreamt", "aauwss", "sleep-accel"] {
+            require_psg(set);
+            assert_eq!(reference_of(set), Reference::Psg);
+        }
+        for set in ["strap", "whoop4", "killa5"] {
+            assert_eq!(reference_of(set), Reference::OurOwnOutput, "{set} is our own staging");
+            assert!(std::panic::catch_unwind(|| require_psg(set)).is_err(),
+                    "{set} must be refused: scoring against our own output is circular");
+        }
+        assert_eq!(reference_of("ours"), Reference::BandPeriod);
+        assert!(std::panic::catch_unwind(|| reference_of("made-up")).is_err(),
+                "an unknown set must be fatal, not assumed labelled");
+    }
+}

@@ -6,10 +6,12 @@
 //! research hardware. The straps this ships on are in the user cohort, which has no stage truth -
 //! but transfer is a question about DISTRIBUTIONS, and that needs no labels.
 //!
-//! EVERY row here is an all-epoch distribution, DREAMT included. Comparing DREAMT's LABELLED rows
-//! against a real strap's whole night measures DREAMT's own labelling window, which opens ~24% into
-//! its span: that comparison scores 0.346 against DREAMT itself, larger than any cohort distance
-//! below. The labelled-only row is printed as that floor rather than used as the reference.
+//! EVERY row here is a whole-window distribution, but not the same window on both sides: the PSG one
+//! is the whole recording, a median 24.3% of which precedes its first reference label, while a store
+//! one is a detected sleep session that starts near onset and so carries almost none of that lead-in.
+//! DREAMT's LABELLED rows against DREAMT's whole recording score 0.346, larger than any cohort
+//! distance below, so the labelled-only row is printed as a floor bounding BOTH artefacts - the
+//! labelling window and the store side's missing lead-in - rather than used as the reference.
 
 mod common;
 
@@ -49,10 +51,11 @@ fn night_rows(
     extract(grav, w0, w1, &card).iter().map(|f| f.values()).collect()
 }
 
-/// One PSG cohort's rows. `labelled_only` reproduces the subset the fitter standardises on; every
-/// comparison below uses ALL epochs on both sides, because a real strap cannot offer the subset.
-fn golden_rows(set: &str, labelled_only: bool) -> Vec<[f64; NCOL]> {
-    let mut out = Vec::new();
+/// One PSG cohort in ONE pass: rows over the whole recording, then the labelled subset the fitter
+/// standardises on. Every comparison below takes the whole window against a store's detected
+/// session, because a real strap can offer neither the subset nor the pre-label lead-in.
+fn golden_rows(set: &str) -> (Vec<[f64; NCOL]>, Vec<[f64; NCOL]>) {
+    let (mut all, mut labelled) = (Vec::new(), Vec::new());
     for dir in &dirs_of(set) {
         let truth = read_truth(dir);
         let Some((w0, w1, n_meta)) = read_meta(dir) else { continue };
@@ -64,13 +67,10 @@ fn golden_rows(set: &str, labelled_only: bool) -> Vec<[f64; NCOL]> {
         }
         let n = n_meta.max(truth.keys().max().copied().unwrap_or(0) + 1);
         let rows = night_rows(w0, w1, n, &read_hr(dir), &read_rr(dir), &grav);
-        if labelled_only {
-            out.extend(truth.keys().filter_map(|k| rows.get(*k).copied()));
-        } else {
-            out.extend(rows);
-        }
+        labelled.extend(truth.keys().filter_map(|k| rows.get(*k).copied()));
+        all.extend(rows);
     }
-    out
+    (all, labelled)
 }
 
 /// Staged nights out of one real backup, EVENLY SPACED across the part of the store its raw streams
@@ -84,7 +84,8 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
         return (Vec::new(), "unreadable".into());
     };
     let Ok(mut q) = cx.prepare(
-        "SELECT startTs, endTs FROM sleepSession WHERE stagesJSON IS NOT NULL AND stagesJSON != '' ORDER BY startTs",
+        "SELECT startTs, endTs FROM sleepSession \
+         WHERE stagesJSON IS NOT NULL AND stagesJSON != '' ORDER BY startTs",
     ) else {
         return (Vec::new(), "no sleepSession".into());
     };
@@ -147,6 +148,11 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
                 .map(|it| it.filter_map(Result::ok).collect())
             })
             .unwrap_or_default();
+        // Before the beat census, so its percentage covers the nights that reach `out`.
+        if hr.is_empty() || grav.is_empty() {
+            short_stream += 1;
+            continue;
+        }
         let mut by: BTreeMap<i64, Vec<u16>> = BTreeMap::new();
         if let Ok(mut p) = cx.prepare_cached(
             "SELECT ts, rrMs FROM rrInterval WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
@@ -165,10 +171,6 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
         total_secs += before;
         let rr: Vec<RrRun> =
             by.into_iter().map(|(ts, intervals)| RrRun { ts, intervals }).collect();
-        if hr.is_empty() || grav.is_empty() {
-            short_stream += 1;
-            continue;
-        }
         contributed.push((s, e));
         out.extend(night_rows(s, e, n, &hr, &rr, &grav));
     }
@@ -183,7 +185,8 @@ fn store_rows(path: &str) -> (Vec<[f64; NCOL]>, String) {
     // The four categories plus the contributed count sum to `all.len()`; drop one and a capped
     // store reads as a loader fault.
     let note = format!(
-        "{} of {} sessions ({} short, {} off-stream, {} over the {PER_STORE}-night cap, {} no stream), {} of {} days, {beat_pct:.2}% impossible beat-seconds",
+        "{} of {} sessions ({} short, {} off-stream, {} over the {PER_STORE}-night cap, \
+         {} no stream), {} of {} days, {beat_pct:.2}% impossible beat-seconds",
         contributed.len(), all.len(), all.len() - long_enough.len(),
         long_enough.len() - long.len(), long.len() - picked.len(), short_stream, kept_days,
         span_days
@@ -206,41 +209,67 @@ fn stats(x: &[[f64; NCOL]]) -> ([f64; NCOL], [f64; NCOL], [usize; NCOL]) {
     (m, s, cnt)
 }
 
+/// Per-column distances into one `Distance`: the mean over columns, the worst, and the ranked list.
+fn ranked(mut d: Vec<(f64, &'static str)>) -> Option<Distance> {
+    if d.is_empty() {
+        return None;
+    }
+    let mean = d.iter().map(|(v, _)| v).sum::<f64>() / d.len() as f64;
+    d.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    Some((mean, d[0].0, d))
+}
+
+/// Row-count-weighted mean of per-cohort distances, column by column. Pooling the rows instead lets
+/// two cohorts shifting opposite ways cancel, so one distance over the pool can only under-state it.
+fn weighted_mean(parts: &[(usize, Distance)]) -> Option<Distance> {
+    let mut acc: BTreeMap<&'static str, (f64, f64)> = BTreeMap::new();
+    for (n, (_, _, cols)) in parts {
+        for (v, name) in cols {
+            let e = acc.entry(*name).or_insert((0.0, 0.0));
+            e.0 += *v * *n as f64;
+            e.1 += *n as f64;
+        }
+    }
+    ranked(acc.into_iter().filter(|(_, (_, w))| *w > 0.0).map(|(k, (s, w))| (s / w, k)).collect())
+}
+
 fn main() {
-    println!("Standardised mean shift from DREAMT, in DREAMT sd units. ALL-EPOCH on both sides.");
+    println!("Standardised mean shift from DREAMT, in DREAMT sd units. Whole window on both sides,");
+    println!("but not the same window: the PSG one is the whole recording, a median 24.3% of which");
+    println!("precedes its first label, and the store one is a detected sleep session starting near");
+    println!("onset. The FLOOR row bounds that gap as well as the labelling window.");
     println!("{DEGENERATE:?} are EXCLUDED: a per-night z-score pools to 0, a rank and clock");
     println!("to 0.5 by construction, so they read 0.000 for every whole-window cohort but not");
     println!("for the labelled floor - leaving them in would flatter every row against it.\n");
 
-    let train = golden_rows("dreamt", false);
+    let (train, labelled) = golden_rows("dreamt");
     if train.is_empty() {
         println!("no DREAMT rows - check the fixture root");
         return;
     }
     let (tm, ts, _) = stats(&train);
-    println!("DREAMT reference: {} rows (all epochs)\n", train.len());
+    println!("DREAMT reference: {} rows (whole recordings)\n", train.len());
 
     let mut cohorts: Vec<(String, Vec<[f64; NCOL]>)> = Vec::new();
     // The floor: DREAMT against ITSELF, labelled rows only. Any cohort distance below this one is
-    // smaller than the artefact of which epochs carry a reference label.
-    cohorts.push(("DREAMT labelled (FLOOR)".to_string(), golden_rows("dreamt", true)));
+    // smaller than the window artefact - which epochs carry a reference label, and the pre-label
+    // lead-in a store's session window drops.
+    cohorts.push(("DREAMT labelled (FLOOR)".to_string(), labelled));
     for set in ["aauwss", "sleep-accel"] {
-        cohorts.push((format!("{set} (PSG held-out)"), golden_rows(set, false)));
+        cohorts.push((format!("{set} (PSG held-out)"), golden_rows(set).0));
     }
-    let mut all_user: Vec<[f64; NCOL]> = Vec::new();
+    let mut any_user = false;
     for (wearer, path) in user_cohort() {
         let (rows, note) = store_rows(&path);
         println!("  {wearer:<14} {note}");
         if rows.is_empty() {
             continue;
         }
-        all_user.extend_from_slice(&rows);
+        any_user = true;
         cohorts.push((format!("{wearer} (real strap)"), rows));
     }
-    if all_user.is_empty() {
+    if !any_user {
         println!("no user rows - is the cohort manifest reachable?");
-    } else {
-        cohorts.push(("ALL REAL STRAPS".to_string(), all_user));
     }
 
     // Mean AND max, each as a multiple of the floor's. They disagree, and reading only the mean
@@ -250,31 +279,36 @@ fn main() {
             return None;
         }
         let (m, _, cnt) = stats(rows);
-        let mut d: Vec<(f64, &str)> = (0..NCOL)
+        let d: Vec<(f64, &'static str)> = (0..NCOL)
             .filter(|c| !DEGENERATE.contains(&Features::NAMES[*c]))
             .filter(|c| cnt[*c] > 100 && ts[*c].is_finite() && ts[*c] > 1e-12)
             .map(|c| (((m[c] - tm[c]) / ts[c]).abs(), Features::NAMES[c]))
             .filter(|(v, _)| v.is_finite())
             .collect();
-        if d.is_empty() {
-            return None;
-        }
-        let mean = d.iter().map(|(v, _)| v).sum::<f64>() / d.len() as f64;
-        d.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-        Some((mean, d[0].0, d))
+        ranked(d)
     };
 
     let floor = cohorts.first().and_then(|(_, r)| summarise(r));
+    let (fm, fx) = floor.as_ref().map_or((f64::NAN, f64::NAN), |(a, b, _)| (*a, *b));
+    let print_row = |name: &str, (mean, max, d): &Distance| {
+        println!("{name:<26} {mean:>7.3} {:>7.2} {max:>7.3} {:>7.2} {:>5}   {} {:.2}",
+                 mean / fm, max / fx, d.len(), d[0].1, d[0].0);
+    };
     println!("\n{:<26} {:>7} {:>7} {:>7} {:>7} {:>5}   worst column",
              "cohort", "mean", "xfloor", "max", "xfloor", "cols");
+    let mut real: Vec<(usize, Distance)> = Vec::new();
     for (name, rows) in &cohorts {
-        let Some((mean, max, d)) = summarise(rows) else {
+        let Some(dist) = summarise(rows) else {
             println!("{name:<26} {:>7}   too few rows to compare", rows.len());
             continue;
         };
-        let (fm, fx) = floor.as_ref().map_or((f64::NAN, f64::NAN), |(a, b, _)| (*a, *b));
-        println!("{name:<26} {mean:>7.3} {:>7.2} {max:>7.3} {:>7.2} {:>5}   {} {:.2}",
-                 mean / fm, max / fx, d.len(), d[0].1, d[0].0);
+        print_row(name.as_str(), &dist);
+        if name.ends_with("(real strap)") {
+            real.push((rows.len(), dist));
+        }
+    }
+    if let Some(dist) = weighted_mean(&real) {
+        print_row("ALL REAL STRAPS (mean)", &dist);
     }
 
     println!("\nRead every row against the FLOOR, not against zero, and read BOTH statistics. A");
@@ -282,4 +316,8 @@ fn main() {
     println!("a fitted weight applied off its estimated range actually looks like.");
     println!("`cols` is how many columns survived: a cohort short of the floor's count is");
     println!("averaging a different set, so its xfloor is not a like-for-like ratio.");
+    println!("ALL REAL STRAPS (mean) averages the per-wearer DISTANCES, weighted by rows, so a");
+    println!("wearer shifting one way cannot be cancelled by a wearer shifting the other. One");
+    println!("distance over their POOLED rows would be bounded below this by the triangle");
+    println!("inequality, and would read closer to DREAMT than every row it is made of.");
 }

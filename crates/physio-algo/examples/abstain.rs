@@ -7,10 +7,11 @@
 //! confidence and keeping the top fraction raises kappa on what is kept - but so does dropping
 //! epochs at random, so the arms below are all scored at MATCHED COVERAGE.
 //!
-//! Two nulls, and the second is the one that matters. RANDOM proves a drop is not free. NEAR A
-//! DECODED TRANSITION is a heuristic needing no emissions at all, and a Viterbi decoder only moves
-//! state where the emission margin is wide, so the two are nearly the same event by construction.
-//! A confidence signal has to beat THAT, not random.
+//! Two nulls. RANDOM proves a drop is not free. NEAR A DECODED TRANSITION needs no emissions at
+//! all, but a sticky decoder only moves state where the emission margin is wide, so epochs beside
+//! an edge carry WIDER margins than the rest: refusing them refuses the high-confidence epochs,
+//! which is close to the INVERSE of the margin rule rather than a near-identical null. Clearing
+//! `vs edge` is the cheaper of the two results; random is the bar that still has to be cleared.
 //!
 //! Coverage is not the only cost. Scattered single-epoch holes are unusable in a hypnogram, so every
 //! rule reports the run-length of what it refuses.
@@ -56,9 +57,9 @@ struct Night {
     pred: Vec<usize>,
     truth: Vec<Option<usize>>,
     margin: Vec<f64>,
-    /// Epochs to the nearest decoded stage change. Needs the path only, no emissions. A night the
-    /// decoder never changes stage on scores every epoch [`f64::INFINITY`], so the index tie-break
-    /// keeps the EARLIEST epochs.
+    /// Epochs to the nearest decoded stage change, which lies BETWEEN two epochs, so the pair either
+    /// side of it both score 0. Needs the path only, no emissions. A night the decoder never changes
+    /// stage on scores every epoch [`f64::INFINITY`], so the index tie-break keeps the EARLIEST ones.
     to_edge: Vec<f64>,
 }
 
@@ -75,11 +76,14 @@ fn load(set: &str) -> Vec<Night> {
         let input = SleepInput { start: w0, end: w1, hr: read_hr(dir), rr: read_rr(dir), accel };
         let prep = prepare_v2(&input, &Params::SHIPPED);
         let em = emissions_v2(&prep, &Params::SHIPPED);
+        // `truth` below indexes `raw` positionally, which holds only while the grid is complete.
+        // Checked BEFORE the length skip, or the hardest-collapsed grid is the one that leaves
+        // silently instead of tripping it.
+        assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
+                   dir.display(), em.len());
         if em.len() < MIN_EPOCHS {
             continue;
         }
-        assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
-                   dir.display(), em.len());
         let pred: Vec<usize> =
             decode_v2(&em, &Params::SHIPPED.transition).iter().map(|s| stage_idx(*s)).collect();
         let margin: Vec<f64> = em
@@ -94,9 +98,10 @@ fn load(set: &str) -> Vec<Night> {
             (1..pred.len()).filter(|k| pred[*k] != pred[k - 1]).collect();
         let to_edge = (0..pred.len())
             .map(|k| {
+                let k = k as i64;
                 edges
                     .iter()
-                    .map(|e| (*e as i64 - k as i64).abs() as f64)
+                    .map(|e| (*e as i64 - k).abs().min((*e as i64 - 1 - k).abs()) as f64)
                     .fold(f64::INFINITY, f64::min)
             })
             .collect();
@@ -156,7 +161,8 @@ fn scored(nights: &[Night], keep: f64, rule: Rule) -> (Vec<f64>, Vec<usize>) {
             idx[..take].iter().map(|k| (nt.pred[*k], nt.truth[*k].unwrap())).unzip();
         ks.push(kappa4(&confusion4(&p, &t)));
 
-        // Run-lengths of the refusals, in epoch order.
+        // Run-lengths of the refusals, in epoch order, over the LABELLED epochs only: an epoch the
+        // reference is silent on is absent from `idx`, so it splits one refusal stretch into two.
         let mut dropped: Vec<usize> = idx[take..].to_vec();
         dropped.sort_unstable();
         let mut i = 0;
@@ -184,11 +190,13 @@ fn verdict(mean: f64, bar: f64) -> String {
 
 fn main() {
     println!("Kappa on the epochs KEPT, every rule at MATCHED coverage, paired per night.");
-    println!("`vs random` proves a drop is not free. `vs edge` is the null that matters: refusing");
-    println!("near a decoded transition needs no emissions, and a decoder only changes state where");
-    println!("the margin is wide, so the two are nearly the same event.");
-    println!("`1-run%` is the share of refusals that are a LONE 30 s epoch - a hypnogram cannot");
-    println!("draw those.\n");
+    println!("`vs random` proves a drop is not free. `vs edge` needs no emissions, but a sticky");
+    println!("decoder only changes state where the margin is wide, so epochs beside an edge carry");
+    println!("WIDER margins: refusing them refuses the high-confidence epochs, close to the INVERSE");
+    println!("of the margin rule, so clearing `vs edge` is the cheaper of the two results.");
+    println!("`1-run%` is the share of refusal RUNS that are a LONE 30 s epoch - a hypnogram");
+    println!("cannot draw those. Runs are counted over the epochs the reference LABELS, so a gap");
+    println!("in truth inside a refusal stretch reads as two runs rather than one.\n");
 
     for set in COHORTS {
         let nights = load(set);
@@ -200,7 +208,8 @@ fn main() {
         let n_scored = full.len();
         println!("=== {set} ({n_scored} of {} nights scored), full-coverage kappa {:.3}",
                  nights.len(), median(&mut full));
-        println!("  {:>5} {:<16} {:>7} {:>16} {:>16} {:>7} {:>7}",
+        // A verdict group is 8 + 1 + 14 = 23 wide, 14 being the longest string `verdict` returns.
+        println!("  {:>5} {:<16} {:>7} {:<23} {:<23} {:>7} {:>7}",
                  "keep", "rule", "kappa", "vs random", "vs edge", "1-run%", "runs/n");
         for keep in COVERAGE {
             let (rnd, _) = scored(&nights, keep, Rule::Random);
@@ -225,7 +234,7 @@ fn main() {
                 // `runs/n` is per SCORED night; `k` holds one kappa per night that passed the guard.
                 let scored_nights = k.len();
                 let kappa = median(&mut k);
-                println!("  {:>4.0}% {:<16} {:>7.3} {:>+8.4} {:<7} {:>16} {:>6.0}% {:>7.1}",
+                println!("  {:>4.0}% {:<16} {:>7.3} {:>+8.4} {:<14} {:<23} {:>6.0}% {:>7.1}",
                          100.0 * keep, rule.name(), kappa, mr, verdict(mr, br), vs_edge, pct,
                          runs.len() as f64 / scored_nights.max(1) as f64);
             }

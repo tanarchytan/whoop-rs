@@ -1,9 +1,8 @@
 //! Multinomial logistic regression, shared by the harnesses that fit one.
 //!
-//! Column count is [`Features::N`], read from the source of truth so adding a column can never
-//! leave a design matrix silently narrow.
-
-#![allow(dead_code)]
+//! The fixed-width path ([`standardiser`], [`design`]) reads [`NCOL`] from [`Features::N`], so adding a
+//! column can never leave those designs silently narrow. [`standardise_cols`], [`design_row`] and
+//! [`scores`] are width-agnostic, for the arm-specific fits, and assert their widths instead.
 
 use physio_algo::sleep::features::Features;
 use physio_algo::stats;
@@ -59,7 +58,7 @@ pub fn class_weights(y: &[usize], power: f64) -> [f64; CLASSES] {
 /// The LAST column of every row must be the bias [`design_row`] appends: L2 exempts the intercept.
 pub fn fit(x: &[Vec<f64>], y: &[usize], power: f64) -> Vec<Vec<f64>> {
     let p = x[0].len();
-    debug_assert!(
+    assert!(
         x.iter().all(|r| r.len() == p && r[p - 1] == 1.0),
         "fit exempts the last column from L2 as the intercept"
     );
@@ -86,7 +85,7 @@ pub fn fit(x: &[Vec<f64>], y: &[usize], power: f64) -> Vec<Vec<f64>> {
                 }
             }
         }
-        // The step below descends nll + (L2/2)||w||^2, so convergence is judged on that objective.
+        // The step below descends nll/n + (L2/2)||w||^2, so convergence is judged on that objective.
         let w_sq: f64 = w.iter().flat_map(|wc| wc[..p - 1].iter()).map(|v| v * v).sum();
         let obj = nll / x.len() as f64 + 0.5 * L2 * w_sq;
         if it % 2000 == 0 {
@@ -131,8 +130,15 @@ pub fn predict(w: &[Vec<f64>], row: &[f64]) -> usize {
     best.0
 }
 
-/// Class scores for one row.
+/// Class scores for one row, which must be exactly as wide as the weights it is scored against.
 pub fn scores(w: &[Vec<f64>], row: &[f64]) -> [f64; CLASSES] {
+    assert!(
+        w.iter().all(|wc| wc.len() == row.len()),
+        "a {}-wide row scored against {}-wide weights: the shorter side would truncate the dot \
+         product, dropping the bias with no error",
+        row.len(),
+        w.first().map_or(0, Vec::len)
+    );
     let mut z = [0.0f64; CLASSES];
     for (c, wc) in w.iter().enumerate() {
         z[c] = wc.iter().zip(row).map(|(a, b)| a * b).sum();
@@ -142,18 +148,18 @@ pub fn scores(w: &[Vec<f64>], row: &[f64]) -> [f64; CLASSES] {
 
 /// Column means and sds over TRAIN only, for a design of arbitrary width.
 pub fn standardise_cols(x: &[Vec<f64>]) -> (Vec<f64>, Vec<f64>) {
-    let ncol = x.first().map_or(0, |r| r.len());
-    assert!(
-        ncol > 0 && x.iter().all(|r| r.len() == ncol),
-        "standardise_cols needs a non-empty rectangular design; got {} rows, first {ncol} wide",
-        x.len()
-    );
-    col_stats(x, ncol)
+    col_stats(x, x.first().map_or(0, |r| r.len()))
 }
 
 /// Mean and population sd of each column's finite values. An sd at or below 1e-12 becomes 1.0, so
 /// a constant column standardises to zero; an all-NaN column keeps mean 0 and sd 1.
+/// The one guard both standardisers share: an empty design is a caller bug, not an identity transform.
 fn col_stats(x: &[impl AsRef<[f64]>], ncol: usize) -> (Vec<f64>, Vec<f64>) {
+    assert!(
+        ncol > 0 && !x.is_empty() && x.iter().all(|r| r.as_ref().len() == ncol),
+        "a standardiser needs a non-empty rectangular design; got {} rows, {ncol} wide",
+        x.len()
+    );
     let (mut m, mut s) = (vec![0.0; ncol], vec![1.0; ncol]);
     for c in 0..ncol {
         let v: Vec<f64> = x.iter().map(|r| r.as_ref()[c]).filter(|v| v.is_finite()).collect();
@@ -170,6 +176,14 @@ fn col_stats(x: &[impl AsRef<[f64]>], ncol: usize) -> (Vec<f64>, Vec<f64>) {
 /// Design row of arbitrary width: standardised, NaN imputed to the train mean, plus a bias.
 /// `drop` zeroes columns so one optimiser can be run with features withheld.
 pub fn design_row(r: &[f64], m: &[f64], s: &[f64], drop: &[usize]) -> Vec<f64> {
+    assert!(
+        m.len() == r.len() && s.len() == r.len(),
+        "a {}-wide row standardised against {}-mean/{}-sd statistics: a wider arm's stats would \
+         standardise it against the wrong columns and still come out the expected width",
+        r.len(),
+        m.len(),
+        s.len()
+    );
     let mut out = Vec::with_capacity(r.len() + 1);
     for (c, v) in r.iter().enumerate() {
         out.push(if drop.contains(&c) || !v.is_finite() { 0.0 } else { (v - m[c]) / s[c] });

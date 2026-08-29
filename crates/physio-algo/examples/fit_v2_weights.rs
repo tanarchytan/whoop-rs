@@ -24,15 +24,18 @@ mod common;
 use common::{dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx};
 use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar};
 use physio_algo::sleep::{
-    decode_v2, emission_terms, emissions_v2, params::Params, prepare_v2, weights_of, Prepared,
-    SleepInput, Terms, WEIGHT_NAMES,
+    decode_v2, emission_terms, emissions_v2, epoch_starts_v2, params::Params, prepare_v2,
+    weights_of, Prepared, SleepInput, Terms, WEIGHT_NAMES,
 };
 
 const FIT: &str = "dreamt";
 const HELD: [&str; 2] = ["aauwss", "sleep-accel"];
-const NW: usize = 12;
+const NW: usize = WEIGHT_NAMES.len();
 const CLASSES: usize = 4;
 const MIN_EPOCHS: usize = 20;
+/// Class-weight exponent. Higher rebalances the loss toward the rare classes, and away from the
+/// prior the cohort has.
+const WEIGHT_POWER: f64 = 0.5;
 const ITERS: usize = 4_000;
 const STEP: f64 = 0.02;
 /// Step below which the search stops. Reaching it is the ONLY converged exit; [`ITERS`] is a cap.
@@ -54,7 +57,9 @@ enum Objective {
 struct Night {
     /// The features the real staging path re-reads under each candidate's own weights.
     prep: Prepared,
-    terms: Terms,
+    /// The weight decomposition [`loss`] reads. Carried by the FIT cohort alone - the held-out sets
+    /// only ever go through [`score`], which reads `prep`.
+    terms: Option<Terms>,
     truth: Vec<Option<usize>>,
 }
 
@@ -71,15 +76,16 @@ fn load(set: &str) -> Vec<Night> {
         let input =
             SleepInput { start: w0, end: w1, hr: read_hr(dir), rr: read_rr(dir), accel };
         let prep = prepare_v2(&input, &Params::SHIPPED);
-        let terms = emission_terms(&prep, &Params::SHIPPED);
-        if terms.design.len() < MIN_EPOCHS {
+        let epochs = epoch_starts_v2(&prep).len();
+        if epochs < MIN_EPOCHS {
             continue;
         }
-        // `prepare_v2` DROPS an epoch with neither HR nor gravity. Indexing truth by design position
+        // `prepare_v2` DROPS an epoch with neither HR nor gravity. Indexing truth by epoch position
         // would then misalign every epoch after the hole rather than failing.
-        assert_eq!(terms.design.len(), n, "{}: {n} epochs of truth against {} of design",
-                   dir.display(), terms.design.len());
-        let truth = (0..terms.design.len())
+        assert_eq!(epochs, n, "{}: {n} epochs of truth against {epochs} prepared", dir.display());
+        // Only `loss` reads the decomposition, and it runs on the FIT cohort.
+        let terms = (set == FIT).then(|| emission_terms(&prep, &Params::SHIPPED));
+        let truth = (0..epochs)
             .map(|k| {
                 raw.get(&k).copied().filter(|t| (0..CLASSES as i32).contains(t)).map(|t| t as usize)
             })
@@ -110,9 +116,10 @@ fn loss(nights: &[Night], w: &[f64; NW], cw: &[f64; CLASSES]) -> f64 {
     let mut total = 0.0;
     let mut n = 0.0;
     for nt in nights {
+        let terms = nt.terms.as_ref().expect("the FIT cohort carries its decomposition");
         for (e, want) in nt.truth.iter().enumerate() {
             let Some(want) = want else { continue };
-            let em = nt.terms.emission(e, w);
+            let em = terms.emission(e, w);
             let mx = em.iter().cloned().fold(f64::MIN, f64::max);
             let lse = mx + em.iter().map(|v| (v - mx).exp()).sum::<f64>().ln();
             total += cw[*want] * (lse - em[col_of(*want)]);
@@ -126,11 +133,11 @@ fn loss(nights: &[Night], w: &[f64; NW], cw: &[f64; CLASSES]) -> f64 {
     }
 }
 
-/// The shared inverse-frequency weights at power 0.5, over every labelled epoch of the cohort.
+/// The shared inverse-frequency weights at [`WEIGHT_POWER`], over every labelled epoch of the cohort.
 fn class_weights(nights: &[Night]) -> [f64; CLASSES] {
     let labels: Vec<usize> =
         nights.iter().flat_map(|nt| nt.truth.iter().flatten().copied()).collect();
-    common::lr::class_weights(&labels, 0.5)
+    common::lr::class_weights(&labels, WEIGHT_POWER)
 }
 
 /// Per-night kappa under one weight vector, through the staging path the product runs: the cycle
@@ -235,9 +242,12 @@ fn main() {
                  by_kappa[j]);
     }
 
-    println!("\n  {:<28} {:>8} {:>8}   {:>10} {:>9} {:>5}   verdict",
+    println!();
+    println!("The two kappa columns are per-cohort MEDIANS; `paired d` is the MEAN of the per-night");
+    println!("deltas over those same nights, so it is not the difference of the two printed medians.\n");
+    println!("  {:<28} {:>8} {:>8}   {:>10} {:>9} {:>5}   verdict",
              "cohort / objective", "shipped", "refit", "paired d", "bar +/-", "n");
-    for set in [FIT, HELD[0], HELD[1]] {
+    for set in std::iter::once(FIT).chain(HELD) {
         // The fit cohort is already in `train`; only the held-out sets need loading.
         let held = (set != FIT).then(|| load(set));
         let nights: &[Night] = held.as_deref().unwrap_or(&train);

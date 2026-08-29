@@ -15,13 +15,13 @@
 //! pinned to its prior. The fit has 4 x 29 = 116 free parameters, no non-linearity, and nothing
 //! pinned - it must LEARN that light is the default from data that is 49-61% light.
 //!
-//! This prints the fitted weight matrix, per-class recall and precision for both engines, and an arm
+//! This prints the largest fitted weights, per-class recall and precision for both engines, and an arm
 //! with LIGHT's fitted weights zeroed AFTER the fit: a post-hoc ablation of the shipped structure's
 //! single biggest prior, not a refit under that constraint.
 
 mod common;
 
-use common::lr::{design, fit, scores, standardiser, NCOL};
+use common::lr::{design, fit, scores, standardiser, CLASSES, NCOL};
 use common::{
     cardiac_series, dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
 };
@@ -34,10 +34,11 @@ use physio_algo::sleep::{
 const EPOCH: i64 = 30;
 const FIT: &str = "dreamt";
 const HELD: [&str; 2] = ["aauwss", "sleep-accel"];
-const CLASSES: usize = 4;
 const CLASS_NAME: [&str; CLASSES] = ["wake", "light", "deep", "rem"];
 const MIN_EPOCHS: usize = 20;
 const WEIGHT_POWER: f64 = 0.5;
+/// How many of the NCOL columns the weight table prints, largest |weight| in any class first.
+const TOP_COLUMNS: usize = 10;
 /// Our class index for light, the one the shipped emission pins to its prior.
 const LIGHT: usize = 1;
 
@@ -162,13 +163,15 @@ fn main() {
 
     println!("\n=== THE FITTED WEIGHTS, standardised so columns are comparable");
     println!("Each row is a class; a large value means that column moves that class. The shipped");
-    println!("emission gives LIGHT a weight of exactly zero on everything.\n");
-    println!("  {:<16} {:>8} {:>8} {:>8} {:>8}", "column", "wake", "light", "deep", "rem");
+    println!("emission gives LIGHT a weight of exactly zero on everything.");
+    println!("Rows: the {TOP_COLUMNS} columns of {NCOL} with the largest |weight| in any class. The");
+    println!("|weight| totals below cover all {NCOL}.\n");
+    println!("  {:<16}{}", "column", CLASS_NAME.map(|c| format!("{c:>9}")).join(""));
     let mut ranked: Vec<(f64, usize)> = (0..NCOL)
         .map(|c| ((0..CLASSES).map(|k| w[k][c].abs()).fold(0.0, f64::max), c))
         .collect();
     ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    for (_, c) in ranked.iter().take(10) {
+    for (_, c) in ranked.iter().take(TOP_COLUMNS) {
         println!("  {:<16} {:>8.3} {:>8.3} {:>8.3} {:>8.3}", Features::NAMES[*c],
                  w[0][*c], w[1][*c], w[2][*c], w[3][*c]);
     }
@@ -181,23 +184,26 @@ fn main() {
     println!("  the shipped emission spends ZERO on light and lets the prior carry it.");
 
     println!("\n=== PER-CLASS recall/precision, and what ablating LIGHT does");
-    println!("  {:<22} {:>7}   {}", "cohort / engine", "kappa",
+    println!("The kappa column is a per-cohort MEDIAN. The `ablation, paired` row is the MEAN of");
+    println!("the per-night deltas over those same nights, not the difference of two medians.");
+    println!("  {:<26} {:>14}   {}", "cohort / engine", "kappa (median)",
              CLASS_NAME.map(|c| format!("{c:>5}      ")).join(" "));
     for set in [FIT, HELD[0], HELD[1]] {
         // The fit cohort is already in `train`; only the held-out sets need loading.
         let held = (set != FIT).then(|| load(set));
         let nights: &[Night] = held.as_deref().unwrap_or(&train);
         if nights.is_empty() {
+            println!("  {set:<26} no nights");
             continue;
         }
         let role = if set == FIT { "FITTED" } else { "HELD" };
         let (cb, kb) = confuse(nights, |nt| nt.em.clone());
         let (cf, kf) = confuse(nights, |nt| fitted_em(nt, w.as_slice(), &m, &sd));
         let (ca, ka) = confuse(nights, |nt| fitted_em(nt, ablated.as_slice(), &m, &sd));
-        println!("  {:<22} {:>7.3}   {}", format!("{set} ({role}) shipped"),
+        println!("  {:<26} {:>14.3}   {}", format!("{set} ({role}) shipped"),
                  median(&mut kb.clone()), per_class(&cb));
-        println!("  {:<22} {:>7.3}   {}", "  tanv1", median(&mut kf.clone()), per_class(&cf));
-        println!("  {:<22} {:>7.3}   {}", "  tanv1, LIGHT ablated", median(&mut ka.clone()),
+        println!("  {:<26} {:>14.3}   {}", "  tanv1", median(&mut kf.clone()), per_class(&cf));
+        println!("  {:<26} {:>14.3}   {}", "  tanv1, LIGHT ablated", median(&mut ka.clone()),
                  per_class(&ca));
         let d: Vec<f64> = kf.iter().zip(&ka).map(|(a, b)| b - a).collect();
         let (mean, bar) = paired_bar(&d).unwrap_or((f64::NAN, f64::NAN));
@@ -209,8 +215,8 @@ fn main() {
         } else {
             "inside the bar".into()
         };
-        println!("  {:<22} {mean:>+7.4} +/-{bar:.4}   {} of {} nights   {v}",
-                 "  ablation, paired", d.len(), nights.len());
+        println!("  {:<26} {mean:>+14.4} +/-{bar:.4}   {} of {} nights   {v}",
+                 "  ablation, paired (mean)", d.len(), nights.len());
     }
     println!("\nrecall/precision per class. The shipped engine's structure says light is what you");
     println!("get when nothing argues otherwise; the fit has to learn that from the data.");
