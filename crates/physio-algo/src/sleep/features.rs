@@ -21,8 +21,8 @@ pub const EPOCH_S: i64 = 30;
 pub const STILL_SCALE_FLOOR_G: f64 = 0.01;
 
 /// Fewest consecutive-second deltas before the night's p75 is trusted as a scale. Below this the p75
-/// index sits at or near the MAXIMUM, so one movement becomes the whole night's scale and every other
-/// epoch reads as a measured zero. Fragmented captures go down to 3% coverage.
+/// is not a stable order statistic of the night's movement, so the physical floor is used instead.
+/// Fragmented captures go down to 3% coverage.
 pub const MIN_SCALE_DELTAS: usize = 120;
 
 /// Centred window WIDTHS in seconds - `(mid - w/2, mid + w/2)` spans exactly `w`, not `2w`. The short
@@ -437,6 +437,21 @@ mod tests {
         assert!(bare[7].values()[col].is_nan(), "unsupplied must be NaN, never a rank of zero");
     }
 
+    /// The only beat-fed column, and no other column can stand in for it: if `extract` stops carrying
+    /// it, every vector loses its whole R-R channel and nothing else moves.
+    #[test]
+    fn respiration_regularity_reaches_its_own_column_and_is_missing_when_unsupplied() {
+        let g = still(600);
+        let card: Vec<Cardiac> =
+            (0..20).map(|k| Cardiac { resp_z: Some(k as f64 / 20.0), ..Default::default() }).collect();
+        let f = extract(&g, 0, 600, &card);
+        let col = Features::NAMES.iter().position(|n| *n == "resp_z").expect("named column");
+        assert_eq!(f[7].values()[col], 7.0 / 20.0, "the R-R channel must land in its own column");
+
+        let bare = extract(&g, 0, 600, &[]);
+        assert!(bare[7].values()[col].is_nan(), "unsupplied must be NaN, never a regularity of zero");
+    }
+
     /// Two entries either side of a dropout are adjacent in the map but minutes apart in time, and
     /// pairing them attributes a whole gap's movement to one second.
     #[test]
@@ -448,6 +463,28 @@ mod tests {
         let peak = f.iter().filter_map(|x| x.motion_max[3]).fold(0.0f64, f64::max);
         assert!(peak < 1e-6,
             "the gap must not be read as movement: two still stretches, peak delta {peak}");
+    }
+
+    /// A real stream carries several samples a second, and `deltas` collapses each second to its MEAN
+    /// before differencing. Summing instead rescales every motion column by the sample rate.
+    #[test]
+    fn a_multi_rate_stream_measures_the_same_motion_as_a_one_hz_one() {
+        // Every literal is a multiple of 1/8, so each second's four samples average to the 1 Hz value
+        // exactly and the two arms produce bit-identical deltas.
+        let amp = |i: i64| if i % 2 == 1 { 0.5 } else { 0.0 };
+        let one_hz: Vec<AccelSample> = (0..600).map(|i| s(i, amp(i), 0.0, 1.0)).collect();
+        let multi: Vec<AccelSample> = (0..600)
+            .flat_map(|i| [-0.375, -0.125, 0.125, 0.375].map(|d| s(i, amp(i) + d, 0.0, 1.0)))
+            .collect();
+        let a = extract(&one_hz, 0, 600, &[]);
+        let b = extract(&multi, 0, 600, &[]);
+        assert_eq!(a.len(), b.len());
+        assert!(a[10].motion_mean[0].is_some_and(|m| m > 0.1), "the night must actually move");
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.motion_mean, y.motion_mean, "epoch {}: the rate must not scale the mean", x.start);
+            assert_eq!(x.motion_max, y.motion_max, "epoch {}: nor the peak", x.start);
+            assert_eq!(x.motion_frac, y.motion_frac, "epoch {}: nor the fraction over scale", x.start);
+        }
     }
 
     /// A fragmented night leaves a handful of consecutive-second deltas, and p75 over a handful sits
@@ -580,8 +617,10 @@ mod tests {
     /// as movement there. One delta either side of it pins the number, not just its sign.
     #[test]
     fn the_stillness_floor_is_the_scale_a_quiet_night_is_measured_against() {
-        // Far under MIN_SCALE_DELTAS, so the p75 is not trusted: one 0.015 g step and one 0.005 g step.
-        let step = |i: i64| if i < 5 { 0.0 } else if i < 10 { 0.015 } else { 0.02 };
+        assert_eq!(STILL_SCALE_FLOOR_G, 0.01, "the literal steps below spell out this floor");
+        // Far under MIN_SCALE_DELTAS, so the p75 is not trusted. The two steps straddle the floor by
+        // 1% of it: 0.0101 g over, 0.0099 g under.
+        let step = |i: i64| if i < 5 { 0.0 } else if i < 10 { 0.0101 } else { 0.02 };
         let g: Vec<AccelSample> = (0..15).map(|i| s(i, step(i), 0.0, 1.0)).collect();
         let f = extract(&g, 0, 30, &[]);
         let frac = f[0].motion_frac[0].expect("a measured fraction");
@@ -623,5 +662,34 @@ mod tests {
         assert_eq!(f[5].still_x_cardiac, Some(1.0), "half the night's scale leaves half of hr_z");
         assert_eq!(f[5].still_x_hrvar, Some(1.5), "and half of hr_var_z");
         assert_eq!(f[10].still_x_cardiac, Some(0.0), "at the night's scale none of it survives");
+    }
+
+    /// The two ends the ramp never reaches: motion PAST the scale, where only the clamp keeps the
+    /// cardiac evidence from changing sign, and an epoch with no gravity at all, where a product
+    /// would be a claim of no movement.
+    #[test]
+    fn stillness_clamps_past_the_scale_and_stays_missing_without_gravity() {
+        let card: Vec<Cardiac> = (0..40)
+            .map(|_| Cardiac { hr_z: Some(2.0), hr_var_z: Some(3.0), ..Default::default() })
+            .collect();
+
+        // Deltas of 0.5 g all night, so the p75 scale is 0.5; epoch 5 alone moves at TWICE it.
+        let mut g: Vec<AccelSample> =
+            (0..1200).map(|i| s(i, if i % 2 == 1 { 0.5 } else { 0.0 }, 0.0, 1.0)).collect();
+        for i in 150..180 {
+            g[i as usize] = s(i, if i % 2 == 1 { 1.0 } else { 0.0 }, 0.0, 1.0);
+        }
+        let over = extract(&g, 0, 1200, &card);
+        assert_eq!(over[5].motion_mean[0], Some(1.0), "epoch 5 must move at twice the 0.5 g scale");
+        assert_eq!(over[5].still_x_cardiac, Some(0.0),
+            "past the scale none of hr_z survives - it must not turn negative and grow");
+        assert_eq!(over[5].still_x_hrvar, Some(0.0), "and the hr_var half must not either");
+
+        // Gravity stops halfway through the span, so epoch 15's own 30 s window holds none of it.
+        let bare = extract(&still(300), 0, 600, &card);
+        assert_eq!(bare[15].hr_z, Some(2.0), "the cardiac evidence is present");
+        assert_eq!(bare[15].motion_mean[0], None, "but this epoch's window has no gravity");
+        assert_eq!(bare[15].still_x_cardiac, None, "so the product is missing, not full-strength");
+        assert_eq!(bare[15].still_x_hrvar, None);
     }
 }

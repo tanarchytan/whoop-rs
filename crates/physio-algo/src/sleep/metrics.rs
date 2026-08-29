@@ -158,16 +158,18 @@ pub fn bout_score(
     }
 }
 
-/// Two-sided 95% critical value at `n-1` degrees of freedom; 1.96 is ~11% too narrow at n=13.
-/// Rounds df DOWN to the previous row - the value falls as df rises, so the previous row is the
-/// conservative one and rounding up returns a bar narrower than the truth.
+/// Textbook two-sided 95% critical values, keyed by degrees of freedom.
+const T95: [(usize, f64); 12] = [
+    (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
+    (19, 2.093), (30, 2.042), (39, 2.023), (59, 2.001), (119, 1.980),
+];
+
+/// Two-sided 95% critical value at `n-1` degrees of freedom, floored at df 1 (the widest, most
+/// conservative row); 1.96 is ~11% too narrow at n=13. Rounds df DOWN to the previous row - the
+/// value falls as df rises, so rounding up would return a bar narrower than the truth.
 fn t95(n: usize) -> f64 {
-    const T: [(usize, f64); 12] = [
-        (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
-        (19, 2.093), (30, 2.042), (39, 2.023), (59, 2.001), (119, 1.980),
-    ];
     let df = n.saturating_sub(1).max(1);
-    T.iter().rev().find(|(k, _)| *k <= df).map(|(_, v)| *v).expect("df >= 1; the table starts at 1")
+    T95.iter().rev().find(|(k, _)| *k <= df).expect("the table starts at df 1").1
 }
 
 /// Mean paired difference and the delta this sample size can resolve, `t * sd / sqrt(n)`. Two arms'
@@ -348,20 +350,23 @@ mod tests {
 
     /// The bar must BRACKET the true critical value: narrower turns noise into a finding, wider
     /// reports a real difference as noise. Every value here is the textbook two-sided 95% point at
-    /// that df, and every row of the table is reached by one `n`, so no row can move either way.
+    /// that df; each row is pinned by an `n` landing ON it and an `n` one df short of it.
     #[test]
     fn the_bar_brackets_the_true_critical_value() {
-        // Rounding df down to the previous row is the only permitted widening; its worst case is
-        // df=6 reading the df=5 row, 2.571 against 2.447, so 6% covers all sixteen.
-        const ROUNDING_SLACK: f64 = 1.06;
+        // Slack is earned only by a df that falls BETWEEN rows; its worst case is df=8 reading the
+        // df=5 row, 2.571 against 2.306. A df landing ON a row must return that row unchanged.
+        const ROUNDING_SLACK: f64 = 1.12;
         for (n, truth) in [(2usize, 12.706), (3, 4.303), (4, 3.182), (5, 2.776), (6, 2.571),
-                           (7, 2.447), (10, 2.262), (13, 2.179), (14, 2.160), (20, 2.093),
-                           (22, 2.080), (31, 2.042), (36, 2.030), (40, 2.023), (60, 2.001),
-                           (120, 1.980)] {
+                           (7, 2.447), (9, 2.306), (10, 2.262), (12, 2.201), (13, 2.179),
+                           (14, 2.160), (19, 2.101), (20, 2.093), (22, 2.080), (30, 2.045),
+                           (31, 2.042), (36, 2.030), (39, 2.024), (40, 2.023), (59, 2.002),
+                           (60, 2.001), (119, 1.980), (120, 1.980)] {
+            let on_a_row = T95.iter().any(|(k, _)| *k == n - 1);
+            let ceiling = if on_a_row { truth } else { truth * ROUNDING_SLACK };
             assert!(t95(n) >= truth - 1e-9,
                     "n={n} (df={}) needs at least {truth}, got {}", n - 1, t95(n));
-            assert!(t95(n) <= truth * ROUNDING_SLACK,
-                    "n={n} (df={}) is wider than {truth} allows, got {}", n - 1, t95(n));
+            assert!(t95(n) <= ceiling + 1e-9,
+                    "n={n} (df={}) may not exceed {ceiling}, got {}", n - 1, t95(n));
         }
     }
 
