@@ -274,3 +274,76 @@ fn analyze_finds_the_night_inside_a_waking_day_and_anchors_resting_hr_to_it() {
     assert_eq!(s.start, s.segments.first().unwrap().start);
     assert_eq!(s.end, s.segments.last().unwrap().end);
 }
+
+/// The pipeline at `shipped()` must equal `stage_v2_with` segment for segment. Everything the staged
+/// refactor measures runs through `run_to`, so a drift here invalidates all of it.
+#[test]
+fn pipeline_shipped_reproduces_stage_v2() {
+    use super::pipeline::{run, SleepConfig, StepId};
+
+    let input = golden_input();
+    let p = Params::SHIPPED;
+    let st = run(&input, &SleepConfig::shipped(), &p);
+
+    let want = stage_v2_with(&input, &p);
+    let got = st.stages.as_ref().expect("decode populates stages");
+    assert!(!got.is_empty(), "the golden night must produce epochs");
+
+    let mut flat = Vec::new();
+    for seg in &want {
+        let n = ((seg.end - seg.start) / 30).max(0) as usize;
+        flat.extend(std::iter::repeat_n(seg.stage, n));
+    }
+    assert_eq!(flat.len(), got.len(), "epoch count must match stage_v2_with");
+    assert_eq!(&flat, got, "pipeline labels must match stage_v2_with exactly");
+
+    assert_eq!(st.reached, Some(StepId::Report));
+    assert_eq!(st.trace.len(), 19, "every step traces, implemented or not");
+}
+
+/// The golden night's onset anchor sits at its first epoch, so it coincides with the window anchor and
+/// forcing either one leaves the labels alone. That is why `pipeline_shipped_reproduces_stage_v2`
+/// cannot defend the anchor and `emissions_depend_on_the_probe_anchor` has to.
+#[test]
+fn the_golden_night_anchors_at_its_first_epoch() {
+    use super::pipeline::{run_to, SleepConfig, StepId};
+    use super::v2::Anchor;
+
+    let st = run_to(&golden_input(), &SleepConfig::shipped(), &Params::SHIPPED, StepId::Anchor);
+    assert!(matches!(st.anchor, Some(Anchor::Onset(0))), "expected an onset anchor at epoch 0");
+}
+
+/// Stopping early must not change what the earlier steps produced.
+#[test]
+fn stopping_early_leaves_the_prefix_identical() {
+    use super::pipeline::{run, run_to, SleepConfig, StepId};
+
+    let input = golden_input();
+    let p = Params::SHIPPED;
+    let full = run(&input, &SleepConfig::shipped(), &p);
+    let part = run_to(&input, &SleepConfig::shipped(), &p, StepId::Decode);
+
+    assert!(part.stages.is_some(), "decode is step 16, so labels exist");
+    assert_eq!(part.stages, full.stages, "stopping at 16 must not change the labels");
+    assert_eq!(
+        part.prefix_digest(StepId::Decode),
+        full.prefix_digest(StepId::Decode),
+        "the 1..=16 prefix digest must not depend on how far the run went"
+    );
+
+    // Without these, deleting the `upto` filter in `run_to` passes every other assertion here.
+    assert_eq!(Some(StepId::Decode), part.reached, "stopping at 16 must reach 16, not 19");
+    assert_eq!(16, part.trace.len(), "stopping at 16 must run 16 steps");
+
+    let d = part.digest_of(StepId::Decode).expect("decode traces");
+    assert_ne!(0, d, "a real decode must not digest to zero");
+
+    let early = run_to(&input, &SleepConfig::shipped(), &p, StepId::Emit);
+    assert!(early.stages.is_none(), "labels cannot exist before the decode step");
+    assert!(early.emissions.is_some(), "but emissions must, since step 14 ran");
+    assert_ne!(
+        0,
+        early.digest_of(StepId::Validate).expect("validate traces"),
+        "step 1 must digest the input, not a constant"
+    );
+}

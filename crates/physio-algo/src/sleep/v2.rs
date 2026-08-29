@@ -74,11 +74,7 @@ pub fn prepare(input: &SleepInput, p: &Params) -> Prepared {
 
 /// Label already-extracted features under `p`; segments tile the prepared span.
 pub fn stage_prepared(prep: &Prepared, p: &Params) -> Vec<StageSegment> {
-    if prep.feats.is_empty() {
-        return vec![StageSegment { start: prep.start, end: prep.end, stage: SleepStage::Light }];
-    }
-    let labels = stage_epochs(&prep.feats, p);
-    segments_from(&prep.feats, &labels, prep.start, prep.end)
+    segments_of(prep, &stage_epochs(&prep.feats, p))
 }
 
 /// The per-epoch log-emissions a prepared night hands the decoder, in [`STAGE_ORDER`] columns.
@@ -86,6 +82,17 @@ pub fn stage_prepared(prep: &Prepared, p: &Params) -> Vec<StageSegment> {
 /// search and the emissions feeding it apart.
 pub fn emissions_prepared(prep: &Prepared, p: &Params) -> Vec<[f64; 4]> {
     final_emissions(&prep.feats, p)
+}
+
+/// The anchor [`emissions_prepared`] resolves. Split out so `pipeline` can record it as its own step:
+/// resolving it runs a probe decode, and a linear step order otherwise hides that.
+pub(super) fn anchor_of(prep: &Prepared, p: &Params) -> Anchor {
+    resolve_anchor(&prep.feats, p)
+}
+
+/// [`emissions_prepared`] with the anchor supplied. At [`anchor_of`] the two are identical.
+pub(super) fn emissions_at(prep: &Prepared, p: &Params, anchor: Anchor) -> Vec<[f64; 4]> {
+    emissions(&prep.feats, p, anchor)
 }
 
 /// The unix second each prepared epoch opens at, index-for-index with [`emissions_prepared`]. An epoch
@@ -106,22 +113,7 @@ pub fn segments_of(prep: &Prepared, labels: &[SleepStage]) -> Vec<StageSegment> 
 
 /// Stage with an explicit recipe. The tuning path; `stage` is what everything else calls.
 pub fn stage_with(input: &SleepInput, p: &Params) -> Vec<StageSegment> {
-    let start = input.start;
-    let end = input.end;
-
-    let mut grav = input.accel.clone();
-    grav.sort_by_key(|g| g.ts);
-    let mut hr = input.hr.clone();
-    hr.sort_by_key(|h| h.ts);
-    let mut rr = flatten_rr(&input.rr);
-    rr.sort_by_key(|a| a.0);
-
-    let feats = features(start, end, &grav, &hr, &rr, p);
-    if feats.is_empty() {
-        return vec![StageSegment { start, end, stage: SleepStage::Light }];
-    }
-    let labels = stage_epochs(&feats, p);
-    segments_from(&feats, &labels, start, end)
+    stage_prepared(&prepare(input, p), p)
 }
 
 /// Tile `[start, end]` from one label per epoch, merging equal-stage neighbours.
@@ -310,13 +302,15 @@ fn features(
         e += 30;
     }
 
-    // Rotation between consecutive epochs, from the same gravity the jerk features read.
+    // Rotation between consecutive epochs, from the same gravity the jerk features read. Binned on the
+    // epoch grid and read by epoch start, because `raws` skips every epoch with neither HR nor gravity.
     let turns = {
-        let n = raws.len();
-        let end = raws.last().map_or(start, |r| r.start + 30);
-        let post = super::posture::posture_series(grav, start, end, 30);
+        let last = raws.last().map_or(first_e, |r| r.start + 30);
+        let post = super::posture::posture_series(grav, first_e, last, 30);
         let t = super::posture::turn_series(&post);
-        (0..n).map(|i| t.get(i).copied().flatten()).collect::<Vec<_>>()
+        raws.iter()
+            .map(|r| t.get(((r.start - first_e) / 30) as usize).copied().flatten())
+            .collect::<Vec<_>>()
     };
 
     let jerk_scale = if all_jerks.is_empty() { 1e-6 } else { median(&all_jerks) };
@@ -412,7 +406,7 @@ pub fn resp_regularity(beats: &[(f64, f64)]) -> Option<f64> {
 /// Where the time-of-night priors are measured from. `Probe` is the first pass of a two-pass staging: it
 /// has no labels yet, so the early-REM guard is off and cannot bias the onset it is looking for.
 #[derive(Clone, Copy)]
-enum Anchor {
+pub(super) enum Anchor {
     Probe,
     /// Read from the window, which is what a one-pass staging has.
     Window,
@@ -699,7 +693,7 @@ fn terms(feats: &[Epoch], p: &Params, anchor: Anchor) -> Terms {
         // on the median so it is symmetric: a still epoch pushes AWAKE down as much as a rotating one
         // pushes it up, and a night with no rotation at all is left alone.
         let tp = (pct(&tsorted, f.turn) - 0.5) * 2.0;
-        let rz = f.resp_reg.map_or(0.0, |rg| zrg.apply(Some(rg)));
+        let rz = zrg.apply(f.resp_reg);
 
         let mut d = [[0.0f64; 12]; 4];
         d[DEEP][W_DEEP_HRV] = zhvv;
@@ -873,9 +867,15 @@ mod terms_tests {
         let p =
             Params { cycle_rem_onset_minutes: 0.0, cycle_clock_from_onset: false, ..Params::SHIPPED };
         let prep = prepare(&input, &p);
-        assert!(prep.feats.iter().any(|f| f.hr.is_none()), "the fixture must carry an HR gap");
-        assert!(prep.feats.iter().any(|f| f.move_frac.is_none()), "and a gravity gap");
-        assert!(prep.feats.iter().any(|f| f.resp_reg.is_none()), "and an R-R gap");
+        // A gap is a channel that comes and goes. Asserting absence alone would also hold for a
+        // channel missing all night, so each one is asserted on both sides.
+        fn gapped(feats: &[Epoch], present: impl Fn(&Epoch) -> bool) -> bool {
+            let n = feats.iter().filter(|f| present(f)).count();
+            n > 0 && n < feats.len()
+        }
+        assert!(gapped(&prep.feats, |f| f.hr.is_some()), "the fixture must carry an HR gap");
+        assert!(gapped(&prep.feats, |f| f.move_frac.is_some()), "and a gravity gap");
+        assert!(gapped(&prep.feats, |f| f.resp_reg.is_some()), "and an R-R gap");
 
         let t = emission_terms(&prep, &p);
         assert!(matches!(resolve_anchor(&prep.feats, &p), Anchor::Window),
@@ -911,6 +911,26 @@ mod terms_tests {
         SleepInput { start, end: start + 1200, hr, rr: Vec::new(), accel }
     }
 
+    /// The other side of that night: quiet and R-R-backed for the first half, restless and hot for the
+    /// second, so the night carries unclamped epochs and a respiration column that is not flat. Motion
+    /// is a sixth of the seconds, which keeps the night's median jerk at zero.
+    fn restless_night_with_respiration() -> SleepInput {
+        let start = 1_749_513_600i64;
+        let hr: Vec<HrSample> = (0..1200)
+            .map(|i| {
+                let bpm = if i < 600 { 52 + (i % 3) as u16 } else { 76 + (i % 5) as u16 };
+                HrSample { ts: start + i, bpm }
+            })
+            .collect();
+        let accel: Vec<AccelSample> = (0..1200)
+            .map(|i| {
+                let a = if i >= 600 && i % 30 < 10 { 0.4 * ((i % 7) as f64) / 7.0 } else { 0.0 };
+                AccelSample { ts: start + i, x: a, y: 0.0, z: (1.0f64 - a * a).max(0.0).sqrt() }
+            })
+            .collect();
+        SleepInput { start, end: start + 1200, hr, rr: rsa_rr(start, 600), accel }
+    }
+
     /// The clamp acts on the summed awake cardiac PAIR, the one thing in [`Terms`] a fitter cannot treat
     /// as linear. Where the deadzoned HRV-z and HR-z disagree in sign, `min(a + b, 0)` and the per-term
     /// `min(a, 0) + min(b, 0)` are different numbers, so the emission has to name which one it is.
@@ -937,6 +957,104 @@ mod terms_tests {
             opposed += 1;
         }
         assert!(opposed >= 5, "the fixture must carry clamped epochs whose cardiac terms disagree in sign");
+
+        // The loop's first assert is inert wherever the pair sums negative, because the clamp does not
+        // bite there. A constructed epoch whose opposed pair sums POSITIVE parts all three readings:
+        // whole-pair, unclamped and per-term are three different numbers.
+        let mut design = [[0.0f64; 12]; 4];
+        design[AWAKE][W_AWAKE_HRV] = 4.0;
+        design[AWAKE][W_AWAKE_HR] = -1.0;
+        design[AWAKE][W_AWAKE_MOTION] = 0.25;
+        let fixed = [0.0, 0.0, 0.0, 1.0];
+        let a = w[W_AWAKE_HRV] * design[AWAKE][W_AWAKE_HRV];
+        let b = w[W_AWAKE_HR] * design[AWAKE][W_AWAKE_HR];
+        assert!(a * b < 0.0 && a + b > 0.0, "the constructed pair must oppose in sign and sum positive");
+        let rest = fixed[AWAKE]
+            + w[W_AWAKE_MOTION] * design[AWAKE][W_AWAKE_MOTION]
+            + w[W_AWAKE_TURN] * design[AWAKE][W_AWAKE_TURN];
+
+        let bites = Terms { design: vec![design], fixed: vec![fixed], clamped: vec![true] };
+        let got = bites.emission(0, &w)[AWAKE];
+        assert_eq!(rest, got, "a positive opposed pair is clamped away whole");
+        assert!((got - (rest + a + b)).abs() > 1e-9, "and it is not left unclamped");
+        assert!((got - (rest + a.min(0.0) + b.min(0.0))).abs() > 1e-9, "nor clamped per term");
+
+        let free = Terms { design: vec![design], fixed: vec![fixed], clamped: vec![false] };
+        assert!((free.emission(0, &w)[AWAKE] - (rest + a + b)).abs() < 1e-12,
+            "an unclamped epoch keeps the whole pair, so the flag is what decides");
+    }
+
+    /// The decomposition IS the emission: `fixed + sum(w * design)`, awake cardiac pair clamped whole,
+    /// must reproduce [`emissions_prepared`] on every epoch and class. Expanded here instead of through
+    /// [`Terms::emission`], so the check is independent of it; run under both anchors.
+    #[test]
+    fn the_decomposition_reproduces_the_emission_under_both_anchors() {
+        // The emission written out from the parts: every weight but the awake cardiac pair, then that
+        // pair summed and clamped as one. Same accumulation order, so the comparison can be exact.
+        let expand = |t: &Terms, e: usize, w: &[f64; 12]| -> [f64; 4] {
+            let mut em = [0.0f64; 4];
+            for (c, out) in em.iter_mut().enumerate() {
+                let d = &t.design[e][c];
+                let mut acc = t.fixed[e][c];
+                for (j, dj) in d.iter().enumerate() {
+                    if c == AWAKE && (j == W_AWAKE_HRV || j == W_AWAKE_HR) {
+                        continue;
+                    }
+                    acc += w[j] * dj;
+                }
+                if c == AWAKE {
+                    let card = w[W_AWAKE_HRV] * d[W_AWAKE_HRV] + w[W_AWAKE_HR] * d[W_AWAKE_HR];
+                    acc += if t.clamped[e] { card.min(0.0) } else { card };
+                }
+                *out = acc;
+            }
+            em
+        };
+
+        let window =
+            Params { cycle_rem_onset_minutes: 0.0, cycle_clock_from_onset: false, ..Params::SHIPPED };
+        let nights = [
+            ("still", still_night_with_opposed_cardiac_terms()),
+            ("restless", restless_night_with_respiration()),
+        ];
+        let anchors = [("onset", true, Params::SHIPPED), ("window", false, window)];
+        let (mut clamped_seen, mut free_pair_seen, mut resp_seen) = (false, false, false);
+        for (night, input) in &nights {
+            for (label, onset_anchored, p) in anchors {
+                let prep = prepare(input, &p);
+                assert!(prep.feats.len() >= 30, "{night}/{label}: a night long enough to grade");
+                assert_eq!(onset_anchored, matches!(resolve_anchor(&prep.feats, &p), Anchor::Onset(_)),
+                    "{night}/{label}: the two passes must cover both anchors");
+                let t = emission_terms(&prep, &p);
+                let em = emissions_prepared(&prep, &p);
+                let w = weights_of(&p);
+                assert_eq!(em.len(), t.design.len(), "{night}/{label}: one design row per emission row");
+                for (e, row) in em.iter().enumerate() {
+                    assert_eq!(*row, expand(&t, e, &w), "{night}/{label}: epoch {e}");
+                    let d = &t.design[e][AWAKE];
+                    let card = w[W_AWAKE_HRV] * d[W_AWAKE_HRV] + w[W_AWAKE_HR] * d[W_AWAKE_HR];
+                    clamped_seen |= t.clamped[e];
+                    free_pair_seen |= !t.clamped[e] && card > 0.0;
+                    resp_seen |= t.design[e][DEEP][W_RESP] != 0.0;
+                }
+                // The window-anchored guard is a step at `cycle_rem_early_frac` of the WINDOW clock and
+                // nothing else in the REM prior steps, so the epoch that crosses it must rise by exactly
+                // the penalty over the ramp's own even stride. Pins the clock the guard is handed.
+                if !onset_anchored {
+                    let frac = p.cycle_rem_early_frac;
+                    let cross = (1..t.fixed.len() - 1)
+                        .find(|&e| prep.feats[e - 1].clock < frac && prep.feats[e].clock >= frac)
+                        .unwrap_or_else(|| panic!("{night}: no epoch crosses the early-REM boundary"));
+                    let rise = |e: usize| t.fixed[e][REM] - t.fixed[e - 1][REM];
+                    assert!((rise(cross) - rise(cross + 1) - p.cycle_rem_early_penalty).abs() < 1e-9,
+                        "{night}: the crossing epoch must lift the REM prior by the penalty");
+                }
+            }
+        }
+        assert!(clamped_seen, "no epoch is clamped, so the clamped branch is unexercised");
+        assert!(free_pair_seen,
+            "no unclamped epoch keeps a positive cardiac pair, so an unconditional clamp would pass");
+        assert!(resp_seen, "no epoch carries a respiration term, so the resp column is unexercised");
     }
 }
 
@@ -1056,6 +1174,39 @@ mod tests {
                 assert_eq!(a[st], b[st], "turn must not touch stage {st}");
             }
         }
+    }
+
+    /// `turn` must be filed against the epoch that rotated on a night whose window does not open on the
+    /// 30 s grid AND whose middle epoch carries neither channel. Binning the posture from the raw window,
+    /// or reading it by position among the kept epochs, mis-files the rotation on one axis each.
+    #[test]
+    fn a_rotation_is_filed_against_the_epoch_that_rotated_across_a_dropped_one() {
+        let start = 1_749_513_615i64;
+        let first_e = 1_749_513_630i64; // the first 30 s boundary at or after `start`
+        assert_ne!(0, start % 30, "the window must not open on the epoch grid");
+        let rotates = first_e + 4 * 30;
+
+        let (mut hr, mut accel) = (Vec::new(), Vec::new());
+        for e in (0..6i64).filter(|e| *e != 2) {
+            for s in 0..30i64 {
+                let ts = first_e + e * 30 + s;
+                let up = ts < rotates;
+                hr.push(HrSample { ts, bpm: 55 });
+                let (x, z) = if up { (0.0, 1.0) } else { (1.0, 0.0) };
+                accel.push(AccelSample { ts, x, y: 0.0, z });
+            }
+        }
+        let input = SleepInput { start, end: first_e + 6 * 30, hr, rr: Vec::<RrRun>::new(), accel };
+        let feats = prepare(&input, &Params::SHIPPED).feats;
+
+        assert_eq!(5, feats.len(), "the epoch with neither channel is dropped");
+        assert_eq!(first_e, feats[0].start, "epochs open on the grid, not on the window");
+        let turned: Vec<i64> =
+            feats.iter().filter(|f| f.turn.is_some_and(|t| t > 1.0)).map(|f| f.start).collect();
+        assert_eq!(vec![rotates], turned, "one rotation, filed against the epoch that made it");
+        let t = feats[3].turn.expect("the rotated epoch carries a turn");
+        assert!((t - 90.0).abs() < 1e-6, "a quarter turn, got {t}");
+        assert_eq!(None, feats[2].turn, "the epoch after a dropped one has no previous orientation");
     }
 
     #[test]
