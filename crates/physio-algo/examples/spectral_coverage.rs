@@ -2,14 +2,10 @@
 //!
 //!   cargo run --release -p physio-algo --example spectral_coverage
 //!
-//! The SPECTRAL arm loses by about the same amount on all three cohorts, including the one that
-//! carries no R-R at all - so its columns may be performing exactly as four dead columns do. That
-//! reading only holds if the columns are in fact mostly absent, which is what this measures.
-//!
-//! Reported per cohort: the share of epochs `bands_series` can score, and the distribution of the
-//! interval coverage each 270 s window actually has. `bands_at` admits a window only when the R-R
-//! intervals account for `MIN_COVERAGE` of it, so the coverage histogram says whether the corpus
-//! could ever have supported the feature family.
+//! `tanv1_next` ALREADY prints the per-cohort share; that part is duplicated here on purpose so this
+//! runs in a second instead of ten minutes. What is new is the DISTRIBUTION - `bands_at` admits a
+//! window on the interval coverage, and a cohort can clear the share while a quarter of its windows
+//! sit far under the floor.
 
 mod common;
 
