@@ -34,6 +34,10 @@ cargo run -p whoopctl -- scan
 cargo test --release -p physio-algo --test dataset_parity -- --ignored --nocapture
 #   expect: 5 passed, 0 failed; dreamt 0.3123 (n=100), aauwss 0.4103 (n=13), sleep-accel 0.3780 (n=31)
 #   corpus: sleep-benchmark/fixtures_multi_clean3 (the pinned root; WHOOP_SLEEP_FIXTURES overrides)
+# Those three are the POOLED-confusion kappa. The examples/ harnesses print the PER-NIGHT MEDIAN of the
+# SAME staging: 0.290 / 0.425 / 0.332. Both are `stage_v2` UNREFINED — no PSG cohort carries a step
+# stream, so refine_wake declines on all 144 (dataset_parity.rs:20). Never call either one "the app
+# path", and never compare a pooled number to a median one.
 ```
 
 Pinned to **MSVC** via an in-dir `rustup override` (btleplug's WinRT deps need the MSVC linker; the
