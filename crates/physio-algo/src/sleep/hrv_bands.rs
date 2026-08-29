@@ -17,6 +17,9 @@ const FS: f64 = 4.0;
 pub const WINDOW_S: f64 = 270.0;
 /// Fewest beats that can carry a spectrum. Below this the interpolation invents the signal.
 pub const MIN_BEATS: usize = 30;
+/// Fraction of the window the R-R intervals must themselves account for. Under it the grid is mostly
+/// pad and the spectrum describes the padding.
+pub const MIN_COVERAGE: f64 = 0.5;
 
 /// Band edges in Hz, standard short-term HRV.
 pub const VLF: (f64, f64) = (0.015, 0.04);
@@ -36,35 +39,47 @@ pub struct Bands {
     pub lf_nu: Option<f64>,
 }
 
-/// Linear-interpolated, mean-removed tachogram over `[t0, t1]` at [`FS`].
-/// `beats` is `(time_s, rr_ms)` sorted by time.
+/// Linear-interpolated, mean-removed tachogram over `[t0, t1]` at [`FS`]. The grid is sized by the
+/// WINDOW, never by the beats, so a short burst cannot shrink the DFT until a band loses its bins.
+/// Samples outside the beats are zero-padded, which adds no power of its own. `beats` is sorted.
 fn tachogram(beats: &[(f64, f64)], t0: f64, t1: f64) -> Option<Vec<f64>> {
     let win: Vec<(f64, f64)> = beats.iter().copied().filter(|(t, _)| *t >= t0 && *t <= t1).collect();
-    if win.len() < MIN_BEATS {
+    let span = t1 - t0;
+    if win.len() < MIN_BEATS || span <= 0.0 {
         return None;
     }
-    let (a, b) = (win[0].0, win[win.len() - 1].0);
-    if b <= a {
+    // The intervals must account for the window themselves; a beat COUNT cannot see a burst.
+    if win.iter().map(|(_, ms)| ms / 1000.0).sum::<f64>() < MIN_COVERAGE * span {
         return None;
     }
-    let n = ((b - a) * FS).floor() as usize;
+    let n = (span * FS).floor() as usize;
     if n < 32 {
         return None;
     }
+    let (first, last) = (win[0].0, win[win.len() - 1].0);
     let mut y = vec![0.0f64; n];
+    let mut held = vec![false; n];
     let mut seg = 0usize;
-    for (i, yi) in y.iter_mut().enumerate() {
-        let t = a + i as f64 / FS;
+    for (i, (yi, hi)) in y.iter_mut().zip(held.iter_mut()).enumerate() {
+        let t = t0 + i as f64 / FS;
+        if t < first || t > last {
+            continue;
+        }
         while seg + 2 < win.len() && win[seg + 1].0 < t {
             seg += 1;
         }
         let (ta, va) = win[seg];
         let (tb, vb) = win[seg + 1];
         *yi = if tb <= ta { va } else { va + ((t - ta) / (tb - ta)).clamp(0.0, 1.0) * (vb - va) };
+        *hi = true;
     }
-    let mean = y.iter().sum::<f64>() / n as f64;
-    for v in y.iter_mut() {
-        *v -= mean;
+    let k = held.iter().filter(|h| **h).count();
+    if k == 0 {
+        return None;
+    }
+    let mean = y.iter().zip(&held).filter(|(_, h)| **h).map(|(v, _)| *v).sum::<f64>() / k as f64;
+    for (v, h) in y.iter_mut().zip(&held) {
+        *v = if *h { *v - mean } else { 0.0 };
     }
     Some(y)
 }
@@ -197,12 +212,81 @@ mod tests {
     #[test]
     fn the_beat_floor_is_where_it_says_it_is() {
         assert_eq!(MIN_BEATS, 30, "changing this changes which windows produce a spectrum at all");
+        // Long intervals, so coverage is satisfied either side of the floor and only the count can
+        // decide. At a normal rate coverage binds first and this floor is unreachable.
         let at = |n: usize| {
-            let b: Vec<(f64, f64)> = (0..n).map(|i| (i as f64 * 2.0, 1000.0 + 40.0 * (i as f64).sin())).collect();
+            let mut t = 0.0;
+            let b: Vec<(f64, f64)> = (0..n)
+                .map(|i| {
+                    let rr = 5000.0 + 200.0 * (i as f64).sin();
+                    t += rr / 1000.0;
+                    (t, rr)
+                })
+                .collect();
             bands_at(&b, 0.0).is_some()
         };
         assert!(!at(MIN_BEATS - 1), "one beat under the floor must not produce a spectrum");
-        assert!(at(MIN_BEATS + 60), "well over the floor must");
+        assert!(at(MIN_BEATS + 1), "one beat over it must");
+    }
+
+    /// Pins MIN_COVERAGE. The rule reads the interval SUM against the window, so a dense burst fails
+    /// it while a slower series spanning the window passes.
+    #[test]
+    fn the_coverage_floor_is_where_it_says_it_is() {
+        assert_eq!(MIN_COVERAGE, 0.5, "half the window must be accounted for by real intervals");
+        let covering = |secs: f64| {
+            let b: Vec<(f64, f64)> = (0..secs as usize).map(|i| (i as f64, 1000.0)).collect();
+            bands_at(&b, 0.0).is_some()
+        };
+        assert!(!covering(WINDOW_S * MIN_COVERAGE - 10.0), "under the floor must not score");
+        assert!(covering(WINDOW_S * MIN_COVERAGE + 10.0), "over it must");
+    }
+
+    /// Forty beats inside eleven seconds used to size the DFT to its own span, where the VLF band has
+    /// no bin at all and reported exactly 0.0 rather than nothing.
+    #[test]
+    fn a_burst_of_beats_is_rejected_rather_than_scored_on_its_own_span() {
+        let burst: Vec<(f64, f64)> = (0..40).map(|i| (i as f64 * 0.27, 270.0)).collect();
+        assert!(burst.len() > MIN_BEATS, "the count must not be what rejects it");
+        assert_eq!(bands_at(&burst, 0.0), None, "11 s of beats cannot describe a 270 s window");
+    }
+
+    /// The grid is the window's, not the beats'. Sizing it by the observed span is what let a burst
+    /// fall below the lowest band's resolution.
+    #[test]
+    fn the_grid_is_sized_by_the_window_not_by_the_beats() {
+        let want = (WINDOW_S * FS) as usize;
+        let dense = synthetic(0.05, WINDOW_S + 5.0, 40.0);
+        assert_eq!(want, tachogram(&dense, 0.0, WINDOW_S).expect("dense").len());
+        let partial: Vec<(f64, f64)> =
+            dense.iter().copied().filter(|(t, _)| *t >= 50.0 && *t <= 215.0).collect();
+        assert_eq!(want, tachogram(&partial, 0.0, WINDOW_S).expect("partial").len());
+    }
+
+    /// The pad sits at the mean of the covered samples, so it is exactly zero once the mean is
+    /// removed. Holding the nearest beat's value instead leaves an offset no beat produced.
+    #[test]
+    fn the_uncovered_samples_are_padded_rather_than_held() {
+        // A ramp, so the last beat's value is far from the mean and the two fills differ.
+        let beats: Vec<(f64, f64)> = (0..160).map(|i| (i as f64, 800.0 + 2.5 * i as f64)).collect();
+        let y = tachogram(&beats, 0.0, WINDOW_S).expect("160 s of 270 is over the coverage floor");
+        let tail = &y[(160.0 * FS) as usize..];
+        assert!(!tail.is_empty(), "the window must extend past the beats");
+        assert!(tail.iter().all(|v| v.abs() < 1e-9), "the pad must be zero, got {}", tail[0]);
+    }
+
+    /// A gap must not swamp the band the beats actually carry.
+    #[test]
+    fn a_gapped_window_still_scores_the_band_the_signal_is_in() {
+        let mut t = 0.0;
+        let mut beats = Vec::new();
+        while t < 160.0 {
+            let rr = 1000.0 + 40.0 * (2.0 * PI * 0.25 * t).cos();
+            beats.push((t, rr));
+            t += rr / 1000.0;
+        }
+        let b = bands_at(&beats, 0.0).expect("160 s of 270 is over the coverage floor");
+        assert!(b.hf > b.vlf + b.lf, "the 0.25 Hz signal must outweigh the gap: {b:?}");
     }
 
     /// Pins WINDOW_S. Raising it silently would change which epochs can be scored at all, and the
