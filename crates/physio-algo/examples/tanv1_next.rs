@@ -11,6 +11,10 @@
 //!              kappa 0.5 has and this one has none of". sleep-accel carries ZERO R-R (all 31
 //!              `rr.csv` are empty), so this arm can only move dreamt and aauwss and that is
 //!              reported per cohort rather than pooled.
+//!   PERMUTED   the null SPECTRAL needs. The same four columns with their 4-vectors shuffled among
+//!              the epochs that have one, so marginals and missingness are untouched and only the
+//!              alignment with truth is gone. Without it, "these features carry nothing" and "four
+//!              more columns cost about 0.03 whatever is in them" predict the same table.
 //!   ABSTAIN    refuse the least-certain epochs. Measured at +0.055 elsewhere, roughly three times
 //!              the current gap. Scored at MATCHED COVERAGE against two nulls, because dropping
 //!              epochs at random also raises kappa on what is kept.
@@ -51,8 +55,19 @@ const COVERAGE: [f64; 3] = [1.00, 0.90, 0.80];
 struct Night {
     tan: Vec<Vec<f64>>,
     spec: Vec<[f64; N_SPEC]>,
+    /// `spec` shuffled within the night. The arm that prices four columns carrying nothing.
+    perm: Vec<[f64; N_SPEC]>,
     terms: Terms,
     truth: Vec<Option<usize>>,
+}
+
+/// Which spectral columns an arm carries.
+#[derive(Clone, Copy, PartialEq)]
+enum Spec {
+    Off,
+    Real,
+    /// Same columns, same marginals, same missingness - only the alignment with truth is gone.
+    Permuted,
 }
 
 fn load(set: &str) -> Vec<Night> {
@@ -84,7 +99,7 @@ fn load(set: &str) -> Vec<Night> {
         assert_eq!(em.len(), n, "{}: {n} epochs of truth against {} of emissions",
                    dir.display(), em.len());
         // A window that cannot carry a spectrum is NaN, not zero: `design_row` then abstains for it.
-        let spec = (0..em.len())
+        let spec: Vec<[f64; N_SPEC]> = (0..em.len())
             .map(|e| match bands.get(e).and_then(|b| *b) {
                 Some(b) => [
                     (b.vlf.max(1e-12)).ln(),
@@ -95,9 +110,15 @@ fn load(set: &str) -> Vec<Night> {
                 None => [f64::NAN; N_SPEC],
             })
             .collect();
+        // Salted by cohort and by position, so the shuffle is fixed for a given fixture tree and two
+        // nights never share one.
+        let salt = set.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize))
+            .wrapping_add(out.len());
+        let perm = permute_spec(&spec, salt);
         out.push(Night {
             tan: (0..em.len()).map(|e| f[e].values().to_vec()).collect(),
             spec,
+            perm,
             terms,
             truth: (0..em.len())
                 .map(|k| {
@@ -185,21 +206,42 @@ fn refit_v2(nights: &[&Night]) -> [f64; NW] {
     w
 }
 
-fn row(nt: &Night, e: usize, spectral: bool) -> Vec<f64> {
+fn row(nt: &Night, e: usize, spec: Spec) -> Vec<f64> {
     let mut v = nt.tan[e].clone();
-    if spectral {
-        v.extend_from_slice(&nt.spec[e]);
+    match spec {
+        Spec::Off => {}
+        Spec::Real => v.extend_from_slice(&nt.spec[e]),
+        Spec::Permuted => v.extend_from_slice(&nt.perm[e]),
     }
     v
 }
 
-/// tanv1's emission per night, with or without the spectral columns.
-fn tanv1_emissions(train: &[&Night], report: &[Night], spectral: bool) -> Vec<Vec<[f64; CLASSES]>> {
+/// Shuffle the spectral 4-vectors among the epochs that HAVE one, moving each as a unit so the four
+/// columns keep their joint correlation and lose only their alignment with truth. Epochs without a
+/// spectrum keep their NaNs, so the missingness pattern the design row reads is untouched.
+fn permute_spec(spec: &[[f64; N_SPEC]], salt: usize) -> Vec<[f64; N_SPEC]> {
+    let mut out = spec.to_vec();
+    let src: Vec<usize> = (0..spec.len()).filter(|i| spec[*i][0].is_finite()).collect();
+    let key = pseudo_random(spec.len(), salt);
+    let mut dst = src.clone();
+    dst.sort_by(|a, b| key[*a].total_cmp(&key[*b]));
+    assert!(src.len() < 2 || src.iter().zip(&dst).any(|(a, b)| a != b),
+            "an identity permutation is not a null");
+    for (to, from) in src.iter().zip(&dst) {
+        out[*to] = spec[*from];
+    }
+    assert_eq!(src.len(), out.iter().filter(|r| r[0].is_finite()).count(),
+               "a permutation must not change how many epochs carry a spectrum");
+    out
+}
+
+/// tanv1's emission per night, under one of the three spectral arms.
+fn tanv1_emissions(train: &[&Night], report: &[Night], spec: Spec) -> Vec<Vec<[f64; CLASSES]>> {
     let (mut x, mut y) = (Vec::new(), Vec::new());
     for nt in train {
         for (e, t) in nt.truth.iter().enumerate() {
             if let Some(t) = t {
-                x.push(row(nt, e, spectral));
+                x.push(row(nt, e, spec));
                 y.push(*t);
             }
         }
@@ -212,7 +254,7 @@ fn tanv1_emissions(train: &[&Night], report: &[Night], spectral: bool) -> Vec<Ve
         .map(|nt| {
             (0..nt.truth.len())
                 .map(|e| {
-                    let z = scores(&w, &design_row(&row(nt, e, spectral), &m, &sd, &[]));
+                    let z = scores(&w, &design_row(&row(nt, e, spec), &m, &sd, &[]));
                     std::array::from_fn(|c| z[stage_idx(STAGE_ORDER[c])])
                 })
                 .collect()
@@ -313,8 +355,9 @@ fn main() {
             .iter()
             .map(|nt| (0..nt.truth.len()).map(|e| nt.terms.emission(e, &wv)).collect())
             .collect();
-        let plain = tanv1_emissions(&tr, hn, false);
-        let withspec = tanv1_emissions(&tr, hn, true);
+        let plain = tanv1_emissions(&tr, hn, Spec::Off);
+        let withspec = tanv1_emissions(&tr, hn, Spec::Real);
+        let permuted = tanv1_emissions(&tr, hn, Spec::Permuted);
 
         println!("== {held} n={} ==", hn.len());
         println!("  {:<30} {:>7}   {:>8} {:>7}  verdict vs V2 REFIT", "arm", "kappa", "paired d",
@@ -322,7 +365,10 @@ fn main() {
 
         // Full coverage first: does the spectral family move the emission at all?
         let mut base = Vec::new();
-        for (label, ems) in [("V2 REFIT", &v2_em), ("tanv1", &plain), ("tanv1 + SPECTRAL", &withspec)]
+        let mut null_k: Vec<f64> = Vec::new();
+        let mut real_k: Vec<f64> = Vec::new();
+        for (label, ems) in [("V2 REFIT", &v2_em), ("tanv1", &plain), ("tanv1 + SPECTRAL", &withspec),
+                             ("tanv1 + PERMUTED (null)", &permuted)]
         {
             let k: Vec<f64> = hn
                 .iter()
@@ -336,9 +382,20 @@ fn main() {
                 base = k.clone();
                 println!("  {:<30} {:>7.3}   the honest baseline", label, median(&mut k.clone()));
             } else {
+                if label.contains("SPECTRAL") {
+                    real_k = k.clone();
+                }
+                if label.contains("PERMUTED") {
+                    null_k = k.clone();
+                }
                 println!("  {:<30} {:>7.3}   {}", label, median(&mut k.clone()),
                          compare(&base, &k, Provenance::HeldOut).2);
             }
+        }
+        // The comparison the arm exists for: real columns against the same columns carrying nothing.
+        if !null_k.is_empty() && !real_k.is_empty() {
+            println!("  {:<30} {:>7}   {}", "  SPECTRAL vs PERMUTED", "",
+                     compare(&null_k, &real_k, Provenance::HeldOut).2);
         }
 
         // Abstention at matched coverage, both engines refusing by the SAME rule, plus two nulls.
@@ -379,4 +436,7 @@ fn main() {
     println!("refusing by its own version of the same rule, so the comparison stays paired. `random`");
     println!("is the bar a real rule has to clear; `nearest edge` needs no emission at all.");
     println!("Spectral columns are appended to tanv1 only, so their row is tanv1's gain from them.");
+    println!("PERMUTED carries the same four columns shuffled within each night: read SPECTRAL");
+    println!("against it, not against tanv1. If the two agree, the cost is column count and this");
+    println!("harness cannot resolve a four-column addition of any content.");
 }

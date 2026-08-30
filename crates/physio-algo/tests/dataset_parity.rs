@@ -1,8 +1,10 @@
 //! Parity gate: run the ported stagers on the on-disk PSG fixtures and reproduce the shipped
 //! Cohen's-kappa within a tight tolerance, over the SAME subject count it was measured on (a partly
-//! present corpus is a different cohort, not a passing gate). Every kappa here is FOUR-class
-//! (wake/light/deep/REM); no three-class figure belongs beside them. Health figures are wellness
-//! estimates, never medical or diagnostic.
+//! present corpus is a different cohort, not a passing gate). Every kappa in the GATE table is
+//! FOUR-class (wake/light/deep/REM) and no three-class figure belongs in it. `three_class_report`
+//! prints its own table, separately, because most wearable papers report Wake/NREM/REM and we could
+//! not say where we stand without it — it merges the same staging, targets nothing, and gates
+//! nothing. Health figures are wellness estimates, never medical or diagnostic.
 //!
 //! Each cohort gate carries two do-nothing arms it must reject: a CONSTANT hypnogram, and `stage_v2`
 //! re-run over the same windows with every signal flattened, which is what the priors alone reach.
@@ -148,7 +150,7 @@ fn predict_epochs(segs: &[StageSegment], w0: i64, n_epochs: usize) -> Vec<i32> {
         .collect()
 }
 
-use physio_algo::sleep::metrics::kappa4 as cohen_kappa;
+use physio_algo::sleep::metrics::{bootstrap_kappa_ci, kappa3, kappa4 as cohen_kappa, merge3};
 
 /// One cohort scored, with the two do-nothing arms beside it and the R-R reach the "cardiorespiratory"
 /// label depends on.
@@ -163,6 +165,10 @@ struct Scored {
     flat_kappa: f64,
     /// The best a single-stage hypnogram reaches on this cohort's labels.
     const_kappa: f64,
+    /// The SAME staging read as Wake / NREM / REM, which is what most wearable papers report.
+    kappa3: f64,
+    /// Percentile bootstrap over RECORDINGS of the pooled four-class kappa.
+    ci: Option<(f64, f64)>,
 }
 
 /// The same night with its signal removed: one HR value throughout, gravity pinned upright, no R-R.
@@ -207,6 +213,9 @@ fn score_dataset(ds: &str, nulls: bool) -> Scored {
 
     let (mut cm, mut cm_flat, mut truth_marginal) = ([[0i64; 4]; 4], [[0i64; 4]; 4], [0i64; 4]);
     let (mut subjects, mut unlabelled, mut rr_nights) = (0, 0, 0);
+    // Per night, so the interval resamples RECORDINGS. Resampling epochs would call one long night
+    // many independent observations.
+    let mut per_night: Vec<[[i64; 4]; 4]> = Vec::new();
     for dir in &dirs {
         if !dir.join("meta.txt").exists() {
             continue;
@@ -221,11 +230,13 @@ fn score_dataset(ds: &str, nulls: bool) -> Scored {
         if !fx.input.rr.is_empty() {
             rr_nights += 1;
         }
+        let mut night = [[0i64; 4]; 4];
         let pred = predict_epochs(&stage_v2(&fx.input), fx.w0, fx.n_epochs);
         let flat = nulls.then(|| predict_epochs(&stage_v2(&flatten(&fx.input)), fx.w0, fx.n_epochs));
         for (k, &t) in &fx.truth {
             if *k < pred.len() && (0..4).contains(&t) {
                 cm[t as usize][pred[*k] as usize] += 1;
+                night[t as usize][pred[*k] as usize] += 1;
                 truth_marginal[t as usize] += 1;
                 if let Some(f) = &flat {
                     cm_flat[t as usize][f[*k] as usize] += 1;
@@ -233,9 +244,13 @@ fn score_dataset(ds: &str, nulls: bool) -> Scored {
             }
         }
         subjects += 1;
+        per_night.push(night);
     }
     Scored {
         kappa: cohen_kappa(&cm),
+        kappa3: kappa3(&merge3(&cm)),
+        // 2000 draws and a fixed seed, so a printed interval is reproducible run to run.
+        ci: bootstrap_kappa_ci(&per_night, 2000, 0.05, 0x5EED),
         subjects,
         unlabelled,
         rr_nights,
@@ -574,4 +589,29 @@ fn print_census_row(set: &str, stream: &str, nights: usize, st: &mut StreamStat)
         "{set:<13} {stream:<13} {nights:>7} {:>8} {:>6} {u10:>8} {u50:>8} {u90:>8} {med:>9.3}",
         st.missing, st.empty
     );
+}
+
+/// The three PSG cohorts read as Wake / NREM / REM, with a bootstrap interval on the four-class
+/// figure. Neither number gates anything; both describe the SAME staging the gate table scores.
+///
+/// The interval is the point of this: the gates are quoted to four decimals on corpora of 100, 13 and
+/// 31 nights, and until now nothing said which of those digits the corpus can actually resolve.
+#[test]
+#[ignore = "needs the multi-GB fixture corpus"]
+fn three_class_report() {
+    println!("{:<14} {:>9} {:>9} {:>22} {:>7}", "dataset", "kappa4", "kappa3", "95% CI on kappa4", "n");
+    for ds in ["dreamt", "aauwss", "sleep-accel"] {
+        if !fixtures_root().join(ds).is_dir() {
+            println!("{ds:<14} {:>9}", "missing");
+            continue;
+        }
+        let s = score_dataset(ds, false);
+        let ci = match s.ci {
+            Some((lo, hi)) => format!("{lo:.4} .. {hi:.4}  (+/-{:.4})", (hi - lo) / 2.0),
+            None => "-".to_string(),
+        };
+        println!("{ds:<14} {:>9.4} {:>9.4} {ci:>22} {:>7}", s.kappa, s.kappa3, s.subjects);
+    }
+    println!("\nkappa3 merges Light and Deep; it is the same staging, not a second one. The interval");
+    println!("resamples RECORDINGS, so it answers 'how much would this move on another 100 nights'.");
 }

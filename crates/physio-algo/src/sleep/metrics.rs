@@ -23,15 +23,19 @@ pub fn confusion4(pred: &[usize], truth: &[usize]) -> Confusion4 {
     cm
 }
 
-/// Cohen's kappa over four classes. Zero for an empty matrix and for any matrix where chance already
-/// explains everything, so a scorer that emits one stage all night cannot reach a target by doing nothing.
-pub fn kappa4(cm: &Confusion4) -> f64 {
+/// `[truth][pred]` over Wake / NREM / REM, the split most wearable papers report.
+pub type Confusion3 = [[i64; 3]; 3];
+
+/// Cohen's kappa over any square confusion matrix. Zero for an empty matrix and for any matrix where
+/// chance already explains everything, so a scorer that emits one stage all night cannot reach a target
+/// by doing nothing.
+fn kappa_of<const N: usize>(cm: &[[i64; N]; N]) -> f64 {
     let tot: i64 = cm.iter().flatten().sum();
     if tot == 0 {
         return 0.0;
     }
     let tot = tot as f64;
-    let po = (0..4).map(|i| cm[i][i]).sum::<i64>() as f64 / tot;
+    let po = (0..N).map(|i| cm[i][i]).sum::<i64>() as f64 / tot;
     let mut pe = 0.0;
     for (j, row_j) in cm.iter().enumerate() {
         let col: i64 = cm.iter().map(|r| r[j]).sum();
@@ -40,6 +44,69 @@ pub fn kappa4(cm: &Confusion4) -> f64 {
     }
     pe /= tot * tot;
     if pe >= 1.0 { 0.0 } else { (po - pe) / (1.0 - pe) }
+}
+
+pub fn kappa4(cm: &Confusion4) -> f64 {
+    kappa_of(cm)
+}
+
+pub fn kappa3(cm: &Confusion3) -> f64 {
+    kappa_of(cm)
+}
+
+/// Fold Light and Deep into one NREM class. Merging an already-scored four-class result is what the
+/// field does rather than training a dedicated three-class model, so the two numbers describe the
+/// SAME staging and can be reported side by side.
+pub fn merge3(cm: &Confusion4) -> Confusion3 {
+    const TO3: [usize; 4] = [0, 1, 1, 2];
+    let mut out = [[0i64; 3]; 3];
+    for (t, row) in cm.iter().enumerate() {
+        for (p, n) in row.iter().enumerate() {
+            out[TO3[t]][TO3[p]] += n;
+        }
+    }
+    out
+}
+
+fn splitmix(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Percentile bootstrap interval for the POOLED kappa, resampling RECORDINGS with replacement.
+/// Resampling epochs instead would treat one long night as many independent observations; the night
+/// is the unit of measurement. `seed` fixes the resample so a published interval is reproducible.
+pub fn bootstrap_kappa_ci(
+    nights: &[Confusion4],
+    iters: usize,
+    alpha: f64,
+    seed: u64,
+) -> Option<(f64, f64)> {
+    let n = nights.len();
+    if n < 2 || iters == 0 || !(0.0..0.5).contains(&alpha) {
+        return None;
+    }
+    let mut s = seed;
+    let mut draws = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let mut pooled = [[0i64; 4]; 4];
+        for _ in 0..n {
+            s = splitmix(s);
+            let pick = &nights[(s >> 11) as usize % n];
+            for (out_row, add_row) in pooled.iter_mut().zip(pick) {
+                for (o, a) in out_row.iter_mut().zip(add_row) {
+                    *o += *a;
+                }
+            }
+        }
+        draws.push(kappa_of(&pooled));
+    }
+    draws.sort_by(f64::total_cmp);
+    let lo = ((alpha / 2.0) * iters as f64).floor() as usize;
+    let hi = (((1.0 - alpha / 2.0) * iters as f64).ceil() as usize).saturating_sub(1);
+    Some((draws[lo.min(iters - 1)], draws[hi.min(iters - 1)]))
 }
 
 /// Share of this class's true epochs given that class. `None` when the class never occurs, which is a
@@ -188,6 +255,103 @@ pub fn paired_bar(deltas: &[f64]) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hand-computed: totals 30, 22 on the diagonal, every row and column 10, so pe is exactly 1/3
+    /// and kappa is exactly 0.6. A formula that drifts cannot land on a round number by accident.
+    #[test]
+    fn three_class_kappa_matches_a_hand_computed_matrix() {
+        let cm: Confusion3 = [[8, 1, 1], [1, 7, 2], [1, 2, 7]];
+        assert!((kappa3(&cm) - 0.6).abs() < 1e-12, "got {}", kappa3(&cm));
+    }
+
+    /// Merging must move epochs between cells, never create or destroy them, and it must fold LIGHT
+    /// and DEEP together rather than any other pair.
+    #[test]
+    fn merge3_folds_light_and_deep_and_conserves_every_epoch() {
+        let mut cm: Confusion4 = [[0; 4]; 4];
+        let mut k = 1;
+        for row in cm.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = k;
+                k += 1;
+            }
+        }
+        let m = merge3(&cm);
+        assert_eq!(
+            cm.iter().flatten().sum::<i64>(),
+            m.iter().flatten().sum::<i64>(),
+            "merging must conserve the epoch count"
+        );
+        // Light/Deep truth x Light/Deep pred is the 2x2 block cm[1..3][1..3].
+        assert_eq!(cm[1][1] + cm[1][2] + cm[2][1] + cm[2][2], m[1][1], "NREM is Light+Deep");
+        assert_eq!(cm[0][0], m[0][0], "wake must not merge with anything");
+        assert_eq!(cm[3][3], m[2][2], "rem must not merge with anything");
+    }
+
+    /// The whole point of the three-class report: light-vs-deep confusion stops being an error.
+    #[test]
+    fn merging_forgives_light_deep_confusion_and_nothing_else() {
+        // Perfect except that every deep epoch is called light.
+        let cm: Confusion4 = [[10, 0, 0, 0], [0, 10, 0, 0], [0, 10, 0, 0], [0, 0, 0, 10]];
+        assert!(kappa3(&merge3(&cm)) > kappa4(&cm), "merging must forgive it");
+        assert!((kappa3(&merge3(&cm)) - 1.0).abs() < 1e-12, "and forgive it completely");
+
+        // Same shape of error, but REM called wake: merging cannot help.
+        let across: Confusion4 = [[10, 0, 0, 0], [0, 10, 0, 0], [0, 0, 10, 0], [10, 0, 0, 0]];
+        assert!(kappa3(&merge3(&across)) < 1.0, "a wake/REM error must survive merging");
+    }
+
+    #[test]
+    fn the_bootstrap_brackets_the_point_estimate_and_repeats_for_a_seed() {
+        let nights: Vec<Confusion4> = (0..20)
+            .map(|i| {
+                let d = i as i64 % 5;
+                [[20 + d, 3, 0, 1], [4, 30, 5, 3], [0, 6, 15 - d, 1], [2, 4, 1, 12]]
+            })
+            .collect();
+        let mut pooled = [[0i64; 4]; 4];
+        for n in &nights {
+            for (o, a) in pooled.iter_mut().zip(n) {
+                for (x, y) in o.iter_mut().zip(a) {
+                    *x += *y;
+                }
+            }
+        }
+        let point = kappa4(&pooled);
+        let (lo, hi) = bootstrap_kappa_ci(&nights, 400, 0.05, 7).expect("20 nights is enough");
+        assert!(lo < point && point < hi, "{lo} .. {hi} must bracket {point}");
+        assert_eq!(
+            Some((lo, hi)),
+            bootstrap_kappa_ci(&nights, 400, 0.05, 7),
+            "the same seed must give the same interval"
+        );
+        assert_ne!(
+            Some((lo, hi)),
+            bootstrap_kappa_ci(&nights, 400, 0.05, 8),
+            "a different seed must resample differently"
+        );
+        assert_eq!(None, bootstrap_kappa_ci(&nights[..1], 400, 0.05, 7), "one night is not a corpus");
+    }
+
+    /// Fewer recordings must widen the interval. An interval that ignores n would report the same
+    /// precision for 4 nights as for 20, which is the trap a per-epoch bootstrap falls into.
+    #[test]
+    fn the_interval_widens_when_there_are_fewer_nights() {
+        let nights: Vec<Confusion4> = (0..24)
+            .map(|i| {
+                let d = i as i64 % 7;
+                [[18 + d, 4, 1, 2], [5, 28 - d, 6, 4], [1, 7, 14, 2], [3, 5, 2, 11 + d]]
+            })
+            .collect();
+        let wide = bootstrap_kappa_ci(&nights[..4], 600, 0.05, 3).unwrap();
+        let tight = bootstrap_kappa_ci(&nights, 600, 0.05, 3).unwrap();
+        assert!(
+            wide.1 - wide.0 > tight.1 - tight.0,
+            "4 nights {:.4} must be wider than 24 nights {:.4}",
+            wide.1 - wide.0,
+            tight.1 - tight.0
+        );
+    }
 
     /// The overlap floor is inclusive, and it is the boundary `recall` turns on. Nothing sat exactly
     /// on it before, so the comparison could be tightened without a failure.
