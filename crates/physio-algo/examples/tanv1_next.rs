@@ -15,6 +15,10 @@
 //!              the epochs that have one, so marginals and missingness are untouched and only the
 //!              alignment with truth is gone. Without it, "these features carry nothing" and "four
 //!              more columns cost about 0.03 whatever is in them" predict the same table.
+//!   PER-NIGHT  the same four columns with the three LOG POWERS centred on the night's median and
+//!              divided by its 5-95 spread. Absolute band power varies by an order of magnitude
+//!              between people, and a pooled standardiser cannot remove a per-subject offset.
+//!              `hrv_bands` says so in its own header; this tests whether that is the defect.
 //!   ABSTAIN    refuse the least-certain epochs. Measured at +0.055 elsewhere, roughly three times
 //!              the current gap. Scored at MATCHED COVERAGE against two nulls, because dropping
 //!              epochs at random also raises kappa on what is kept.
@@ -27,8 +31,8 @@ mod common;
 
 use common::lr::{design_row, fit as fit_lr, scores, standardise_cols};
 use common::{
-    cardiac_series, compare, dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth,
-    require_psg, stage_idx, Provenance,
+    cardiac_series, compare, dirs_of, median, pct, read_accel, read_hr, read_meta, read_rr,
+    read_truth, require_psg, stage_idx, Provenance,
 };
 use physio_algo::sleep::features::extract;
 use physio_algo::sleep::hrv_bands::bands_series;
@@ -57,6 +61,8 @@ struct Night {
     spec: Vec<[f64; N_SPEC]>,
     /// `spec` shuffled within the night. The arm that prices four columns carrying nothing.
     perm: Vec<[f64; N_SPEC]>,
+    /// `spec` with the three log powers scaled within the night.
+    norm: Vec<[f64; N_SPEC]>,
     terms: Terms,
     truth: Vec<Option<usize>>,
 }
@@ -68,6 +74,8 @@ enum Spec {
     Real,
     /// Same columns, same marginals, same missingness - only the alignment with truth is gone.
     Permuted,
+    /// Same columns with the three log powers centred and scaled within the night.
+    Normalised,
 }
 
 fn load(set: &str) -> Vec<Night> {
@@ -115,10 +123,12 @@ fn load(set: &str) -> Vec<Night> {
         let salt = set.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize))
             .wrapping_add(out.len());
         let perm = permute_spec(&spec, salt);
+        let norm = normalise_spec(&spec);
         out.push(Night {
             tan: (0..em.len()).map(|e| f[e].values().to_vec()).collect(),
             spec,
             perm,
+            norm,
             terms,
             truth: (0..em.len())
                 .map(|k| {
@@ -212,6 +222,7 @@ fn row(nt: &Night, e: usize, spec: Spec) -> Vec<f64> {
         Spec::Off => {}
         Spec::Real => v.extend_from_slice(&nt.spec[e]),
         Spec::Permuted => v.extend_from_slice(&nt.perm[e]),
+        Spec::Normalised => v.extend_from_slice(&nt.norm[e]),
     }
     v
 }
@@ -235,7 +246,30 @@ fn permute_spec(spec: &[[f64; N_SPEC]], salt: usize) -> Vec<[f64; N_SPEC]> {
     out
 }
 
-/// tanv1's emission per night, under one of the three spectral arms.
+/// Per-night robust scale of the three LOG POWERS: centre on the night's median, divide by its 5-95
+/// spread. `lf_nu` is already a bounded ratio and is left alone. Absolute band power varies by an
+/// order of magnitude between people, which a pooled standardiser cannot remove and this can.
+fn normalise_spec(spec: &[[f64; N_SPEC]]) -> Vec<[f64; N_SPEC]> {
+    let mut out = spec.to_vec();
+    for c in 0..N_SPEC - 1 {
+        let v: Vec<f64> = spec.iter().map(|r| r[c]).filter(|x| x.is_finite()).collect();
+        if v.len() < 2 {
+            continue;
+        }
+        let mid = median(&mut v.clone());
+        let lo = pct(&mut v.clone(), 0.05);
+        let hi = pct(&mut v.clone(), 0.95);
+        let scale = if (hi - lo).abs() > 1e-12 { hi - lo } else { 1.0 };
+        for r in out.iter_mut() {
+            if r[c].is_finite() {
+                r[c] = (r[c] - mid) / scale;
+            }
+        }
+    }
+    out
+}
+
+/// tanv1's emission per night, under one of the four spectral arms.
 fn tanv1_emissions(train: &[&Night], report: &[Night], spec: Spec) -> Vec<Vec<[f64; CLASSES]>> {
     let (mut x, mut y) = (Vec::new(), Vec::new());
     for nt in train {
@@ -358,6 +392,7 @@ fn main() {
         let plain = tanv1_emissions(&tr, hn, Spec::Off);
         let withspec = tanv1_emissions(&tr, hn, Spec::Real);
         let permuted = tanv1_emissions(&tr, hn, Spec::Permuted);
+        let normalised = tanv1_emissions(&tr, hn, Spec::Normalised);
 
         println!("== {held} n={} ==", hn.len());
         println!("  {:<30} {:>7}   {:>8} {:>7}  verdict vs V2 REFIT", "arm", "kappa", "paired d",
@@ -365,10 +400,16 @@ fn main() {
 
         // Full coverage first: does the spectral family move the emission at all?
         let mut base = Vec::new();
-        let mut null_k: Vec<f64> = Vec::new();
-        let mut real_k: Vec<f64> = Vec::new();
+        // Captured by EXACT label. `contains("SPECTRAL")` also matches "SPECTRAL per-night", which
+        // silently made two arms the same vector; `expect_once` refuses a second write.
+        let (mut null_k, mut real_k, mut norm_k) = (None, None, None);
+        let expect_once = |slot: &mut Option<Vec<f64>>, v: &[f64], what: &str| {
+            assert!(slot.is_none(), "{what} captured twice");
+            *slot = Some(v.to_vec());
+        };
         for (label, ems) in [("V2 REFIT", &v2_em), ("tanv1", &plain), ("tanv1 + SPECTRAL", &withspec),
-                             ("tanv1 + PERMUTED (null)", &permuted)]
+                             ("tanv1 + PERMUTED (null)", &permuted),
+                             ("tanv1 + SPECTRAL per-night", &normalised)]
         {
             let k: Vec<f64> = hn
                 .iter()
@@ -382,20 +423,26 @@ fn main() {
                 base = k.clone();
                 println!("  {:<30} {:>7.3}   the honest baseline", label, median(&mut k.clone()));
             } else {
-                if label.contains("SPECTRAL") {
-                    real_k = k.clone();
-                }
-                if label.contains("PERMUTED") {
-                    null_k = k.clone();
+                match label {
+                    "tanv1 + SPECTRAL" => expect_once(&mut real_k, &k, label),
+                    "tanv1 + PERMUTED (null)" => expect_once(&mut null_k, &k, label),
+                    "tanv1 + SPECTRAL per-night" => expect_once(&mut norm_k, &k, label),
+                    _ => {}
                 }
                 println!("  {:<30} {:>7.3}   {}", label, median(&mut k.clone()),
                          compare(&base, &k, Provenance::HeldOut).2);
             }
         }
         // The comparison the arm exists for: real columns against the same columns carrying nothing.
-        if !null_k.is_empty() && !real_k.is_empty() {
-            println!("  {:<30} {:>7}   {}", "  SPECTRAL vs PERMUTED", "",
-                     compare(&null_k, &real_k, Provenance::HeldOut).2);
+        if let (Some(null_k), Some(real_k), Some(norm_k)) = (&null_k, &real_k, &norm_k) {
+            for (what, base, arm) in [
+                ("  SPECTRAL vs PERMUTED", null_k, real_k),
+                ("  per-night vs PERMUTED", null_k, norm_k),
+                ("  per-night vs SPECTRAL", real_k, norm_k),
+            ] {
+                println!("  {what:<30} {:>7}   {}", "",
+                         compare(base, arm, Provenance::HeldOut).2);
+            }
         }
 
         // Abstention at matched coverage, both engines refusing by the SAME rule, plus two nulls.
