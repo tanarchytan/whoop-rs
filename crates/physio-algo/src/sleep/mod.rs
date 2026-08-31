@@ -21,6 +21,7 @@ mod detect;
 mod input;
 mod mainnight;
 pub mod agreement;
+pub mod cardiac;
 pub mod features;
 pub mod hrv_bands;
 pub mod metrics;

@@ -6,21 +6,10 @@ use std::collections::BTreeMap;
 
 use physio_algo::sleep::features::{Cardiac, EPOCH_S};
 use physio_algo::sleep::{flatten_rr, resp_regularity, HrSample, RrRun};
-use physio_algo::stats::{mean, population_sd};
+use physio_algo::stats::population_sd;
 
-/// Per-night z-score of a per-epoch series. Missing stays missing; a series with fewer than two present
-/// values, or a flat one, returns all-missing rather than a manufactured zero.
-pub fn zscore(v: &[Option<f64>]) -> Vec<Option<f64>> {
-    let present: Vec<f64> = v.iter().flatten().copied().collect();
-    if present.len() < 2 {
-        return vec![None; v.len()];
-    }
-    let (m, sd) = (mean(&present), population_sd(&present));
-    if sd <= 0.0 {
-        return vec![None; v.len()];
-    }
-    v.iter().map(|o| o.map(|x| (x - m) / sd)).collect()
-}
+/// Per-night z-score of a per-epoch series, from the library so the harnesses and the stager share one.
+pub use physio_algo::sleep::cardiac::zscore_column as zscore;
 
 /// One heart rate per second, averaged where a second carries several samples.
 pub fn per_second_hr(hr: &[HrSample]) -> BTreeMap<i64, f64> {

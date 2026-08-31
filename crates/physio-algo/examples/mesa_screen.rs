@@ -1,89 +1,61 @@
-//! Screen 1 of the roster: do the ORDER STATISTICS carry stage information, and do they survive our
-//! channel?
+//! Screen 1 of the roster: do the ORDER STATISTICS carry stage information, do they survive our
+//! channel, and does per-recording normalisation change the answer?
 //!
 //!   cargo run --release -p physio-algo --example mesa_screen [nights]
 //!
-//! `FEATURE-ROSTER.md` puts these first: seven percentiles of detrended and absolute HR/RR is the
-//! widest gap between our feature set and radha2019's, it needs no spectral estimation, and it has no
-//! sensitivity to sub-second timing. RMSSD / pNN50 / mean-|dRR| ride along because they are the other
-//! constructs the corpus names that we do not compute.
+//! The features come from `physio_algo::sleep::cardiac`, the same producer a stager would call, so
+//! this measures the code that would run and not a second implementation of it.
 //!
 //! Three arms on the SAME nights, because a feature that only works on ECG is not a candidate:
-//!   EXACT     MESA's own beat times at 1/256 s — is the information there at all
+//!   EXACT     the corpus's own beat times at 1/256 s — is the information there at all
 //!   TIMING    the same beats through our wire format and back — what whole-second stamps cost
 //!   COVERAGE  beats dropped in runs to 60% — what PPG dropout costs
 //!
+//! Each arm is read twice. RAW pools every recording's values together, so a feature whose LEVEL
+//! differs between people is judged on that difference. Z re-scores each column within its own
+//! recording first, which is what the stager consumes, and asks whether the feature moves with stage
+//! inside one night.
+//!
 //! Reported as one-vs-rest AUC per stage. 0.5 is no information; distance from 0.5 in EITHER
-//! direction is signal, so the table prints |AUC-0.5| and the sign separately.
+//! direction is signal, so the table prints the cells and the largest deviation separately.
 
 mod common;
 
 use common::mesa::{self, Beat};
+use physio_algo::sleep::cardiac;
 
 const EPOCH_S: f64 = 30.0;
-/// radha2019 computes its features on a 4.5 min window centred on the epoch.
+/// The window the order statistics are centred on, matching the spectral one already in the tree.
 const WINDOW_S: f64 = 270.0;
-const PCTS: [f64; 7] = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95];
-const MIN_BEATS: usize = 20;
 const COVERAGE_KEEP: f64 = 0.60;
 const COVERAGE_SEED: u64 = 0xC0FFEE;
 
-fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return f64::NAN;
+/// One night's rows and their stages, blocks only where the window could carry one.
+fn night_rows(beats: &[Beat], stage: &[Option<usize>]) -> (Vec<[f64; 18]>, Vec<usize>) {
+    let pairs: Vec<(f64, f64)> = beats.iter().map(|b| (b.t, b.rr)).collect();
+    let (mut x, mut y) = (Vec::new(), Vec::new());
+    for (e, s) in stage.iter().enumerate() {
+        let Some(s) = s else { continue };
+        let centre = e as f64 * EPOCH_S + EPOCH_S / 2.0;
+        if let Some(b) = cardiac::extract(&pairs, centre - WINDOW_S / 2.0, centre + WINDOW_S / 2.0) {
+            x.push(b.row());
+            y.push(*s);
+        }
     }
-    let i = ((sorted.len() - 1) as f64 * p).round() as usize;
-    sorted[i]
+    (x, y)
 }
 
-/// Least-squares linear trend removed. "Detrended" is not defined in the source, so this is OUR
-/// reading of it and is labelled as such wherever it is reported.
-fn detrended(t: &[f64], v: &[f64]) -> Vec<f64> {
-    let n = v.len() as f64;
-    let (mt, mv) = (t.iter().sum::<f64>() / n, v.iter().sum::<f64>() / n);
-    let sxx: f64 = t.iter().map(|x| (x - mt).powi(2)).sum();
-    let sxy: f64 = t.iter().zip(v).map(|(x, y)| (x - mt) * (y - mv)).sum();
-    let slope = if sxx > f64::EPSILON { sxy / sxx } else { 0.0 };
-    t.iter().zip(v).map(|(x, y)| y - (mv + slope * (x - mt))).collect()
-}
-
-fn names() -> Vec<String> {
-    let mut n: Vec<String> = Vec::new();
-    for p in PCTS {
-        n.push(format!("rr_p{:02}", (p * 100.0) as u32));
+/// Every column z-scored within this night. NaN is the missing marker on the way in and out, so a
+/// column the recording cannot carry stays missing instead of becoming a manufactured mean.
+fn zscore_night(rows: &[[f64; 18]]) -> Vec<[f64; 18]> {
+    let mut out = vec![[f64::NAN; 18]; rows.len()];
+    for f in 0..18 {
+        let col: Vec<Option<f64>> = rows.iter().map(|r| r[f].is_finite().then_some(r[f])).collect();
+        for (k, z) in cardiac::zscore_column(&col).into_iter().enumerate() {
+            out[k][f] = z.unwrap_or(f64::NAN);
+        }
     }
-    for p in PCTS {
-        n.push(format!("rr_dt_p{:02}", (p * 100.0) as u32));
-    }
-    n.extend(["mean_hr".into(), "rmssd".into(), "pnn50".into(), "mean_abs_drr".into()]);
-    n
-}
-
-/// One epoch's feature row, or `None` when the window cannot carry one.
-fn row(beats: &[Beat], centre: f64) -> Option<Vec<f64>> {
-    let (lo, hi) = (centre - WINDOW_S / 2.0, centre + WINDOW_S / 2.0);
-    let win: Vec<&Beat> = beats.iter().filter(|b| b.t >= lo && b.t <= hi).collect();
-    if win.len() < MIN_BEATS {
-        return None;
-    }
-    let t: Vec<f64> = win.iter().map(|b| b.t).collect();
-    let rr: Vec<f64> = win.iter().map(|b| b.rr).collect();
-
-    let mut abs = rr.clone();
-    abs.sort_by(f64::total_cmp);
-    let mut dt = detrended(&t, &rr);
-    dt.sort_by(f64::total_cmp);
-
-    let mut out: Vec<f64> = PCTS.iter().map(|p| percentile(&abs, *p)).collect();
-    out.extend(PCTS.iter().map(|p| percentile(&dt, *p)));
-
-    let mean_rr = rr.iter().sum::<f64>() / rr.len() as f64;
-    out.push(60_000.0 / mean_rr);
-    let d: Vec<f64> = rr.windows(2).map(|w| w[1] - w[0]).collect();
-    out.push((d.iter().map(|x| x * x).sum::<f64>() / d.len().max(1) as f64).sqrt());
-    out.push(d.iter().filter(|x| x.abs() > 50.0).count() as f64 / d.len().max(1) as f64);
-    out.push(d.iter().map(|x| x.abs()).sum::<f64>() / d.len().max(1) as f64);
-    Some(out)
+    out
 }
 
 /// Mann-Whitney AUC of `f` separating class `c` from the rest. Ties take half credit.
@@ -118,63 +90,72 @@ fn auc(vals: &[f64], labels: &[usize], c: usize) -> Option<f64> {
     (n1 > 0.0 && n0 > 0.0).then(|| (sum1 - n1 * (n1 + 1.0) / 2.0) / (n1 * n0))
 }
 
-fn collect(nights: &[mesa::MesaNight], arm: &str) -> (Vec<Vec<f64>>, Vec<usize>) {
-    let (mut x, mut y) = (Vec::new(), Vec::new());
+/// Raw rows, per-night z-scored rows, and the labels, pooled over the nights.
+fn collect(nights: &[mesa::MesaNight], arm: &str) -> (Vec<[f64; 18]>, Vec<[f64; 18]>, Vec<usize>) {
+    let (mut raw, mut z, mut y) = (Vec::new(), Vec::new(), Vec::new());
     for n in nights {
         let beats = match arm {
             "TIMING" => mesa::degrade_timing(&n.beats),
             "COVERAGE" => mesa::degrade_coverage(&n.beats, COVERAGE_KEEP, COVERAGE_SEED),
             _ => n.beats.clone(),
         };
-        for (e, s) in n.stage.iter().enumerate() {
-            let Some(s) = s else { continue };
-            let centre = e as f64 * EPOCH_S + EPOCH_S / 2.0;
-            if let Some(r) = row(&beats, centre) {
-                x.push(r);
-                y.push(*s);
-            }
-        }
+        let (rows, labels) = night_rows(&beats, &n.stage);
+        z.extend(zscore_night(&rows));
+        raw.extend(rows);
+        y.extend(labels);
     }
-    (x, y)
+    (raw, z, y)
+}
+
+/// The four one-vs-rest cells of one column, and the largest deviation from 0.5 among them.
+fn cells(x: &[[f64; 18]], y: &[usize], f: usize) -> (Vec<String>, f64) {
+    let col: Vec<f64> = x.iter().map(|r| r[f]).collect();
+    let a: Vec<Option<f64>> = (0..4).map(|c| auc(&col, y, c)).collect();
+    let best = a.iter().flatten().map(|v| (v - 0.5).abs()).fold(0.0, f64::max);
+    let text = a
+        .iter()
+        .map(|v| v.map_or("-".into(), |v| format!("{v:.3}")))
+        .collect();
+    (text, best)
 }
 
 fn main() {
     let limit: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(60);
     let nights = mesa::nights(limit);
-    let names = names();
     println!("MESA order-statistics screen — {} nights, window {WINDOW_S} s centred", nights.len());
-    println!("`rr_dt_*` are detrended by a least-squares linear fit; the source does not define it.\n");
+    println!("`rr_dt_*` are detrended by a least-squares linear fit; the sources do not define it.");
+    println!("RAW pools recordings; Z re-scores each column within its recording first.\n");
 
     for arm in ["EXACT", "TIMING", "COVERAGE"] {
-        let (x, y) = collect(&nights, arm);
+        let (raw, z, y) = collect(&nights, arm);
         let mut mix = [0usize; 4];
         for c in &y {
             mix[*c] += 1;
         }
-        println!("== {arm} == {} epochs  (w/l/d/r {mix:?})", x.len());
-        println!("  {:<14} {:>8} {:>8} {:>8} {:>8}   best", "feature", "wake", "light", "deep", "rem");
+        println!("== {arm} == {} epochs  (w/l/d/r {mix:?})", raw.len());
+        println!(
+            "  {:<14} {:>26}  {:>26}   {:>6} {:>6}",
+            "feature", "-------- RAW --------", "--- PER-NIGHT Z ---", "raw", "z"
+        );
+        println!(
+            "  {:<14} {:>6} {:>6} {:>6} {:>6}  {:>6} {:>6} {:>6} {:>6}",
+            "", "wake", "light", "deep", "rem", "wake", "light", "deep", "rem"
+        );
         let mut ranked: Vec<(f64, String)> = Vec::new();
-        for (f, name) in names.iter().enumerate() {
-            let col: Vec<f64> = x.iter().map(|r| r[f]).collect();
-            let a: Vec<Option<f64>> = (0..4).map(|c| auc(&col, &y, c)).collect();
-            let cells: Vec<String> = a
-                .iter()
-                .map(|v| match v {
-                    Some(v) => format!("{v:.3}"),
-                    None => "-".into(),
-                })
-                .collect();
-            let best = a.iter().flatten().map(|v| (v - 0.5).abs()).fold(0.0, f64::max);
-            ranked.push((best, name.clone()));
+        for (f, name) in cardiac::NAMES.iter().enumerate() {
+            let (r, rb) = cells(&raw, &y, f);
+            let (zc, zb) = cells(&z, &y, f);
+            ranked.push((zb, (*name).to_string()));
             println!(
-                "  {name:<14} {:>8} {:>8} {:>8} {:>8}   {best:.3}",
-                cells[0], cells[1], cells[2], cells[3]
+                "  {name:<14} {:>6} {:>6} {:>6} {:>6}  {:>6} {:>6} {:>6} {:>6}   {rb:.3}  {zb:.3}",
+                r[0], r[1], r[2], r[3], zc[0], zc[1], zc[2], zc[3]
             );
         }
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
         let top: Vec<String> = ranked.iter().take(5).map(|(v, n)| format!("{n} {v:.3}")).collect();
-        println!("  strongest: {}\n", top.join(" | "));
+        println!("  strongest under Z: {}\n", top.join(" | "));
     }
     println!("AUC is one-vs-rest; 0.5 is no information and distance from 0.5 either way is signal.");
     println!("A feature that only separates under EXACT is an ECG artefact, not a candidate.");
+    println!("A feature that separates under RAW but not Z is reading who the sleeper is.");
 }
