@@ -6,7 +6,7 @@
 //! [`SleepConfig`] and prints the same six blocks whatever produced the hypnogram. v2 appears once, as
 //! a NULL READING - where the old engine happens to sit, never a target and never the subject.
 //!
-//! Six blocks, each answering something the others cannot:
+//! Seven blocks, each answering something the others cannot:
 //!   KAPPA4      epoch-wise agreement over wake/light/deep/REM
 //!   KAPPA3      the same staging as wake/NREM/REM, which is what most wearable papers report
 //!   CI          percentile bootstrap over RECORDINGS - how much the figure would move on new nights
@@ -14,6 +14,9 @@
 //!   AGREEMENT   Bland-Altman on the minutes a user reads; kappa cannot say if the AMOUNT is right
 //!   SLOPE       proportional bias - away from zero the error depends on the magnitude and one bias
 //!               figure describes nobody
+//!   STRUCTURE   bout lengths and transition rates, which every block above is blind to - a confusion
+//!               matrix is unchanged by shuffling the hypnogram. TRUTH is printed in the same row, so
+//!               a rate can only be called high against this cohort's own
 //!
 //! An arm is added by adding a `SleepConfig`, not by editing this file's scoring.
 
@@ -27,12 +30,21 @@ use physio_algo::sleep::metrics::{
     recall, truth_marginals, Confusion4, Spread,
 };
 use physio_algo::sleep::pipeline::{run, SleepConfig};
+use physio_algo::sleep::sequence::{bout_w1, min_run_smooth, Structure};
 use physio_algo::sleep::{epoch_starts_v2, params::Params, SleepInput};
 
 const EPOCH: i64 = 30;
 const EPOCH_MIN: f64 = 0.5;
 const COHORTS: [&str; 3] = ["dreamt", "aauwss", "sleep-accel"];
 const CLASS_NAMES: [&str; 4] = ["wake", "light", "deep", "rem"];
+/// A transition holding less than this share of the cohort's own adjacent pairs is rare. Derived
+/// from the truth every run, never carried as a published figure.
+const RARE_SHARE: f64 = 0.005;
+/// The upper tail the transition diagonal is aimed at, in epochs.
+const TAIL_EPOCHS: usize = 20;
+/// Runs shorter than this are absorbed in the CONTROL arm, which exists to prove the bout numbers
+/// move when bout structure moves.
+const SMOOTH_MIN: usize = 6;
 /// Labels must cover this much of a night's own span before it can carry a summary; a sparse night
 /// reports a short TST that is a labelling gap, not a wearer awake.
 const MIN_LABEL_DENSITY: f64 = 0.95;
@@ -43,6 +55,9 @@ struct Night {
     cm: Confusion4,
     /// `None` when the night is too sparsely labelled to summarise.
     pair: Option<(NightSummary, NightSummary)>,
+    /// Prediction and truth cut into time-CONTIGUOUS runs of epochs, cut at the same places. A hole
+    /// in the labels ends a segment, so no transition is ever counted across one.
+    segs: Vec<(Vec<usize>, Vec<usize>)>,
 }
 
 /// Score one cohort under one config. Labels are aligned to truth BY TIME, not by position: an epoch
@@ -68,14 +83,24 @@ fn score(ds: &str, cfg: &SleepConfig, p: &Params) -> Vec<Night> {
         }
 
         let (mut d, mut r) = (Vec::new(), Vec::new());
+        let mut segs: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
+        let mut prev: Option<usize> = None;
         for (k, t) in &truth {
-            if !(0..4).contains(t) {
+            let staged = (0..4).contains(t).then(|| at.get(&(w0 + *k as i64 * EPOCH))).flatten();
+            let Some(lab) = staged else {
+                // An unlabelled or unstaged epoch is a hole, and a hole ends the segment.
+                prev = None;
                 continue;
+            };
+            d.push(*lab);
+            r.push(*t as usize);
+            if prev != Some(k.wrapping_sub(1)) {
+                segs.push((Vec::new(), Vec::new()));
             }
-            if let Some(lab) = at.get(&(w0 + *k as i64 * EPOCH)) {
-                d.push(*lab);
-                r.push(*t as usize);
-            }
+            let seg = segs.last_mut().expect("a segment was just started");
+            seg.0.push(*lab);
+            seg.1.push(*t as usize);
+            prev = Some(*k);
         }
         if d.is_empty() {
             continue;
@@ -86,6 +111,7 @@ fn score(ds: &str, cfg: &SleepConfig, p: &Params) -> Vec<Night> {
             cm: confusion4(&d, &r),
             pair: dense.then(|| (summarise(&d, EPOCH_MIN), summarise(&r, EPOCH_MIN)))
                 .and_then(|(a, b)| Some((a?, b?))),
+            segs,
         });
     }
     out
@@ -185,16 +211,105 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
         );
     }
 
+    structure(nights);
+
     let sparse = nights.len() - pairs.len();
     if sparse > 0 {
         println!("  ({sparse} night(s) too sparsely labelled to summarise, scored epoch-wise only)");
     }
 }
 
+/// Bout lengths and transition rates, with TRUTH beside every one of them. Nothing above this line
+/// can see any of it: a confusion matrix is invariant to shuffling the hypnogram.
+fn structure(nights: &[Night]) {
+    let (mut pred, mut truth, mut ctrl) =
+        (Structure::default(), Structure::default(), Structure::default());
+    for n in nights {
+        for (p, t) in &n.segs {
+            pred.add(p);
+            truth.add(t);
+            ctrl.add(&min_run_smooth(p, SMOOTH_MIN));
+        }
+    }
+    let Some(fi_p) = pred.fi() else { return };
+    let fi_t = truth.fi().unwrap_or(f64::NAN);
+
+    let m = |e: Option<f64>| e.map_or("  -  ".into(), |x| format!("{:.1}", x * EPOCH_MIN));
+    let f = |x: Option<f64>| x.map_or("  -  ".into(), |v| format!("{v:.3}"));
+    println!(
+        "  STRUCTURE  {} segment(s)   fragmentation {fi_p:.4} vs truth {fi_t:.4}  ({:+.1}%)",
+        pred.segments,
+        (fi_p / fi_t - 1.0) * 100.0
+    );
+    println!(
+        "  {:<7} {:>8} {:>8} {:>10} {:>10} {:>7} {:>9} {:>9} {:>5}",
+        "class", "FI", "FI true", "bout min", "true min", "W1 min", ">=10min", "true >=", "cens"
+    );
+    for (c, name) in CLASS_NAMES.iter().enumerate() {
+        println!(
+            "  {:<7} {:>8} {:>8} {:>10} {:>10} {:>7} {:>9} {:>9} {:>5}",
+            name,
+            f(pred.fi_class(c)),
+            f(truth.fi_class(c)),
+            m(pred.mean_bout(c)),
+            m(truth.mean_bout(c)),
+            m(bout_w1(&pred, &truth, c)),
+            f(pred.tail_mass(c, TAIL_EPOCHS)),
+            f(truth.tail_mass(c, TAIL_EPOCHS)),
+            pred.censored[c] + truth.censored[c],
+        );
+    }
+
+    // The rare set is this cohort's own truth, and the truth's own rate against it is the only thing
+    // that says whether the prediction's rate is high.
+    let rare = truth.rare_set(RARE_SHARE);
+    let named: Vec<String> = (0..4)
+        .flat_map(|i| (0..4).map(move |j| (i, j)))
+        .filter(|(i, j)| rare[*i][*j])
+        .map(|(i, j)| format!("{}>{}", CLASS_NAMES[i], CLASS_NAMES[j]))
+        .collect();
+    println!(
+        "  TVR over {} transition(s) under {:.1}% of this cohort's pairs: pred {} vs truth {}   [{}]",
+        named.len(),
+        RARE_SHARE * 100.0,
+        f(pred.tvr(&rare)),
+        f(truth.tvr(&rare)),
+        named.join(" ")
+    );
+
+    // The control: absorb every short run and the numbers above must move. If they do not, this
+    // block is not measuring bout structure and nothing read off it means anything.
+    let w1 = |s: &Structure| {
+        (0..4).filter_map(|c| bout_w1(s, &truth, c)).map(|x| x * EPOCH_MIN).sum::<f64>()
+    };
+    println!(
+        "  CONTROL runs <{SMOOTH_MIN} epochs absorbed: FI {:.4} (from {fi_p:.4}), summed W1 {:.1} min (from {:.1})",
+        ctrl.fi().unwrap_or(f64::NAN),
+        w1(&ctrl),
+        w1(&pred)
+    );
+}
+
+/// Mix every transition row toward uniform, leaving the emissions untouched. At 1.0 the decoder
+/// follows the emissions alone, which is the only arm that separates "the prior is doing the
+/// smoothing" from "the emissions cannot discriminate". `Params::SHIPPED` is never mutated.
+fn flattened(alpha: f64) -> Params {
+    let mut p = Params::SHIPPED;
+    for row in p.transition.iter_mut() {
+        for v in row.iter_mut() {
+            *v = (1.0 - alpha) * *v + alpha * 0.25;
+        }
+    }
+    p
+}
+
 fn main() {
     // One entry per arm. A new engine is a new SleepConfig here, never a change to the scoring above.
-    let arms: [(&str, SleepConfig); 1] = [("v2 shipped recipe (NULL READING)", SleepConfig::shipped())];
-    let p = Params::SHIPPED;
+    let arms: [(&str, SleepConfig, Params); 3] = [
+        ("v2 shipped recipe (NULL READING)", SleepConfig::shipped(), Params::SHIPPED),
+        ("transition 50% toward uniform", SleepConfig::shipped(), flattened(0.5)),
+        ("transition UNIFORM - emissions alone", SleepConfig::shipped(), flattened(1.0)),
+    ];
 
     println!("THE BORDER — what any engine is measured on. Minutes, except efficiency in percent.");
     println!("Positive bias = the engine over-reports against PSG. Nothing here is a gate.");
@@ -203,8 +318,8 @@ fn main() {
             println!("\n{ds}: missing");
             continue;
         }
-        for (arm, cfg) in &arms {
-            card(ds, arm, &score(ds, cfg, &p));
+        for (arm, cfg, p) in &arms {
+            card(ds, arm, &score(ds, cfg, p));
         }
     }
 }
