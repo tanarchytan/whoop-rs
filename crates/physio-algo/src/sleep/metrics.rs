@@ -321,18 +321,10 @@ pub fn bout_score(
     }
 }
 
-/// Textbook two-sided 95% critical values, keyed by degrees of freedom.
-const T95: [(usize, f64); 12] = [
-    (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
-    (19, 2.093), (30, 2.042), (39, 2.023), (59, 2.001), (119, 1.980),
-];
-
-/// Two-sided 95% critical value at `n-1` degrees of freedom, floored at df 1 (the widest, most
-/// conservative row); 1.96 is ~11% too narrow at n=13. Rounds df DOWN to the previous row - the
-/// value falls as df rises, so rounding up would return a bar narrower than the truth.
+/// Two-sided 95% critical value at `n-1` degrees of freedom. One table, in `crate::stats`, so the
+/// paired bar here and the slope test in `agreement` cannot drift apart.
 fn t95(n: usize) -> f64 {
-    let df = n.saturating_sub(1).max(1);
-    T95.iter().rev().find(|(k, _)| *k <= df).expect("the table starts at df 1").1
+    crate::stats::t95_df(n.saturating_sub(1))
 }
 
 /// Mean paired difference and the delta this sample size can resolve, `t * sd / sqrt(n)`. Two arms'
@@ -665,12 +657,15 @@ mod tests {
         // Slack is earned only by a df that falls BETWEEN rows; its worst case is df=8 reading the
         // df=5 row, 2.571 against 2.306. A df landing ON a row must return that row unchanged.
         const ROUNDING_SLACK: f64 = 1.12;
+        use crate::stats::t95_df;
         for (n, truth) in [(2usize, 12.706), (3, 4.303), (4, 3.182), (5, 2.776), (6, 2.571),
                            (7, 2.447), (9, 2.306), (10, 2.262), (12, 2.201), (13, 2.179),
                            (14, 2.160), (19, 2.101), (20, 2.093), (22, 2.080), (30, 2.045),
                            (31, 2.042), (36, 2.030), (39, 2.024), (40, 2.023), (59, 2.002),
                            (60, 2.001), (119, 1.980), (120, 1.980)] {
-            let on_a_row = T95.iter().any(|(k, _)| *k == n - 1);
+            // Rounding down changes the value only AT a row, so df sits on one exactly when it
+            // differs from df-1. df 1 is the first row and has nothing below it.
+            let on_a_row = n == 2 || t95_df(n - 1) != t95_df(n - 2);
             let ceiling = if on_a_row { truth } else { truth * ROUNDING_SLACK };
             assert!(t95(n) >= truth - 1e-9,
                     "n={n} (df={}) needs at least {truth}, got {}", n - 1, t95(n));

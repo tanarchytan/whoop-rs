@@ -51,12 +51,18 @@ pub fn summarise(labels: &[usize], epoch_min: f64) -> Option<NightSummary> {
 }
 
 /// Bland-Altman over paired per-recording values, plus the proportional-bias slope.
+///
+/// A constant bias and a significant slope cannot both stand: once the slope is real the bias is a
+/// LINE, and [`Agreement::bias`] is then only its value at the mean. Branch on
+/// [`Agreement::proportional`] before quoting anything.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Agreement {
     pub n: usize,
-    /// Mean of `device - reference`. Positive means the device over-reports.
+    /// Mean of `device - reference`. Positive means the device over-reports. **Only meaningful on
+    /// its own when `!proportional`** — otherwise it is one point on a sloped line.
     pub bias: f64,
-    /// Sample SD of the differences.
+    /// Sample SD of the differences. Carries the slope's spread when one exists, so it is the WRONG
+    /// scale for limits under proportional bias; use `resid_sd`.
     pub sd: f64,
     pub loa_lo: f64,
     pub loa_hi: f64,
@@ -65,6 +71,37 @@ pub struct Agreement {
     pub slope: f64,
     /// Correlation between the difference and the pair mean; the slope's strength.
     pub r: f64,
+    /// Slope of the difference on the REFERENCE, and the line's value at reference zero. This is the
+    /// one to trust: the pair mean contains half the difference, so regressing on it manufactures a
+    /// negative slope even from an unbiased device. Valid here only because the reference is gold.
+    pub slope_ref: f64,
+    pub intercept_ref: f64,
+    /// SD of the residuals about the reference line, `n-2` degrees of freedom. The scale for limits
+    /// once the slope is real; `sd` carries the slope's spread and is too wide.
+    pub resid_sd: f64,
+    /// `slope_ref / SE`, at `n-2` df. NaN when the reference has no spread to regress on.
+    pub slope_t: f64,
+    /// Whether `slope_ref` is significant at 95%. **Not** whether it is large: a tiny slope on many
+    /// recordings is real, and a steep one on four is not.
+    pub proportional: bool,
+    /// Observed range of the REFERENCE, so a caller can quote the fitted bias at each end rather
+    /// than a single number that describes neither.
+    pub ref_lo: f64,
+    pub ref_hi: f64,
+}
+
+impl Agreement {
+    /// The fitted bias at a reference value. Equals [`Agreement::bias`] everywhere when flat.
+    pub fn bias_at(&self, reference: f64) -> f64 {
+        self.intercept_ref + self.slope_ref * reference
+    }
+
+    /// Limits about the fitted line. Under proportional bias these move with the measurement, which
+    /// is the point; `loa_lo`/`loa_hi` are the flat answer and are only valid when `!proportional`.
+    pub fn loa_at(&self, reference: f64) -> (f64, f64) {
+        let half = LOA_Z * self.resid_sd;
+        (self.bias_at(reference) - half, self.bias_at(reference) + half)
+    }
 }
 
 /// The 95% limits-of-agreement multiplier. Normal-theory, as Bland and Altman define them.
@@ -95,7 +132,45 @@ pub fn bland_altman(device: &[f64], reference: &[f64]) -> Option<Agreement> {
         f64::NAN
     };
 
-    Some(Agreement { n, bias, sd, loa_lo: bias - LOA_Z * sd, loa_hi: bias + LOA_Z * sd, slope, r })
+    // The same regression against the REFERENCE, which is what the proportional-bias test needs.
+    // Residuals: SSE = Syy - Sxy^2/Sxx; t = slope/SE at n-2 df, so it needs three pairs to say
+    // anything. A perfect fit divides by zero: with a real slope that is maximally significant,
+    // with a flat one it is a constant offset and there is no proportional bias to find.
+    let rbar = reference.iter().sum::<f64>() / n as f64;
+    let rxx: f64 = reference.iter().map(|x| (x - rbar).powi(2)).sum();
+    let rxy: f64 = reference.iter().zip(&diff).map(|(x, d)| (x - rbar) * (d - bias)).sum();
+    let slope_ref = if rxx > f64::EPSILON { rxy / rxx } else { f64::NAN };
+    let (resid_sd, slope_t) = if rxx > f64::EPSILON && n > 2 {
+        let sse = (syy - rxy * rxy / rxx).max(0.0);
+        let rsd = (sse / (n - 2) as f64).sqrt();
+        let se = rsd / rxx.sqrt();
+        let t = match () {
+            _ if se > f64::EPSILON => slope_ref / se,
+            _ if slope_ref.abs() > f64::EPSILON => f64::INFINITY.copysign(slope_ref),
+            _ => 0.0,
+        };
+        (rsd, t)
+    } else {
+        (sd, f64::NAN)
+    };
+    let proportional = !slope_t.is_nan() && slope_t.abs() > crate::stats::t95_df(n - 2);
+
+    Some(Agreement {
+        n,
+        bias,
+        sd,
+        loa_lo: bias - LOA_Z * sd,
+        loa_hi: bias + LOA_Z * sd,
+        slope,
+        r,
+        slope_ref,
+        intercept_ref: bias - slope_ref * rbar,
+        resid_sd,
+        slope_t,
+        proportional,
+        ref_lo: reference.iter().copied().fold(f64::INFINITY, f64::min),
+        ref_hi: reference.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    })
 }
 
 #[cfg(test)]
@@ -183,5 +258,80 @@ mod tests {
 
         assert_eq!(None, bland_altman(&[1.0], &[1.0]), "one pair is not agreement");
         assert_eq!(None, bland_altman(&[1.0, 2.0], &[1.0]), "unpaired input is a caller bug");
+    }
+
+    /// The defect this branch exists for. A constant band and a real slope cannot both stand: once
+    /// the slope is real the bias is a LINE, and the single number describes neither end of it.
+    #[test]
+    fn a_real_slope_makes_the_bias_a_line_and_the_flat_band_wrong() {
+        let reference = [100.0, 200.0, 300.0, 400.0, 500.0];
+        let grows = [100.0, 210.0, 320.0, 430.0, 540.0];
+        let a = bland_altman(&grows, &reference).unwrap();
+
+        assert!(a.proportional, "a perfectly proportional error must be flagged, t={}", a.slope_t);
+        assert!((a.bias - 20.0).abs() < 1e-9, "the flat bias is 20 for everyone");
+        // And it is right for nobody: the fitted line runs from ~0 to ~40 across the observed range.
+        assert!(a.bias_at(a.ref_lo) < 2.0, "{}", a.bias_at(a.ref_lo));
+        assert!(a.bias_at(a.ref_hi) > 38.0, "{}", a.bias_at(a.ref_hi));
+
+        // The flat limits are ~+/-27 wide on a relationship with NO residual scatter at all.
+        assert!(a.sd > 14.0, "the raw sd carries the slope's spread: {}", a.sd);
+        assert!(a.resid_sd < 1e-6, "residual scatter about the line is nil: {}", a.resid_sd);
+        let (lo, hi) = a.loa_at(a.ref_hi);
+        assert!(hi - lo < 1e-5, "so the limits about the line collapse: {lo} .. {hi}");
+    }
+
+    /// It must branch on SIGNIFICANCE, not on the slope's size. A steep slope on few noisy pairs is
+    /// not evidence; a shallow one on many is. Branching on `|slope| > k` fails both of these.
+    #[test]
+    fn the_branch_is_significance_and_not_the_slopes_magnitude() {
+        // Steep (0.57) but only 3 pairs, and the middle one far off the line: t = 1.16 at df 1.
+        let steep = bland_altman(&[100.0, 400.0, 400.0], &[100.0, 200.0, 300.0]).unwrap();
+        assert!(steep.slope > 0.5, "must be steep to make the point: {}", steep.slope);
+        assert!(!steep.proportional, "3 scattered pairs cannot resolve it, t={}", steep.slope_t);
+
+        // Shallow (0.02) but clean and over 40 pairs: resolvable.
+        let refr: Vec<f64> = (0..40).map(|i| 100.0 + 10.0 * i as f64).collect();
+        let dev: Vec<f64> = refr
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r + 0.02 * r + if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let shallow = bland_altman(&dev, &refr).unwrap();
+        assert!(shallow.slope < 0.03, "must be shallow: {}", shallow.slope);
+        assert!(shallow.proportional, "40 clean pairs resolve it, t={}", shallow.slope_t);
+    }
+
+    /// A flat relationship must NOT be flagged, or every measure on the card reads as sloped and the
+    /// branch says nothing. Includes the perfect-fit flat case, which divides 0 by 0.
+    #[test]
+    fn a_flat_relationship_is_not_proportional() {
+        // The noise pattern has period 4 (+3,-3,-3,+3), which is orthogonal to a linear trend over
+        // each block. An alternating +/- pattern is NOT: it correlates with the pair mean and puts
+        // a real slope into what is supposed to be the flat control.
+        let refr: Vec<f64> = (0..32).map(|i| 100.0 + 10.0 * i as f64).collect();
+        let noisy: Vec<f64> = refr
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r + 12.0 + if i % 4 == 0 || i % 4 == 3 { 3.0 } else { -3.0 })
+            .collect();
+        let a = bland_altman(&noisy, &refr).unwrap();
+        assert!(!a.proportional, "a constant offset with noise is not proportional bias");
+        // Not exactly zero, and it cannot be: the pair MEAN carries half the noise the DIFFERENCE
+        // carries, so the two are coupled by construction. Judge it against the scatter it sits in
+        // - the line moves 0.164 across the whole range inside noise of +/-3.
+        const NOISE: f64 = 3.0;
+        let span = (a.bias_at(a.ref_hi) - a.bias_at(a.ref_lo)).abs();
+        assert!(span < 0.1 * NOISE, "the trend must vanish inside the scatter: moved {span}");
+
+        // Perfect constant offset: se is 0/0. It must read flat, not infinitely significant.
+        let exact = bland_altman(&[11.0, 21.0, 31.0, 41.0], &[1.0, 11.0, 21.0, 31.0]).unwrap();
+        assert_eq!(0.0, exact.slope_t, "a perfect FLAT fit is t=0, not t=inf");
+        assert!(!exact.proportional);
+        assert_eq!(10.0, exact.bias);
+
+        // Fewer than three pairs cannot fit a line at all, and must not claim to.
+        let two = bland_altman(&[1.0, 5.0], &[0.0, 1.0]).unwrap();
+        assert!(two.slope_t.is_nan() && !two.proportional, "n=2 has no residual df");
     }
 }

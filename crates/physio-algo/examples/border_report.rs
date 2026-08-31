@@ -182,7 +182,16 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
         );
     }
 
-    println!("  {:<11} {:>8} {:>8} {:>19} {:>8} {:>7}", "measure", "bias", "sd", "95% LoA", "slope", "r");
+    // A constant bias and a significant slope cannot both stand. Where the slope resolves, the bias
+    // is a LINE and the flat +/-band is the wrong scale, so the sloped row prints the fitted bias at
+    // each end of the observed range and limits about the line instead.
+    // `track` is the regression coefficient of device on reference, 1 + slope_ref: 1.0 means the
+    // reported minutes follow truth one for one, 0.0 means they are the same number whatever the
+    // truth was. A bias of zero with track near zero is a stopped clock, and reads as accurate.
+    println!(
+        "  {:<11} {:>8} {:>8} {:>19} {:>8} {:>7} {:>6}",
+        "measure", "bias", "sd|resid", "95% LoA", "slope", "t", "track"
+    );
     for (name, get) in [
         ("TST", (|s: &NightSummary| s.tst) as fn(&NightSummary) -> f64),
         ("WASO", |s| s.waso),
@@ -192,12 +201,22 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
     ] {
         let dev: Vec<f64> = pairs.iter().map(|(d, _)| get(d)).collect();
         let refr: Vec<f64> = pairs.iter().map(|(_, r)| get(r)).collect();
-        match bland_altman(&dev, &refr) {
-            Some(a) => println!(
-                "  {name:<11} {:>8.1} {:>8.1} {:>8.1} .. {:>6.1} {:>8.3} {:>7.3}",
-                a.bias, a.sd, a.loa_lo, a.loa_hi, a.slope, a.r
-            ),
-            None => println!("  {name:<11} too few pairs"),
+        let Some(a) = bland_altman(&dev, &refr) else {
+            println!("  {name:<11} too few pairs");
+            continue;
+        };
+        if a.proportional {
+            let (lo, hi) = a.loa_at(a.ref_hi);
+            println!(
+                "  {name:<11} {:>8} {:>8.1} {:>8.1} .. {:>6.1} {:>8.3} {:>7.1} {:>6.2}  SLOPED: bias {:+.1} at {:.0} to {:+.1} at {:.0}",
+                "-- line", a.resid_sd, lo, hi, a.slope_ref, a.slope_t, 1.0 + a.slope_ref,
+                a.bias_at(a.ref_lo), a.ref_lo, a.bias_at(a.ref_hi), a.ref_hi
+            );
+        } else {
+            println!(
+                "  {name:<11} {:>8.1} {:>8.1} {:>8.1} .. {:>6.1} {:>8.3} {:>7.1} {:>6.2}",
+                a.bias, a.sd, a.loa_lo, a.loa_hi, a.slope_ref, a.slope_t, 1.0 + a.slope_ref
+            );
         }
     }
     // D11: kappa is a ratio of linear forms, so its own optimal rule is not argmax of the posterior.

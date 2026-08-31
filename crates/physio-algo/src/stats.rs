@@ -1,6 +1,20 @@
 //! Small pure statistics shared by the metrics: mean, the series extremes, sample/population SD, OLS
 //! slope, median, median sample gap, percentile, and the robust pulsatile amplitude (p95 − p5).
 
+/// Textbook two-sided 95% critical values, keyed by degrees of freedom.
+const T95: [(usize, f64); 12] = [
+    (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (9, 2.262), (12, 2.179),
+    (19, 2.093), (30, 2.042), (39, 2.023), (59, 2.001), (119, 1.980),
+];
+
+/// Two-sided 95% critical value at `df`, floored at df 1 (the widest, most conservative row); 1.96
+/// is ~11% too narrow at df 12. Rounds df DOWN to the previous row — the value falls as df rises, so
+/// rounding up would return a bar narrower than the truth.
+pub fn t95_df(df: usize) -> f64 {
+    let df = df.max(1);
+    T95.iter().rev().find(|(k, _)| *k <= df).expect("the table starts at df 1").1
+}
+
 /// Arithmetic mean; `0.0` for an empty slice.
 pub fn mean(xs: &[f64]) -> f64 {
     if xs.is_empty() {
