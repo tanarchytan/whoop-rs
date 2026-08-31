@@ -32,8 +32,11 @@ cargo run -p whoopctl -- scan
 # multi-GB tree outside the repo, so a green suite says nothing about staging. Run it whenever
 # anything under sleep/ changes:
 cargo test --release -p physio-algo --test dataset_parity -- --ignored --nocapture
-#   expect: 5 passed, 0 failed; dreamt 0.3123 (n=100), aauwss 0.4103 (n=13), sleep-accel 0.3780 (n=31)
+#   expect: 6 passed, 0 failed; dreamt 0.3082 (n=100), aauwss 0.4120 (n=13), sleep-accel 0.3780 (n=31)
 #   corpus: sleep-benchmark/fixtures_multi_clean3 (the pinned root; WHOOP_SLEEP_FIXTURES overrides)
+# Those moved on 2026-08-31 when beats sharing a whole-second stamp stopped being stamped at the
+# same instant: aauwss +0.0017 (real beats), dreamt -0.0041 (34% of its intervals are synthesised
+# identical by the fixture builder), sleep-accel unchanged (carries no R-R at all).
 # Those three are the POOLED-confusion kappa. The examples/ harnesses print the PER-NIGHT MEDIAN of the
 # SAME staging: 0.290 / 0.425 / 0.332. Both are `stage_v2` UNREFINED — no PSG cohort carries a step
 # stream, so refine_wake declines on all 144 (dataset_parity.rs:20). Never call either one "the app

@@ -19,6 +19,14 @@
 //! WITHOUT its respiratory channel — cardiac and motion only. `sleep-accel` is exactly that cohort and
 //! its gate says so; the census asserts the split so a later graft cannot leave the name wrong.
 //!
+//! THE ANALYSIS WINDOW, declared rather than implied. Each fixture's `meta.txt` fixes `[w0, w1]` and
+//! an epoch count; the stager runs over exactly that span, and an epoch is SCORED only if `truth.csv`
+//! carries a label for it. So the denominator is labelled epochs inside the fixture's own span - not
+//! the recording, not the in-bed period, and not a detected sleep period. No cohort here is trimmed
+//! to a detected span, so onset and offset error cannot enter these numbers and cannot be read out of
+//! them either. Two runs are comparable only if they share this window; a kappa over a different span
+//! is a different measurement wearing the same name.
+//!
 //! The stagers run `stage_v2` alone. No PSG cohort carries a step stream at one sample a minute, so
 //! `refine_wake` would decline on every one of them; this is the unrefined path and it is the only path
 //! these cohorts can score.
@@ -305,7 +313,7 @@ fn assert_cohort(ds: &str, s: &Scored, target: f64, expect_n: usize) {
 fn v2_dreamt_4class_kappa_matches_shipped() {
     let s = score_dataset("dreamt", true);
     assert_eq!(s.rr_nights, 100, "DREAMT: {} of 100 nights carry R-R, not all 100", s.rr_nights);
-    assert_cohort("dreamt", &s, 0.311, 100);
+    assert_cohort("dreamt", &s, 0.308, 100);
 }
 
 #[test]

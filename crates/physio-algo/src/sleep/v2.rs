@@ -275,18 +275,7 @@ fn features(
         let hr_var = std_of_seconds(e - 150, e + 30 + 150);
         let hr_flat11 = std_of_seconds(e - 330, e + 30 + 360);
 
-        let mut beats: Vec<(f64, f64)> = Vec::new();
-        let mut bs = e - 90;
-        while bs < e + 120 {
-            if let Some(vs) = rr_by.get(&bs) {
-                for v in vs {
-                    beats.push((bs as f64, v.clamp(300.0, 2000.0)));
-                }
-            }
-            bs += 1;
-        }
-        beats.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.partial_cmp(&b.1).unwrap()));
-        let resp_reg = resp_regularity(&beats);
+        let resp_reg = resp_regularity(&beats_in(&rr_by, e - 90, e + 120));
 
         raws.push(Raw {
             start: e,
@@ -537,6 +526,27 @@ fn idx_to_stage(i: usize) -> SleepStage {
         LIGHT => SleepStage::Light,
         _ => SleepStage::Wake,
     }
+}
+
+/// Beats in `[lo, hi)` from the per-second buckets, each placed by its OWN interval. Several beats can
+/// share one whole-second stamp; placing them all at that second collapses their spacing and hands the
+/// tachogram a flat step where the wearer had a varying one.
+fn beats_in(rr_by: &HashMap<i64, Vec<f64>>, lo: i64, hi: i64) -> Vec<(f64, f64)> {
+    let mut beats: Vec<(f64, f64)> = Vec::new();
+    for bs in lo..hi {
+        let Some(vs) = rr_by.get(&bs) else { continue };
+        let mut off = 0.0;
+        for (k, v) in vs.iter().enumerate() {
+            let ms = v.clamp(300.0, 2000.0);
+            // An interval is the gap from the PREVIOUS beat, so the first of a run sits at the stamp.
+            if k > 0 {
+                off += ms / 1000.0;
+            }
+            beats.push((bs as f64 + off, ms));
+        }
+    }
+    beats.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.partial_cmp(&b.1).unwrap()));
+    beats
 }
 
 /// The log-emissions the decoder is handed, under whichever anchor `p` selects. An onset-anchored prior
@@ -1061,6 +1071,37 @@ mod terms_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Several beats can arrive under ONE whole-second stamp. Placing them all at that second makes
+    /// the tachogram flat where the wearer varied, which is what a spectral feature then reads.
+    #[test]
+    fn beats_sharing_a_stamp_are_spaced_by_their_own_intervals() {
+        let mut rr: HashMap<i64, Vec<f64>> = HashMap::new();
+        rr.insert(10, vec![800.0, 900.0, 700.0]);
+        rr.insert(11, vec![1000.0]);
+        let got = beats_in(&rr, 10, 12);
+
+        // The first of a run sits ON the stamp; each later beat is its own interval further along.
+        let rounded: Vec<(f64, f64)> =
+            got.iter().map(|(t, m)| ((t * 10.0).round() / 10.0, *m)).collect();
+        assert_eq!(
+            vec![(10.0, 800.0), (10.9, 900.0), (11.0, 1000.0), (11.6, 700.0)],
+            rounded
+        );
+        let times: Vec<f64> = got.iter().map(|b| b.0).collect();
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "no two beats may share an instant: {times:?}");
+    }
+
+    /// The clamp decides the SPACING as well as the value.
+    #[test]
+    fn an_implausible_interval_is_clamped_before_it_places_the_next_beat() {
+        let mut rr: HashMap<i64, Vec<f64>> = HashMap::new();
+        rr.insert(0, vec![800.0, 9000.0]);
+        let got = beats_in(&rr, 0, 1);
+        assert_eq!(2000.0, got[1].1, "9000 ms clamps to the 2000 ms ceiling");
+        assert!((got[1].0 - 2.0).abs() < 1e-9, "and the clamped value spaces it: {}", got[1].0);
+    }
+
     use crate::sleep::input::RrRun;
 
     /// One minute of HR with gravity over only the first half: the epochs that saw the accelerometer
