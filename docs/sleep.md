@@ -35,6 +35,7 @@ the app's edit self-heal) and the main-night functions (`main_night_index/_group
 | `cardiac.rs` | interval order statistics over one beat window — seven quantiles absolute, seven detrended, mean HR, RMSSD/pNN50/mean\|ΔRR\|. One producer for the stager and the screening harnesses, so what is measured is what runs. **Not yet on any staging path** |
 | `hrv_bands.rs` | frequency-domain HRV (VLF/LF/HF) off a resampled tachogram. Rejected by a permuted null on our channel; kept because the rejection is a measurement |
 | `markov_loss.rs` | a staging loss that prices misplaced BOUNDARIES as well as misclassified epochs — per-class epoch cost, invented-boundary cost, missed-boundary cost. Scores a finished hypnogram; **nothing decodes with it yet** |
+| `sequence.rs` | hypnogram STRUCTURE, which no confusion-matrix number can see: per-class fragmentation, bout-length distributions and their Wasserstein-1 distance to truth, upper-tail mass, and a rare-transition rate whose rare set is derived from the reference itself. Accumulates over time-CONTIGUOUS segments, so a labelling hole never becomes a transition. `min_run_smooth` is the instrument's control, not a staging step |
 | `metrics.rs` | the scoring primitives: `kappa4`/`kappa3`/`merge3`, `recall`/`precision`/`specificity`/`f1`, `balanced_accuracy`, `min_recall`, `per_recording`, `bout_score`, `bootstrap_kappa_ci` (resamples RECORDINGS), and the kappa-bonus pair. **Per-class RECALL is the selection object; F1 is a diagnostic** — F1's denominator carries the class priors, so it moves with prevalence exactly as kappa does |
 | `agreement.rs` | night-summary agreement: `summarise` (TST/WASO/latency/efficiency/stage minutes) and `bland_altman` (bias, 95% LoA, proportional-bias slope) |
 | `movement.rs` / `posture.rs` | the motion families the epoch grid buckets |
@@ -67,7 +68,7 @@ HR-confirm median, span-cap, morning-stillness, motion-corroborated wake, the re
 selection reasons, habitual learning). `golden_tests.rs` pins the V2 hypnogram frozen-golden.
 `tests/dataset_parity.rs` (`--ignored`) asserts the DREAMT, AAUWSS and sleep-accel kappas and prints a
 sheet naming every fixture set with what its truth column IS, so no set sits unscored and unnamed.
-**1181 workspace tests, 0 clippy** (measured 2026-08-31; re-derive, never carry forward)**.**
+**1192 workspace tests, 0 clippy** (measured 2026-08-31; re-derive, never carry forward)**.**
 
 **The `#[ignore]`d suite is not optional and nothing else runs it** — the cohort gates, every negative
 control, and the source-text cross-checks that stop two files drifting apart all live there. Two had
