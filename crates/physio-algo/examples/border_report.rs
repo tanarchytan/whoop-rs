@@ -22,7 +22,8 @@ mod common;
 use common::{dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, require_psg};
 use physio_algo::sleep::agreement::{bland_altman, summarise, NightSummary};
 use physio_algo::sleep::metrics::{
-    bootstrap_kappa_ci, confusion4, kappa3, kappa4, merge3, recall, Confusion4,
+    bootstrap_kappa_ci, confusion4, kappa3, kappa4, kappa_after_reassignment, kappa_class_bonus,
+    merge3, recall, truth_marginals, Confusion4,
 };
 use physio_algo::sleep::pipeline::{run, SleepConfig};
 use physio_algo::sleep::{epoch_starts_v2, params::Params, SleepInput};
@@ -141,6 +142,21 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
             None => println!("  {name:<11} too few pairs"),
         }
     }
+    // D11: kappa is a ratio of linear forms, so its own optimal rule is not argmax of the posterior.
+    let (bonus, t) = (kappa_class_bonus(&cm), truth_marginals(&cm));
+    let bcells: Vec<String> =
+        (0..4).map(|c| format!("{} +{:.3}", CLASS_NAMES[c], bonus[c])).collect();
+    println!("  kappa bonus (D11): {}", bcells.join("   "));
+    // The exchange rate: relabel 1% of epochs toward the rarest class, correct count untouched.
+    let rarest = (0..4).min_by(|a, b| t[*a].total_cmp(&t[*b])).unwrap_or(0);
+    let commonest = (0..4).max_by(|a, b| t[*a].total_cmp(&t[*b])).unwrap_or(0);
+    if let Some(k2) = kappa_after_reassignment(&cm, commonest, rarest, 0.01) {
+        println!(
+            "  1% of predictions {} -> {} at the SAME accuracy: kappa {:.4} -> {:.4} ({:+.4})",
+            CLASS_NAMES[commonest], CLASS_NAMES[rarest], kappa4(&cm), k2, k2 - kappa4(&cm)
+        );
+    }
+
     let sparse = nights.len() - pairs.len();
     if sparse > 0 {
         println!("  ({sparse} night(s) too sparsely labelled to summarise, scored epoch-wise only)");

@@ -68,6 +68,56 @@ pub fn merge3(cm: &Confusion4) -> Confusion3 {
     out
 }
 
+/// Truth marginals of a confusion matrix: the share of epochs each class truly holds.
+pub fn truth_marginals(cm: &Confusion4) -> [f64; 4] {
+    let tot: i64 = cm.iter().flatten().sum();
+    let mut out = [0.0; 4];
+    if tot == 0 {
+        return out;
+    }
+    for (i, row) in cm.iter().enumerate() {
+        out[i] = row.iter().sum::<i64>() as f64 / tot as f64;
+    }
+    out
+}
+
+/// The bonus kappa's OWN optimal rule adds to each class's posterior.
+///
+/// `1 - kappa` is a ratio of two linear forms in the confusion matrix, so the rule that maximises it
+/// is not `argmax` of the posterior: it maximises `eta_j + (1 - kappa)(1 - t_j)`. The second term is
+/// this. It grows as a class gets RARER, so kappa pays for calling rare classes whether or not the
+/// evidence improved — which is why an engine must not be selected on kappa alone.
+pub fn kappa_class_bonus(cm: &Confusion4) -> [f64; 4] {
+    let k = kappa_of(cm);
+    let t = truth_marginals(cm);
+    std::array::from_fn(|j| (1.0 - k) * (1.0 - t[j]))
+}
+
+/// Kappa after relabelling `mass` (a fraction of all epochs) from predicted class `from` to predicted
+/// class `to`, leaving the number CORRECT untouched.
+///
+/// Same accuracy, different kappa. What it costs to move is the exchange rate between the metric and
+/// nothing at all; a gain smaller than this is the metric moving, not the engine.
+pub fn kappa_after_reassignment(cm: &Confusion4, from: usize, to: usize, mass: f64) -> Option<f64> {
+    let tot: i64 = cm.iter().flatten().sum();
+    if tot == 0 || from > 3 || to > 3 || !(0.0..=1.0).contains(&mass) {
+        return None;
+    }
+    let tot = tot as f64;
+    let po = (0..4).map(|i| cm[i][i]).sum::<i64>() as f64 / tot;
+    let t = truth_marginals(cm);
+    let mut q: [f64; 4] =
+        std::array::from_fn(|j| cm.iter().map(|r| r[j]).sum::<i64>() as f64 / tot);
+    // A class cannot give away more prediction mass than it holds.
+    if mass > q[from] {
+        return None;
+    }
+    q[from] -= mass;
+    q[to] += mass;
+    let pe: f64 = (0..4).map(|j| t[j] * q[j]).sum();
+    Some(if pe >= 1.0 { 0.0 } else { (po - pe) / (1.0 - pe) })
+}
+
 fn splitmix(x: u64) -> u64 {
     let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -255,6 +305,55 @@ pub fn paired_bar(deltas: &[f64]) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bonus is what makes kappa unsafe to select on: it pays MORE for a rarer class, so a rule
+    /// that maximises kappa is not the rule that maximises accuracy.
+    #[test]
+    fn the_kappa_bonus_grows_as_a_class_gets_rarer() {
+        // Truth marginals 0.5 / 0.3 / 0.15 / 0.05, imperfectly staged so kappa is under 1.
+        let cm: Confusion4 = [[40, 5, 3, 2], [6, 20, 3, 1], [3, 3, 8, 1], [1, 1, 1, 2]];
+        let t = truth_marginals(&cm);
+        assert!((t[0] - 0.50).abs() < 1e-12 && (t[3] - 0.05).abs() < 1e-12, "{t:?}");
+        let b = kappa_class_bonus(&cm);
+        assert!(b[3] > b[2] && b[2] > b[1] && b[1] > b[0], "rarer must pay more: {b:?}");
+
+        // At kappa 1 there is nothing left to gain, so every bonus vanishes - the two claims need
+        // different matrices, and asserting both on one is how this test first contradicted itself.
+        let perfect: Confusion4 = [[50, 0, 0, 0], [0, 30, 0, 0], [0, 0, 15, 0], [0, 0, 0, 5]];
+        let pb = kappa_class_bonus(&perfect);
+        assert!(pb.iter().all(|x| x.abs() < 1e-12), "a perfect matrix has no bonus to give: {pb:?}");
+    }
+
+    /// Hand-computed. Kappa 0.5 and a class holding 20% of the truth gives (1-0.5)(1-0.2) = 0.4.
+    #[test]
+    fn the_bonus_is_one_minus_kappa_times_one_minus_the_marginal() {
+        let cm: Confusion4 = [[40, 10, 5, 5], [10, 15, 3, 2], [5, 3, 8, 4], [5, 2, 4, 9]];
+        let (k, t) = (kappa4(&cm), truth_marginals(&cm));
+        let b = kappa_class_bonus(&cm);
+        for j in 0..4 {
+            assert!((b[j] - (1.0 - k) * (1.0 - t[j])).abs() < 1e-12, "class {j}");
+        }
+    }
+
+    /// Accuracy is untouched and kappa still moves. That gap is the metric, not the engine, and it is
+    /// the whole reason D11 says kappa is a report rather than an objective.
+    #[test]
+    fn relabelling_toward_a_rarer_class_moves_kappa_at_constant_accuracy() {
+        // Light (class 1) is common in truth, deep (class 2) is rare.
+        let cm: Confusion4 = [[30, 8, 2, 4], [7, 60, 6, 5], [3, 9, 10, 2], [5, 7, 3, 25]];
+        let base = kappa4(&cm);
+        let moved = kappa_after_reassignment(&cm, 1, 2, 0.016).expect("mass is available");
+        assert!(moved > base, "light -> deep must raise kappa: {base:.6} -> {moved:.6}");
+
+        assert_eq!(
+            Some(base),
+            kappa_after_reassignment(&cm, 1, 2, 0.0),
+            "moving nothing must change nothing"
+        );
+        assert_eq!(None, kappa_after_reassignment(&cm, 1, 2, 0.99), "cannot give away mass it lacks");
+        assert_eq!(None, kappa_after_reassignment(&cm, 4, 0, 0.01), "class 4 does not exist");
+    }
+
 
     /// Hand-computed: totals 30, 22 on the diagonal, every row and column 10, so pe is exactly 1/3
     /// and kappa is exactly 0.6. A formula that drifts cannot land on a round number by accident.
