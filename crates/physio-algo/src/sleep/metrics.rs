@@ -172,6 +172,52 @@ pub fn precision(cm: &Confusion4, class: usize) -> Option<f64> {
     (called > 0).then(|| cm[class][class] as f64 / called as f64)
 }
 
+/// Harmonic mean of this class's recall and precision. A DIAGNOSTIC, not the selection objective:
+/// its denominator carries the predicted share, so it moves when class prevalence moves even though
+/// the classifier has not. [`balanced_accuracy`] is the invariant counterpart.
+pub fn f1(cm: &Confusion4, class: usize) -> Option<f64> {
+    match (recall(cm, class), precision(cm, class)) {
+        (Some(r), Some(p)) if r + p > 0.0 => Some(2.0 * r * p / (r + p)),
+        _ => None,
+    }
+}
+
+/// Mean of the per-class recalls over the classes that occur. Each term conditions on TRUTH, so a
+/// change in class balance leaves every one of them alone - which is what makes this, and not a mean
+/// of F1, safe to select an engine on.
+pub fn balanced_accuracy(cm: &Confusion4) -> Option<f64> {
+    let r: Vec<f64> = (0..4).filter_map(|c| recall(cm, c)).collect();
+    (!r.is_empty()).then(|| r.iter().sum::<f64>() / r.len() as f64)
+}
+
+/// The worst per-class recall. The mean can hide a class scoring zero; this cannot, and it is the
+/// scalarisation to prefer when one rare class is the thing being fixed.
+pub fn min_recall(cm: &Confusion4) -> Option<f64> {
+    (0..4).filter_map(|c| recall(cm, c)).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.min(v))))
+}
+
+/// Mean and spread of a per-confusion statistic across RECORDINGS, over those that can carry it.
+/// A pooled matrix weights a long night more than a short one and reports no spread at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spread {
+    pub mean: f64,
+    /// Population standard deviation across recordings; 0.0 when only one contributes.
+    pub sd: f64,
+    /// Recordings on which the statistic was defined. Fewer than the cohort means a class is absent
+    /// from some nights, and the mean is over a different set than the cohort.
+    pub n: usize,
+}
+
+pub fn per_recording(cms: &[Confusion4], f: impl Fn(&Confusion4) -> Option<f64>) -> Option<Spread> {
+    let v: Vec<f64> = cms.iter().filter_map(&f).collect();
+    if v.is_empty() {
+        return None;
+    }
+    let mean = v.iter().sum::<f64>() / v.len() as f64;
+    let sd = (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / v.len() as f64).sqrt();
+    Some(Spread { mean, sd, n: v.len() })
+}
+
 /// Share of everything that is NOT this class correctly not called it. Recall's counterweight: a scorer
 /// that calls every epoch wake has wake recall 1.0 and wake specificity 0.0.
 pub fn specificity(cm: &Confusion4, class: usize) -> Option<f64> {
@@ -658,5 +704,78 @@ mod tests {
     fn fewer_than_two_pairs_cannot_answer() {
         assert!(paired_bar(&[]).is_none());
         assert!(paired_bar(&[0.1]).is_none());
+    }
+
+    /// A confusion matrix for a FIXED classifier `m[truth][pred]` under the given class prevalences,
+    /// scaled to whole counts. Changing only `pri` changes the cohort, never the engine.
+    fn under(pri: [f64; 4], m: [[f64; 4]; 4]) -> Confusion4 {
+        let mut cm = [[0i64; 4]; 4];
+        for t in 0..4 {
+            for p in 0..4 {
+                cm[t][p] = (pri[t] * m[t][p] * 1_000_000.0).round() as i64;
+            }
+        }
+        cm
+    }
+
+    /// One fixed engine: decent wake and light, deep leaking to light as every published non-EEG
+    /// stager reports, mediocre REM.
+    const FIXED: [[f64; 4]; 4] = [
+        [0.70, 0.20, 0.02, 0.08],
+        [0.10, 0.78, 0.06, 0.06],
+        [0.02, 0.60, 0.30, 0.08],
+        [0.12, 0.40, 0.03, 0.45],
+    ];
+
+    #[test]
+    fn recall_is_prevalence_invariant_and_f1_is_not() {
+        let cohorts = [
+            [0.250, 0.610, 0.034, 0.106],
+            [0.100, 0.550, 0.200, 0.150],
+            [0.450, 0.400, 0.050, 0.100],
+        ];
+        let cms: Vec<Confusion4> = cohorts.into_iter().map(|p| under(p, FIXED)).collect();
+        for c in 0..4 {
+            let rs: Vec<f64> = cms.iter().map(|cm| recall(cm, c).unwrap()).collect();
+            let fs: Vec<f64> = cms.iter().map(|cm| f1(cm, c).unwrap()).collect();
+            let span = |v: &[f64]| v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min);
+            assert!(span(&rs) < 1e-4, "class {c} recall moved across cohorts: {rs:?}");
+            assert!(span(&fs) > 0.05, "class {c} F1 should move with prevalence: {fs:?}");
+        }
+        // Deep is the class it distorts most, and in the direction that flatters a deep-rich cohort.
+        assert!(f1(&cms[1], 2).unwrap() - f1(&cms[0], 2).unwrap() > 0.15);
+        for cm in &cms {
+            assert!((balanced_accuracy(cm).unwrap() - 0.5575).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn min_recall_reports_the_class_the_mean_hides() {
+        let cm = under([0.25, 0.61, 0.034, 0.106], FIXED);
+        assert!((min_recall(&cm).unwrap() - 0.30).abs() < 1e-6);
+        // A class that never occurs is absent from both, rather than scoring zero.
+        let mut none_deep = cm;
+        none_deep[2] = [0; 4];
+        assert!(min_recall(&none_deep).unwrap() > 0.30);
+    }
+
+    #[test]
+    fn per_recording_averages_nights_not_epochs_and_counts_who_could_answer() {
+        let big = under([0.25, 0.61, 0.034, 0.106], FIXED);
+        let mut small = big;
+        for row in small.iter_mut() {
+            for v in row.iter_mut() {
+                *v /= 100;
+            }
+        }
+        let mut no_deep = big;
+        no_deep[2] = [0; 4];
+
+        // Pooling lets the long night dominate; averaging recordings gives each one vote.
+        let s = per_recording(&[big, small, no_deep], |cm| recall(cm, 2)).unwrap();
+        assert_eq!(s.n, 2, "the deep-free night cannot answer and must not be counted as zero");
+        assert!((s.mean - 0.30).abs() < 1e-3);
+        assert!(s.sd < 1e-3);
+        assert!(per_recording(&[no_deep], |cm| recall(cm, 2)).is_none());
     }
 }

@@ -22,8 +22,9 @@ mod common;
 use common::{dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, require_psg};
 use physio_algo::sleep::agreement::{bland_altman, summarise, NightSummary};
 use physio_algo::sleep::metrics::{
-    bootstrap_kappa_ci, confusion4, kappa3, kappa4, kappa_after_reassignment, kappa_class_bonus,
-    merge3, precision, recall, truth_marginals, Confusion4,
+    balanced_accuracy, bootstrap_kappa_ci, confusion4, f1, kappa3, kappa4,
+    kappa_after_reassignment, kappa_class_bonus, merge3, min_recall, per_recording, precision,
+    recall, truth_marginals, Confusion4, Spread,
 };
 use physio_algo::sleep::pipeline::{run, SleepConfig};
 use physio_algo::sleep::{epoch_starts_v2, params::Params, SleepInput};
@@ -116,24 +117,38 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
     };
     println!("  kappa4 {:.4}   kappa3 {:.4}   95% CI {ci_txt}", kappa4(&cm), kappa3(&merge3(&cm)));
 
-    // Recall alone is BUYABLE - calling a class more often raises it. Precision and the predicted
-    // share are what separate a better engine from a shifted threshold.
+    // THE SELECTION LINE. Per-class recall conditions on truth, so a cohort's class balance cannot
+    // move it; F1 and precision carry the predicted share and do move, which is why they are
+    // reported beside it and never selected on.
+    let ba = |c: &Confusion4| balanced_accuracy(c);
+    let show = |s: Option<Spread>| {
+        s.map_or("  -  ".into(), |s| format!("{:.3} +/-{:.3} (n={})", s.mean, s.sd, s.n))
+    };
+    println!(
+        "  balanced acc {:.4}  min recall {:.4}   per-night {}",
+        balanced_accuracy(&cm).unwrap_or(f64::NAN),
+        min_recall(&cm).unwrap_or(f64::NAN),
+        show(per_recording(&cms, ba))
+    );
+
     let tot: i64 = cm.iter().flatten().sum();
     let fmt = |v: Option<f64>| v.map_or("  -  ".into(), |x| format!("{x:.3}"));
-    println!("  {:<7} {:>8} {:>10} {:>7} {:>9} {:>9}", "class", "recall", "precision", "F1", "pred %", "truth %");
+    println!(
+        "  {:<7} {:>8} {:>22} {:>10} {:>7} {:>9} {:>9}",
+        "class", "recall", "recall per-night", "precision", "F1", "pred %", "truth %"
+    );
     let t = truth_marginals(&cm);
     for c in 0..4 {
         let q = cm.iter().map(|r| r[c]).sum::<i64>() as f64 / tot.max(1) as f64;
-        // Per-class F1 is the SELECTION criterion; the summary kappa below it is a report line.
-        // Cicchetti & Feinstein's p_pos is exactly this, and Kraemer recommends against a K>2
-        // weighted kappa as a validity measure at all.
-        let f1 = match (recall(&cm, c), precision(&cm, c)) {
-            (Some(r), Some(p)) if r + p > 0.0 => Some(2.0 * r * p / (r + p)),
-            _ => None,
-        };
         println!(
-            "  {:<7} {:>8} {:>10} {:>7} {:>8.1}% {:>8.1}%",
-            CLASS_NAMES[c], fmt(recall(&cm, c)), fmt(precision(&cm, c)), fmt(f1), q * 100.0, t[c] * 100.0
+            "  {:<7} {:>8} {:>22} {:>10} {:>7} {:>8.1}% {:>8.1}%",
+            CLASS_NAMES[c],
+            fmt(recall(&cm, c)),
+            show(per_recording(&cms, |x| recall(x, c))),
+            fmt(precision(&cm, c)),
+            fmt(f1(&cm, c)),
+            q * 100.0,
+            t[c] * 100.0
         );
     }
 
