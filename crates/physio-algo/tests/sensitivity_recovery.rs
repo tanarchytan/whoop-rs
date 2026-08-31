@@ -164,14 +164,25 @@ const GATE_OUT_OF_RANGE_BASELINE: f64 = 50.0;
 const GATE_REJECTED_NIGHT_N_VALID: i32 = 5;
 const GATE_REJECTED_NIGHT_SINCE: i32 = 1;
 /// baselines.rs:319-320 — `assert!(s.baseline < 50.0, ...);` / `assert!(s.n_valid >= 14, ...)`.
-const GATE_CONVERGED_BELOW: f64 = 50.0;
-const GATE_CONVERGED_MIN_N: i32 = 14;
 /// baselines.rs:365-366 — `assert_eq!(old.n_valid, 12); assert_eq!(new.n_valid, 9);`
 const GATE_PER_METRIC_N_VALID: i32 = 12;
 const GATE_CONJUNCTION_N_VALID: i32 = 9;
 /// baselines.rs:369-370 — three nights must read `SkinTempImplausible`.
 const GATE_NIGHTSTAND_REJECTIONS: usize = 3;
 /// baselines.rs:422-425 — `median_c == 33.4`, `max_c == 34.0`, `(n_kept, n_total) == (3, 4)`.
+/// Shipped baseline constants the replica pins against. These are DELIBERATELY not read from
+/// `BaseParams`: an expectation that follows the arm moves with the mutation and sees nothing.
+const GATE_EARLY_ADAPT_NIGHTS: i32 = 8;
+const GATE_EARLY_HALF_LIFE_B: f64 = 3.0;
+const GATE_MIN_NIGHTS_TRUST: i32 = 14;
+const GATE_STALE_DAYS: i32 = 14;
+const GATE_WINSOR_K: f64 = 3.0;
+/// Deviation 26 > 5 x 5, so this night is seen and never folded. Deviation 25 is not PAST it.
+const GATE_OUTLIER_HELD: f64 = 71.0;
+const GATE_OUTLIER_FOLDED: f64 = 70.0;
+/// One 200 ms night on a young HRV centre of 45, from `a_young_baseline_has_no_outlier_guard`.
+const GATE_YOUNG_OUTLIER_BASELINE: f64 = 52.736230276;
+
 const GATE_SKIN_MEDIAN_C: f64 = 33.4;
 const GATE_SKIN_MAX_C: f64 = 34.0;
 const GATE_SKIN_KEPT_TOTAL: (usize, usize) = (3, 4);
@@ -2085,7 +2096,7 @@ fn converged(a: &BaseArm) -> BaselineState {
 
 /// The cohort this control replicates: EVERY `#[test]` in `baselines.rs`, counted from the source so a
 /// test added or removed there fails loudly here instead of silently shrinking what the control measures.
-const BASELINES_SHIPPED_TESTS: usize = 13;
+const BASELINES_SHIPPED_TESTS: usize = 20;
 
 /// One `each_channel_can_reject_alone` row: spoil a single channel, expect a single verdict.
 type ChannelProbe = (fn(&mut NightChannels), NightVerdict);
@@ -2094,7 +2105,7 @@ fn baselines_shipped_test_count() -> usize {
     include_str!("../src/baselines.rs").matches("#[test]").count()
 }
 
-/// Replica of all thirteen `#[test]`s in `baselines.rs`, in source order. A partial replica understates
+/// Replica of all twenty `#[test]`s in `baselines.rs`, in source order. A partial replica understates
 /// the gate: `each_channel_can_reject_alone` (:383) is the only test that pins `MIN_SLEEP_SECS` downward
 /// and `WORN_SKIN_TEMP_C.1` upward, and `rejected_night_skip_and_holds` (:374) the only one that pins
 /// fold order.
@@ -2130,12 +2141,101 @@ fn base_gate_holds(a: &BaseArm) -> bool {
     {
         return false;
     }
-    // :315 normal_update_converges
-    let s = converged(a);
-    if !(s.baseline < GATE_CONVERGED_BELOW)
-        || s.n_valid < GATE_CONVERGED_MIN_N
-        || s.status != BaselineStatus::Trusted
+    // :327 fold_reproduces_the_ewma_centre_a_z_score_is_measured_against — the closed form, NOT the
+    // old `baseline < 50` gate, which "return the last value" and "return the mean" both satisfy.
+    let mut s = update_with(&a.p, None, Some(50.0), &a.cfg);
+    // FIXED probe count and SHIPPED half-life in the expectation: if both followed the arm they
+    // would move together and the mutation would be invisible, which is how the old gate failed.
+    let young_folds = GATE_EARLY_ADAPT_NIGHTS - 1;
+    for _ in 0..young_folds {
+        s = update_with(&a.p, Some(s), Some(45.0), &a.cfg);
+    }
+    let young = 45.0 + 5.0 * 0.5f64.powf(young_folds as f64 / GATE_EARLY_HALF_LIFE_B);
+    if (s.baseline - young).abs() > REPLICA_TOL || s.n_valid != GATE_EARLY_ADAPT_NIGHTS {
+        return false;
+    }
+    for _ in 0..13 {
+        s = update_with(&a.p, Some(s), Some(45.0), &a.cfg);
+    }
+    let steady = 45.0 + (young - 45.0) * 0.5f64.powf(13.0 / a.cfg.half_life_b);
+    if (s.baseline - steady).abs() > REPLICA_TOL || s.spread != a.cfg.floor_spread {
+        return false;
+    }
+    // :349 a_do_nothing_centre_fails_the_fold — a centre this gate cannot tell apart from the fold is
+    // a centre the gate does not test. Each must MISS the fold on at least one of these series.
+    let converging: Vec<Option<f64>> =
+        std::iter::once(Some(50.0)).chain(std::iter::repeat_n(Some(45.0), 20)).collect();
+    let with_outlier: Vec<Option<f64>> =
+        std::iter::repeat_n(Some(45.0), 12).chain(std::iter::once(Some(120.0))).collect();
+    for series in [&converging, &with_outlier] {
+        let folded = fold_with(&a.p, series, &a.cfg).baseline;
+        let last = series.iter().flatten().next_back().copied().unwrap();
+        let xs: Vec<f64> = series.iter().flatten().copied().collect();
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        if (last - folded).abs() <= 0.05 && (mean - folded).abs() <= 0.05 {
+            return false;
+        }
+    }
+    // :381 a_hard_outlier_night_is_seen_but_never_folded — past `hard_outlier_k` spreads the night is
+    // SEEN but never folded; just inside it folds, winsorised to `winsor_k` spreads.
+    // n_valid must be PAST `early_adapt_nights`, or the young branch runs and there is no
+    // hard-outlier limb to test at all.
+    let base = BaselineState { n_valid: a.p.early_adapt_nights + 2, ..seeded(45.0) };
+    let held_out = update_with(&a.p, Some(base), Some(GATE_OUTLIER_HELD), &a.cfg);
+    if held_out.baseline != 45.0
+        || held_out.n_valid != base.n_valid
+        || held_out.nights_since_update != 0
     {
+        return false;
+    }
+    let folded = update_with(&a.p, Some(base), Some(GATE_OUTLIER_FOLDED), &a.cfg);
+    let lb = 1.0 - 0.5f64.powf(1.0 / a.cfg.half_life_b);
+    if folded.n_valid != base.n_valid + 1
+        || (folded.baseline - (45.0 + GATE_WINSOR_K * base.spread * lb)).abs() > REPLICA_TOL
+    {
+        return false;
+    }
+    // :398 winsorised_fold_lifts_the_spread_off_its_floor — the limb a steady series cannot reach.
+    if !(folded.spread > a.cfg.floor_spread)
+        || fold_with(&a.p, &vec![Some(45.0); 21], &a.cfg).spread != a.cfg.floor_spread
+    {
+        return false;
+    }
+    // :414 a_young_baseline_has_no_outlier_guard — RECORDED, not desired. Under `early_adapt_nights`
+    // there is no hard-outlier limb and the winsor window is `early_spread_inflate` times wider, so a
+    // wild night still moves the centre; one fold later the same night is refused outright.
+    let young_state = BaselineState { n_valid: GATE_EARLY_ADAPT_NIGHTS - 1, ..seeded(45.0) };
+    let moved = update_with(&a.p, Some(young_state), Some(200.0), &a.cfg).baseline;
+    if (moved - GATE_YOUNG_OUTLIER_BASELINE).abs() > 1e-9 {
+        return false;
+    }
+    let grown = BaselineState { n_valid: GATE_EARLY_ADAPT_NIGHTS, ..seeded(45.0) };
+    if update_with(&a.p, Some(grown), Some(200.0), &a.cfg).baseline != 45.0 {
+        return false;
+    }
+    // :429 the_status_lifecycle_reaches_stale_and_recovers — `stale_days` missed nights are still
+    // Trusted; the next one tips it, and a real night restores it.
+    let mut lc = update_with(&a.p, None, Some(45.0), &a.cfg);
+    if lc.status != BaselineStatus::Calibrating {
+        return false;
+    }
+    for _ in 1..GATE_MIN_NIGHTS_TRUST {
+        lc = update_with(&a.p, Some(lc), Some(45.0), &a.cfg);
+    }
+    if lc.status != BaselineStatus::Trusted {
+        return false;
+    }
+    for _ in 0..GATE_STALE_DAYS {
+        lc = update_with(&a.p, Some(lc), None, &a.cfg);
+    }
+    if lc.status != BaselineStatus::Trusted {
+        return false;
+    }
+    lc = update_with(&a.p, Some(lc), None, &a.cfg);
+    if lc.status != BaselineStatus::Stale || lc.n_valid != GATE_MIN_NIGHTS_TRUST {
+        return false;
+    }
+    if update_with(&a.p, Some(lc), Some(45.0), &a.cfg).status != BaselineStatus::Trusted {
         return false;
     }
     // :331 a_plausible_night_is_valid
@@ -2239,7 +2339,7 @@ fn base_gate_holds(a: &BaseArm) -> bool {
     if night_verdict_with(&floored, &q, &a.cfg) != NightVerdict::Valid {
         return false;
     }
-    // :420 night_skin_temp_drops_low_confidence_and_medians_the_rest
+    // :581 night_skin_temp_medians_the_confident_samples_of_every_night
     let Some(s) = night_skin_temp(&[(33.0, 0.9), (33.4, 0.8), (5.0, 0.05), (34.0, 0.7)], a.min_conf)
     else {
         return false;
@@ -2250,7 +2350,55 @@ fn base_gate_holds(a: &BaseArm) -> bool {
     if (s.n_kept, s.n_total) != GATE_SKIN_KEPT_TOTAL || (s.coverage() - 0.75).abs() >= 1e-12 {
         return false;
     }
-    night_skin_temp(&[(33.0, 0.0)], a.min_conf).is_none()
+    if night_skin_temp(&[(33.0, 0.0)], a.min_conf).is_some()
+        || night_skin_temp(&[], a.min_conf).is_some()
+    {
+        return false;
+    }
+    // :598 a_do_nothing_night_reducer_fails_the_skin_temp_nights — a reducer this gate cannot tell
+    // apart from the median is a reducer the gate does not test.
+    let temp_samples: [(f64, f64); 4] = [(33.0, 0.9), (33.4, 0.8), (5.0, 0.05), (34.0, 0.7)];
+    let Some(t) = night_skin_temp(&temp_samples, a.min_conf) else { return false };
+    let confident: Vec<f64> =
+        temp_samples.iter().filter(|(_, c)| *c >= a.min_conf).map(|(v, _)| *v).collect();
+    let mean = confident.iter().sum::<f64>() / confident.len() as f64;
+    let all: Vec<f64> = temp_samples.iter().map(|(v, _)| *v).collect();
+    for (dull, _name) in [(mean, "mean"), (t.max_c, "max"), (physio_algo::stats::median(&all), "unfiltered median")]
+    {
+        if (dull - t.median_c).abs() <= 1e-9 {
+            return false;
+        }
+    }
+    // :633 nightly_skin_temp_medians_drive_the_skin_temp_baseline — the chain the Vitals card reads:
+    // per-night median into NightChannels into the baseline a deviation is measured against.
+    let planted: Vec<f64> = (0..10).map(|i| 33.0 + i as f64 * 0.125).collect();
+    let nights: Vec<NightChannels> = planted
+        .iter()
+        .map(|&c| {
+            let s = night_skin_temp(
+                &[(c - 0.5, 0.9), (c, 0.9), (c + 0.75, 0.9), (10.0, 0.01)],
+                a.min_conf,
+            )
+            .expect("the planted night must reduce");
+            NightChannels {
+                skin_temp_c: Some(s.median_c),
+                skin_temp_max_c: Some(s.max_c),
+                total_sleep_secs: Some(7.0 * 3600.0),
+                quality: Some(s.coverage()),
+                ..Default::default()
+            }
+        })
+        .collect();
+    if !night_verdicts(&nights, &a.gate).iter().all(|v| v.valid()) {
+        return false;
+    }
+    let chained = fold_history_nights(&nights, NightMetric::SkinTemp, &a.gate);
+    let flat: Vec<NightChannels> = nights
+        .iter()
+        .map(|n| NightChannels { skin_temp_c: Some(33.4), ..*n })
+        .collect();
+    let constant = fold_history_nights(&flat, NightMetric::SkinTemp, &a.gate);
+    (chained.baseline - constant.baseline).abs() > 1e-6
 }
 
 fn base_arm(kind: Kind, name: String, a: &BaseArm) -> Arm {
