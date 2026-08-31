@@ -3,8 +3,8 @@
 //!   cargo run --release -p physio-algo --example border_report
 //!
 //! Phase 0's deliverable. Not a report about the shipped recipe - a scoring card that takes a
-//! [`SleepConfig`] and prints the same six blocks whatever produced the hypnogram. The shipped recipe
-//! appears once, as the CONTROL arm, and is never the subject.
+//! [`SleepConfig`] and prints the same six blocks whatever produced the hypnogram. v2 appears once, as
+//! a NULL READING - where the old engine happens to sit, never a target and never the subject.
 //!
 //! Six blocks, each answering something the others cannot:
 //!   KAPPA4      epoch-wise agreement over wake/light/deep/REM
@@ -149,7 +149,7 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
 
 fn main() {
     // One entry per arm. A new engine is a new SleepConfig here, never a change to the scoring above.
-    let arms: [(&str, SleepConfig); 1] = [("shipped recipe (CONTROL)", SleepConfig::shipped())];
+    let arms: [(&str, SleepConfig); 1] = [("v2 shipped recipe (NULL READING)", SleepConfig::shipped())];
     let p = Params::SHIPPED;
 
     println!("THE BORDER — what any engine is measured on. Minutes, except efficiency in percent.");
