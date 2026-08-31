@@ -24,9 +24,26 @@ There is no `whoop-metrics` crate — it became `physio-algo`. Full graph: `docs
 ```bash
 cd whoop-rs
 cargo build
-cargo test                 # 1041 passed, 0 failed, 51 #[ignore]d  (2026-08-17; re-derive, never carry forward)
-cargo clippy --all-targets
+cargo test                 # 1181 passed, 0 failed, 52 #[ignore]d  (2026-08-31; re-derive, never carry forward)
+cargo clippy --workspace --all-targets
 cargo run -p whoopctl -- scan
+
+# `cargo test -p physio-algo --lib` DOES NOT BUILD tests/ AT ALL. Reading its 792 as green while
+# the workspace was red is how a stale cohort constant survived days of daily runs. Use `cargo test`.
+
+# THE IGNORED SUITE IS NOT OPTIONAL, and nothing else runs it. 31 tests: the cohort gates, every
+# negative control, and the source-text cross-checks that exist to stop two files drifting apart.
+# Two of those had gone stale unnoticed because this was never run.
+WHOOP_ZBIN_DIR=../whoop-firmware/.zbin-extract \
+WHOOP_CAPTURE=../whoop-data/own-data/noop-raw-capture-260729-0928.jsonl \
+  cargo test --release --workspace -- --ignored > /tmp/ignored.log 2>&1
+grep -E "^test result" /tmp/ignored.log      # expect: 51 passed, 0 failed
+#   BOTH env vars are REQUIRED. Without them two data-gated tests PANIC rather than skipping, which
+#   is the behaviour we want - a silent skip is how a gate stops proving anything. The 30 firmware
+#   images live in a DOT-directory, so `ls whoop-firmware/strap/*.zbin` finds nothing and reads as
+#   "the archive is gone"; captures are git-ignored because they hold personal biometric frames.
+#   NEVER pipe this through `tail`: the pipe buffers to completion, so you see nothing for fifteen
+#   minutes and then a truncated tail.
 
 # The sleep corpus. `cargo test` does NOT reach it — every cohort gate is #[ignore]d behind a
 # multi-GB tree outside the repo, so a green suite says nothing about staging. Run it whenever

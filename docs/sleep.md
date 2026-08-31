@@ -29,7 +29,15 @@ the app's edit self-heal) and the main-night functions (`main_night_index/_group
 | file | role |
 |---|---|
 | `detect.rs` | the gravity-stillness detection spine (`is_gravity_sparse`→`gravity_deltas`→`classify_still`→`build_runs`→`merge_periods`→`bridge_sleep_gap`) + the `detect_sessions` gate loop, and the per-epoch `session_epoch_motion`/`session_epoch_sleep_state` grids |
-| `v2.rs` | the V2 (cardiorespiratory) staging recipe — the DREAMT-tuned emissions + Viterbi; stages **every** strap |
+| `v2.rs` | the V2 (cardiorespiratory) staging recipe — the DREAMT-tuned emissions + Viterbi; stages **every** strap. **FROZEN: do not edit it.** It is both the shipped recipe and the control every new arm is scored beside, and a control that moves is not a control. Reading `prepare` / `emission_terms` / `viterbi` / `emissions_at` is intended; a primitive both engines need belongs in `common.rs` or its own module |
+| `pipeline.rs` | the staging path as **19 numbered steps** with `run_to(input, cfg, p, upto)`, a per-step artifact digest and a per-prefix digest, plus `StepId::deps()` (the DAG) and `StepId::feedback()` (the one forward reach, `Anchor` probe-decoding). 5 steps carry an artifact today; 3..=9 fold into `Assemble`. `SleepConfig` is the swap seam — currently emission-only |
+| `features.rs` | the per-epoch feature vector (`Features`, `Cardiac`, `EPOCH_S`) every emission reads |
+| `cardiac.rs` | interval order statistics over one beat window — seven quantiles absolute, seven detrended, mean HR, RMSSD/pNN50/mean\|ΔRR\|. One producer for the stager and the screening harnesses, so what is measured is what runs. **Not yet on any staging path** |
+| `hrv_bands.rs` | frequency-domain HRV (VLF/LF/HF) off a resampled tachogram. Rejected by a permuted null on our channel; kept because the rejection is a measurement |
+| `markov_loss.rs` | a staging loss that prices misplaced BOUNDARIES as well as misclassified epochs — per-class epoch cost, invented-boundary cost, missed-boundary cost. Scores a finished hypnogram; **nothing decodes with it yet** |
+| `metrics.rs` | the scoring primitives: `kappa4`/`kappa3`/`merge3`, `recall`/`precision`/`specificity`/`f1`, `balanced_accuracy`, `min_recall`, `per_recording`, `bout_score`, `bootstrap_kappa_ci` (resamples RECORDINGS), and the kappa-bonus pair. **Per-class RECALL is the selection object; F1 is a diagnostic** — F1's denominator carries the class priors, so it moves with prevalence exactly as kappa does |
+| `agreement.rs` | night-summary agreement: `summarise` (TST/WASO/latency/efficiency/stage minutes) and `bland_altman` (bias, 95% LoA, proportional-bias slope) |
+| `movement.rs` / `posture.rs` | the motion families the epoch grid buckets |
 | `refine.rs` | motion-aware wake post-pass (hot-but-still WAKE → light; density self-gated on the observed streams). `RefineParams::SHIPPED.skip_window_edges` exempts the first and last epoch of a span, which is where sleep-onset latency and the final wake legitimately sit |
 | `mainnight.rs` | main-night selection by a learned-timing score, the two-tier gap bridge, and the circular-mean habitual midsleep |
 | `params.rs` | every V2 emission weight, gate and transition in one `Params` struct. `Params::SHIPPED` is the tuned recipe; `stage` with anything else is the tuning path only |
@@ -59,8 +67,13 @@ HR-confirm median, span-cap, morning-stillness, motion-corroborated wake, the re
 selection reasons, habitual learning). `golden_tests.rs` pins the V2 hypnogram frozen-golden.
 `tests/dataset_parity.rs` (`--ignored`) asserts the DREAMT, AAUWSS and sleep-accel kappas and prints a
 sheet naming every fixture set with what its truth column IS, so no set sits unscored and unnamed.
-**678 `physio-algo` tests + 27 `whoop-ffi` tests, 0 clippy** (measured 2026-08-06; re-derive, never
-carry forward)**.**
+**1181 workspace tests, 0 clippy** (measured 2026-08-31; re-derive, never carry forward)**.**
+
+**The `#[ignore]`d suite is not optional and nothing else runs it** — the cohort gates, every negative
+control, and the source-text cross-checks that stop two files drifting apart all live there. Two had
+gone stale unnoticed because it was never run: a cohort constant left at its pre-retune value, and a
+baseline replica still running the weak gate its own shipped test was written to condemn. Neither is
+reachable from `cargo test`, and **`cargo test -p physio-algo --lib` does not build `tests/` at all.**
 
 ## App-side border: complete
 
