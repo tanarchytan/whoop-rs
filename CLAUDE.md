@@ -37,7 +37,7 @@ cargo run -p whoopctl -- scan
 WHOOP_ZBIN_DIR=../whoop-firmware/.zbin-extract \
 WHOOP_CAPTURE=../whoop-data/own-data/noop-raw-capture-260729-0928.jsonl \
   cargo test --release --workspace -- --ignored > /tmp/ignored.log 2>&1
-grep -E "^test result" /tmp/ignored.log      # expect: 51 passed, 0 failed
+grep -E "^test result" /tmp/ignored.log      # expect: 52 passed, 0 failed
 #   BOTH env vars are REQUIRED. Without them two data-gated tests PANIC rather than skipping, which
 #   is the behaviour we want - a silent skip is how a gate stops proving anything. The 30 firmware
 #   images live in a DOT-directory, so `ls whoop-firmware/strap/*.zbin` finds nothing and reads as
