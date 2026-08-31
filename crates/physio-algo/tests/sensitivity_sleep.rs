@@ -53,7 +53,7 @@ use physio_algo::HrSample;
 /// The three cohort targets and their sizes, owned by `dataset_parity.rs`'s `assert_cohort` calls, and
 /// re-read from that file by `shipped_gate_constants_match_their_sources`. Named by symbol, not by
 /// line: a line reference in a control is stale the first time the file it points at is edited.
-const DREAMT_KAPPA: f64 = 0.311;
+const DREAMT_KAPPA: f64 = 0.308;
 const AAUWSS_KAPPA: f64 = 0.412;
 /// `sleep-accel` carries no R-R on any of its 31 nights, so this is V2 WITHOUT its respiratory
 /// channel — cardiac and motion only. `sensitivity_stage_v2_sleep_accel_no_respiratory_channel`
