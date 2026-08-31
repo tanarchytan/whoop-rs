@@ -24,6 +24,7 @@ pub mod agreement;
 pub mod cardiac;
 pub mod features;
 pub mod hrv_bands;
+pub mod markov_loss;
 pub mod metrics;
 pub mod movement;
 pub mod params;
