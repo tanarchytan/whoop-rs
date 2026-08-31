@@ -120,13 +120,20 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
     // share are what separate a better engine from a shifted threshold.
     let tot: i64 = cm.iter().flatten().sum();
     let fmt = |v: Option<f64>| v.map_or("  -  ".into(), |x| format!("{x:.3}"));
-    println!("  {:<7} {:>8} {:>10} {:>9} {:>9}", "class", "recall", "precision", "pred %", "truth %");
+    println!("  {:<7} {:>8} {:>10} {:>7} {:>9} {:>9}", "class", "recall", "precision", "F1", "pred %", "truth %");
     let t = truth_marginals(&cm);
     for c in 0..4 {
         let q = cm.iter().map(|r| r[c]).sum::<i64>() as f64 / tot.max(1) as f64;
+        // Per-class F1 is the SELECTION criterion; the summary kappa below it is a report line.
+        // Cicchetti & Feinstein's p_pos is exactly this, and Kraemer recommends against a K>2
+        // weighted kappa as a validity measure at all.
+        let f1 = match (recall(&cm, c), precision(&cm, c)) {
+            (Some(r), Some(p)) if r + p > 0.0 => Some(2.0 * r * p / (r + p)),
+            _ => None,
+        };
         println!(
-            "  {:<7} {:>8} {:>10} {:>8.1}% {:>8.1}%",
-            CLASS_NAMES[c], fmt(recall(&cm, c)), fmt(precision(&cm, c)), q * 100.0, t[c] * 100.0
+            "  {:<7} {:>8} {:>10} {:>7} {:>8.1}% {:>8.1}%",
+            CLASS_NAMES[c], fmt(recall(&cm, c)), fmt(precision(&cm, c)), fmt(f1), q * 100.0, t[c] * 100.0
         );
     }
 
