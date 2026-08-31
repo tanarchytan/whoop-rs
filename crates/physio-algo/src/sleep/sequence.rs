@@ -111,7 +111,8 @@ impl Structure {
     }
 
     /// Share of this class's epochs living in bouts of at least `len`. The upper-tail read: a class
-    /// can hold the right number of epochs and put none of them in a long run.
+    /// can hold the right number of epochs and put none of them in a long run. A run cut by a
+    /// segment edge counts at its OBSERVED length, so this reads low for edge-heavy classes.
     pub fn tail_mass(&self, c: usize, len: usize) -> Option<f64> {
         let total: usize = self.bouts[c].iter().sum();
         (total > 0).then(|| {

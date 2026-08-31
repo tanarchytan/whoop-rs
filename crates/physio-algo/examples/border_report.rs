@@ -160,21 +160,25 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
     let tot: i64 = cm.iter().flatten().sum();
     let fmt = |v: Option<f64>| v.map_or("  -  ".into(), |x| format!("{x:.3}"));
     println!(
-        "  {:<7} {:>8} {:>22} {:>10} {:>7} {:>9} {:>9}",
-        "class", "recall", "recall per-night", "precision", "F1", "pred %", "truth %"
+        "  {:<7} {:>8} {:>22} {:>10} {:>7} {:>9} {:>9} {:>8}",
+        "class", "recall", "recall per-night", "precision", "F1", "pred %", "truth %", "miss %"
     );
     let t = truth_marginals(&cm);
     for c in 0..4 {
         let q = cm.iter().map(|r| r[c]).sum::<i64>() as f64 / tot.max(1) as f64;
+        // Share of ALL epochs truly this class and called something else. Recall ranks the classes
+        // equally; this ranks them by the epochs they actually cost, and the two disagree.
+        let miss = t[c] * (1.0 - recall(&cm, c).unwrap_or(0.0));
         println!(
-            "  {:<7} {:>8} {:>22} {:>10} {:>7} {:>8.1}% {:>8.1}%",
+            "  {:<7} {:>8} {:>22} {:>10} {:>7} {:>8.1}% {:>8.1}% {:>7.1}%",
             CLASS_NAMES[c],
             fmt(recall(&cm, c)),
             show(per_recording(&cms, |x| recall(x, c))),
             fmt(precision(&cm, c)),
             fmt(f1(&cm, c)),
             q * 100.0,
-            t[c] * 100.0
+            t[c] * 100.0,
+            miss * 100.0
         );
     }
 
@@ -261,21 +265,24 @@ fn structure(nights: &[Night]) {
     }
 
     // The rare set is this cohort's own truth, and the truth's own rate against it is the only thing
-    // that says whether the prediction's rate is high.
+    // that says whether the prediction's rate is high. The per-cell counts are printed because a
+    // pooled rate hides a transition the arm prices at the 1e-9 floor and therefore never emits.
     let rare = truth.rare_set(RARE_SHARE);
-    let named: Vec<String> = (0..4)
+    let cells: Vec<String> = (0..4)
         .flat_map(|i| (0..4).map(move |j| (i, j)))
         .filter(|(i, j)| rare[*i][*j])
-        .map(|(i, j)| format!("{}>{}", CLASS_NAMES[i], CLASS_NAMES[j]))
+        .map(|(i, j)| {
+            format!("{}>{} {}/{}", CLASS_NAMES[i], CLASS_NAMES[j], pred.trans[i][j], truth.trans[i][j])
+        })
         .collect();
     println!(
-        "  TVR over {} transition(s) under {:.1}% of this cohort's pairs: pred {} vs truth {}   [{}]",
-        named.len(),
-        RARE_SHARE * 100.0,
+        "  TVR pred {} vs truth {} over {} rare transition(s) under {:.1}% of this cohort's pairs",
         f(pred.tvr(&rare)),
         f(truth.tvr(&rare)),
-        named.join(" ")
+        cells.len(),
+        RARE_SHARE * 100.0,
     );
+    println!("    pred/truth counts: {}", cells.join("   "));
 
     // The control: absorb every short run and the numbers above must move. If they do not, this
     // block is not measuring bout structure and nothing read off it means anything.
@@ -303,12 +310,25 @@ fn flattened(alpha: f64) -> Params {
     p
 }
 
+/// Open the two structural zeros in the wake row at the rate the PSG truth shows, taking the mass
+/// from wake's self-loop and leaving every other row alone. Rows are `[deep, rem, light, awake]`,
+/// so row 3 is wake. The rates are the pooled truth counts over wake epochs, not fitted per cohort.
+fn wake_row_opened() -> Params {
+    let mut p = Params::SHIPPED;
+    let (to_deep, to_rem) = (0.0005, 0.007);
+    p.transition[3][0] = to_deep;
+    p.transition[3][1] = to_rem;
+    p.transition[3][3] -= to_deep + to_rem;
+    p
+}
+
 fn main() {
     // One entry per arm. A new engine is a new SleepConfig here, never a change to the scoring above.
-    let arms: [(&str, SleepConfig, Params); 3] = [
+    let arms: [(&str, SleepConfig, Params); 4] = [
         ("v2 shipped recipe (NULL READING)", SleepConfig::shipped(), Params::SHIPPED),
         ("transition 50% toward uniform", SleepConfig::shipped(), flattened(0.5)),
         ("transition UNIFORM - emissions alone", SleepConfig::shipped(), flattened(1.0)),
+        ("wake>rem and wake>deep opened at truth's rate", SleepConfig::shipped(), wake_row_opened()),
     ];
 
     println!("THE BORDER — what any engine is measured on. Minutes, except efficiency in percent.");
