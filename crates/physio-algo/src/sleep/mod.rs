@@ -31,6 +31,7 @@ pub mod params;
 pub mod pipeline;
 pub mod posture;
 mod refine;
+pub mod sequence;
 mod v2;
 
 use crate::hrv::HrvReadiness;
