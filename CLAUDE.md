@@ -52,6 +52,14 @@ patch once it does.
 
 ## Guardrails (always on)
 
+- **`sleep/v2.rs` IS FROZEN. Do not edit it.** David, 2026-08-31: *"make it a hard no to edit v2.rs
+  because thats the 'old' and tanv1 is the 'new'."* v2 is the shipped recipe and the CONTROL every
+  tanv1 arm is scored against; a control that moves is not a control. New staging work goes in new
+  modules and may READ v2 (`prepare`, `emission_terms`, `viterbi`) all it likes. A primitive both
+  engines need belongs in `common.rs` or its own module, never grafted into v2. This binds every
+  agent and subagent. If v2 turns out to carry a real defect, say so and stop — do not fix it in
+  passing.
+
 - **No monolithic creations.** Many small, cohesive files/modules; deps point one way (leaf → app).
   Keep `whoop-protocol` sans-IO (no BLE/async leaks in). Never fold storage/algos/UI into the codec.
   200–400 lines/file typical. A new concern is usually a new small module or crate, not a bigger one.
