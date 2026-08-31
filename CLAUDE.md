@@ -31,7 +31,7 @@ cargo run -p whoopctl -- scan
 # `cargo test -p physio-algo --lib` DOES NOT BUILD tests/ AT ALL. Reading its 792 as green while
 # the workspace was red is how a stale cohort constant survived days of daily runs. Use `cargo test`.
 
-# THE IGNORED SUITE IS NOT OPTIONAL, and nothing else runs it. 31 tests: the cohort gates, every
+# THE IGNORED SUITE IS NOT OPTIONAL, and nothing else runs it. 52 tests: the cohort gates, every
 # negative control, and the source-text cross-checks that exist to stop two files drifting apart.
 # Two of those had gone stale unnoticed because this was never run.
 WHOOP_ZBIN_DIR=../whoop-firmware/.zbin-extract \
