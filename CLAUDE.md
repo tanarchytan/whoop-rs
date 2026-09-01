@@ -108,22 +108,31 @@ Running it only at the end is how a step finishes and then has to be unpicked. R
 
 ```bash
 # 1. BEFORE the step. If it is red now, the red is not yours - and you know that before you start.
-python ../dev-notes/whoop-rs/verify_round.py --fast
+python tools/verify_round.py --fast
 
 # 2. DURING, after each meaningful edit. Four seconds, no cargo.
-python ../dev-notes/whoop-rs/verify_round.py --fast
+python tools/verify_round.py --fast
 
 # 3. AFTER, in full, scoped to the step. This one runs the IGNORED suite.
-python ../dev-notes/whoop-rs/verify_round.py --since=<the commit the step started from>
+python tools/verify_round.py --since=<the commit the step started from>
 
-python ../dev-notes/whoop-rs/verify_round.py --self-test    # the checks must fire on a planted defect
+python tools/verify_round.py --self-test    # the checks must fire on a planted defect
 ```
 
-**The gate scripts are NOT under version control.** `whoop/` is not a repository and `dev-notes/`
-sits outside every repo, so `verify_round.py` and `check_evidence.py` have no history, no diff and
-no recovery. That is fine for notes, which are meant to rot; it is not fine for a gate. Back them up
-or move them into the repo they gate — decide it deliberately rather than discovering it after a
-loss.
+**The round has its own tests**, `tools/test_verify_round.py`, and they are not optional either:
+
+```bash
+python tools/test_verify_round.py    # 26 checks; also FAILS if a new check_* arrives untested
+```
+
+`every_check_is_covered` enumerates the `check_*` functions by introspection and requires each to
+appear in `COVERED`. That is the guard against the state this file was in on 2026-09-01, when four
+of seven checks had no test and the round still reported green. Both directions are asserted for
+every check: a planted defect must fire it AND a clean input must not, because a check that always
+fires is as useless as one that never does.
+
+The gates live in `tools/` so they are versioned with what they gate. They were outside every
+repository until 2026-09-01 — no history, no diff, no recovery.
 
 **The baseline run is the one that stops the backpedalling.** On 2026-09-01 the ignored suite failed
 at the END of a step on a firmware gate that had nothing to do with that step: the documented
