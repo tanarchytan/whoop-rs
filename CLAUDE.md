@@ -119,6 +119,12 @@ python ../dev-notes/whoop-rs/verify_round.py --since=<the commit the step starte
 python ../dev-notes/whoop-rs/verify_round.py --self-test    # the checks must fire on a planted defect
 ```
 
+**The gate scripts are NOT under version control.** `whoop/` is not a repository and `dev-notes/`
+sits outside every repo, so `verify_round.py` and `check_evidence.py` have no history, no diff and
+no recovery. That is fine for notes, which are meant to rot; it is not fine for a gate. Back them up
+or move them into the repo they gate — decide it deliberately rather than discovering it after a
+loss.
+
 **The baseline run is the one that stops the backpedalling.** On 2026-09-01 the ignored suite failed
 at the END of a step on a firmware gate that had nothing to do with that step: the documented
 command used a relative `WHOOP_ZBIN_DIR`, and cargo runs each test binary with its own PACKAGE as
