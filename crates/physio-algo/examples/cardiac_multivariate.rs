@@ -65,6 +65,11 @@ fn build(nights: &[MesaNight], arm: &str) -> Vec<Row> {
         let beats = match arm {
             "TIMING" => mesa::degrade_timing(&n.beats),
             "COVERAGE" => mesa::degrade_coverage(&n.beats, mesa::COVERAGE_KEEP, mesa::COVERAGE_SEED),
+            // NN keeps only normal-to-normal intervals. RMSSD and pNN50 are DEFINED on those, and an
+            // ectopic beat contributes a short interval and a compensatory long one - the two tails
+            // the percentile family reads. If the family's gain is ectopy, it dies here.
+            "EXACT-NN" => mesa::nn_only(&n.beats),
+            "TIMING-NN" => mesa::degrade_timing(&mesa::nn_only(&n.beats)),
             _ => n.beats.clone(),
         };
         let pairs: Vec<(f64, f64)> = beats.iter().map(|b| (b.t, b.rr)).collect();
@@ -186,12 +191,15 @@ fn calls(cm: &Confusion4) -> [f64; 4] {
 
 fn main() {
     let limit: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(60);
-    let nights = mesa::nights(limit);
-    println!("CARDIAC MULTIVARIATE SCREEN — {} nights", nights.len());
+    // Second argument skips that many recordings first, so the same screen can be re-run on a
+    // DISJOINT slice. A prefix is reproducible; only a disjoint slice says it is not the prefix.
+    let skip: usize = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(0);
+    let nights = mesa::nights_from(skip, limit);
+    println!("CARDIAC MULTIVARIATE SCREEN — {} nights, skipping the first {skip}", nights.len());
     println!("Held out by RECORDING, {FOLDS} folds. Uniform priors in the fit, so a class is not");
     println!("called more just for being common. `call%` is printed because balanced accuracy is a");
     println!("mean of RECALLS, and a recall can be bought by calling the class more often.");
-    for arm in ["EXACT", "TIMING", "COVERAGE"] {
+    for arm in ["EXACT", "EXACT-NN", "TIMING", "TIMING-NN", "COVERAGE"] {
         run(&nights, arm);
     }
     println!("\n  EXACT says the information exists in an ECG. TIMING and COVERAGE are what our own");

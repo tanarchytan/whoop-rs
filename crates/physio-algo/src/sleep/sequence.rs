@@ -89,6 +89,14 @@ impl Structure {
         (from > 0).then(|| (from - self.trans[c][c]) as f64 / from as f64)
     }
 
+    /// Epochs held by this class, derived from the bouts rather than tallied alongside them so the
+    /// two cannot drift. Exists to be checked against the confusion matrix: both are built from the
+    /// same epochs by different paths, and a disagreement means the segment builder dropped or
+    /// invented some.
+    pub fn epochs(&self, c: usize) -> usize {
+        self.bouts[c].iter().sum()
+    }
+
     /// Mean bout length in epochs, censored runs counted at their observed length.
     pub fn mean_bout(&self, c: usize) -> Option<f64> {
         let b = &self.bouts[c];
@@ -323,12 +331,30 @@ mod tests {
         assert!(noisy.tvr(&rare).unwrap() > own * 5.0);
     }
 
+    /// `epochs` must count what was actually added, across segments and past a hole. It is the
+    /// quantity the card cross-checks against the confusion matrix, so if it drifts the check that
+    /// guards the segment builder silently stops guarding anything.
+    #[test]
+    fn epochs_counts_every_added_epoch_and_no_more() {
+        const GAP: usize = 4;
+        let mut s = Structure::default();
+        s.add(&[0, 0, 1, 1, 1]);
+        s.add(&[2, GAP, 2, 2, 3]);
+        assert_eq!([s.epochs(0), s.epochs(1), s.epochs(2), s.epochs(3)], [2, 3, 3, 1]);
+        assert_eq!(
+            (0..4).map(|c| s.epochs(c)).sum::<usize>(),
+            9,
+            "ten labels were added and one was the out-of-range hole"
+        );
+        assert_eq!(0, Structure::default().epochs(0));
+    }
+
     /// The upper tail is the deep defect's shape: same epoch count, none of it in a long run.
     #[test]
     fn tail_mass_separates_scattered_epochs_from_one_long_bout() {
         let scattered = Structure::one(&[2usize, 0, 0, 0].repeat(20));
         let massed = Structure::one(&[vec![2usize; 20], vec![0; 60]].concat());
-        let held = |s: &Structure| s.bouts[2].iter().sum::<usize>();
+        let held = |s: &Structure| s.epochs(2);
         assert_eq!(held(&scattered), held(&massed), "same number of epochs");
         assert_eq!(scattered.tail_mass(2, 10), Some(0.0));
         assert_eq!(massed.tail_mass(2, 10), Some(1.0));

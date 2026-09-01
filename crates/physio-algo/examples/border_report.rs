@@ -234,7 +234,7 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
         );
     }
 
-    structure(nights);
+    structure(nights, &cm);
 
     let sparse = nights.len() - pairs.len();
     if sparse > 0 {
@@ -244,7 +244,7 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
 
 /// Bout lengths and transition rates, with TRUTH beside every one of them. Nothing above this line
 /// can see any of it: a confusion matrix is invariant to shuffling the hypnogram.
-fn structure(nights: &[Night]) {
+fn structure(nights: &[Night], cm: &Confusion4) {
     let (mut pred, mut truth, mut ctrl) =
         (Structure::default(), Structure::default(), Structure::default());
     for n in nights {
@@ -256,6 +256,19 @@ fn structure(nights: &[Night]) {
     }
     let Some(fi_p) = pred.fi() else { return };
     let fi_t = truth.fi().unwrap_or(f64::NAN);
+
+    // The segments and the confusion matrix are built from the SAME epochs by two different paths.
+    // A disagreement means the segment builder dropped or invented some, and then every number in
+    // this block is describing a different night from every number above it.
+    let cm_truth: [usize; 4] = std::array::from_fn(|c| cm[c].iter().sum::<i64>() as usize);
+    let cm_pred: [usize; 4] = std::array::from_fn(|c| cm.iter().map(|r| r[c]).sum::<i64>() as usize);
+    let seg_truth: [usize; 4] = std::array::from_fn(|c| truth.epochs(c));
+    let seg_pred: [usize; 4] = std::array::from_fn(|c| pred.epochs(c));
+    if seg_truth != cm_truth || seg_pred != cm_pred {
+        println!("  !! SEGMENTS AND CONFUSION DISAGREE - every number below is unsafe");
+        println!("     truth  seg {seg_truth:?}  vs cm {cm_truth:?}");
+        println!("     pred   seg {seg_pred:?}  vs cm {cm_pred:?}");
+    }
 
     let m = |e: Option<f64>| e.map_or("  -  ".into(), |x| format!("{:.1}", x * EPOCH_MIN));
     let f = |x: Option<f64>| x.map_or("  -  ".into(), |v| format!("{v:.3}"));

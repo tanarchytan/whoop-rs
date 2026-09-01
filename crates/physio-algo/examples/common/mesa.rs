@@ -17,6 +17,11 @@ pub struct Beat {
     pub t: f64,
     pub rr: f64,
     pub epoch: usize,
+    /// Whether this interval is NORMAL-TO-NORMAL: both the beat that opened it and the beat that
+    /// closed it are classified normal by the corpus. RMSSD and pNN50 are defined on NN intervals,
+    /// not on every R-R, and an ectopic beat contributes a short interval and a compensatory long
+    /// one - the two tails the percentile family reads.
+    pub normal: bool,
 }
 
 pub struct MesaNight {
@@ -58,28 +63,31 @@ pub fn root() -> PathBuf {
 }
 
 /// Header index of each column we read, so a reordered export cannot silently shift them.
-fn columns(header: &str) -> Option<(usize, usize, usize)> {
+fn columns(header: &str) -> Option<(usize, usize, usize, usize)> {
     let cols: Vec<&str> = header.split(',').map(|c| c.trim().trim_matches('"')).collect();
     let find = |name: &str| cols.iter().position(|c| *c == name);
-    Some((find("seconds")?, find("stage")?, find("epoch")?))
+    Some((find("seconds")?, find("stage")?, find("epoch")?, find("Type")?))
 }
 
 pub fn read_night(path: &Path) -> Option<MesaNight> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines();
-    let (c_sec, c_stage, c_epoch) = columns(lines.next()?)?;
+    let (c_sec, c_stage, c_epoch, c_type) = columns(lines.next()?)?;
 
-    let mut raw: Vec<(f64, usize, Option<usize>)> = Vec::new();
+    // The corpus's own beat classification: 1 is a normal sinus beat, 0 artifact, 2 and 3 ectopic.
+    // 99.4% are normal, and the rest are what NN filtering exists to exclude.
+    const NORMAL_BEAT: &str = "1";
+    let mut raw: Vec<(f64, usize, Option<usize>, bool)> = Vec::new();
     for line in lines {
         let f: Vec<&str> = line.split(',').collect();
-        if f.len() <= c_sec.max(c_stage).max(c_epoch) {
+        if f.len() <= c_sec.max(c_stage).max(c_epoch).max(c_type) {
             continue;
         }
         let (Ok(t), Ok(ep)) = (f[c_sec].trim().parse::<f64>(), f[c_epoch].trim().parse::<usize>())
         else {
             continue;
         };
-        raw.push((t, ep, stage_of(f[c_stage])));
+        raw.push((t, ep, stage_of(f[c_stage]), f[c_type].trim() == NORMAL_BEAT));
     }
     if raw.len() < 1000 {
         return None;
@@ -89,7 +97,7 @@ pub fn read_night(path: &Path) -> Option<MesaNight> {
     // `epoch` is 1-based in the export; index it from zero so it lines up with our own grids.
     let n = raw.iter().map(|r| r.1).max()?;
     let mut stage = vec![None; n];
-    for (_, ep, s) in &raw {
+    for (_, ep, s, _) in &raw {
         if *ep >= 1 && *ep <= n {
             stage[*ep - 1] = *s;
         }
@@ -99,15 +107,33 @@ pub fn read_night(path: &Path) -> Option<MesaNight> {
     for w in raw.windows(2) {
         let rr = (w[1].0 - w[0].0) * 1000.0;
         if (RR_MIN_MS..=RR_MAX_MS).contains(&rr) {
-            beats.push(Beat { t: w[1].0, rr, epoch: w[1].1.saturating_sub(1) });
+            beats.push(Beat {
+                t: w[1].0,
+                rr,
+                epoch: w[1].1.saturating_sub(1),
+                normal: w[0].3 && w[1].3,
+            });
         }
     }
     let id = path.file_stem()?.to_string_lossy().replace("-rpoint", "");
     Some(MesaNight { id, beats, stage })
 }
 
+/// Keep only NORMAL-TO-NORMAL intervals. Dropping an ectopic beat and keeping the interval that
+/// spans it would merge two beats into one long interval, which is a new artefact; this drops the
+/// interval instead. `cardiac`'s adjacency cap then keeps the successive differences honest.
+pub fn nn_only(beats: &[Beat]) -> Vec<Beat> {
+    beats.iter().copied().filter(|b| b.normal).collect()
+}
+
 /// `limit` nights in name order, so a screen is reproducible and a subset is a prefix.
 pub fn nights(limit: usize) -> Vec<MesaNight> {
+    nights_from(0, limit)
+}
+
+/// The same, starting at `skip`. A prefix is reproducible but it is ONE slice of 1,971 recordings;
+/// re-running a result on a disjoint slice is what says it is not a property of the prefix.
+pub fn nights_from(skip: usize, limit: usize) -> Vec<MesaNight> {
     let dir = root();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("MESA rpoints unreadable at {}: {e}", dir.display()))
@@ -115,7 +141,7 @@ pub fn nights(limit: usize) -> Vec<MesaNight> {
         .filter(|p| p.extension().is_some_and(|x| x == "csv"))
         .collect();
     files.sort();
-    files.iter().take(limit).filter_map(|p| read_night(p)).collect()
+    files.iter().skip(skip).take(limit).filter_map(|p| read_night(p)).collect()
 }
 
 /// Push the beats through OUR wire format and back: a whole-second stamp per beat, several beats
@@ -132,7 +158,12 @@ pub fn degrade_timing(beats: &[Beat]) -> Vec<Beat> {
             if j > i {
                 off += beats[j].rr / 1000.0;
             }
-            out.push(Beat { t: sec + off, rr: beats[j].rr.round(), epoch: beats[j].epoch });
+            out.push(Beat {
+                t: sec + off,
+                rr: beats[j].rr.round(),
+                epoch: beats[j].epoch,
+                normal: beats[j].normal,
+            });
             j += 1;
         }
         i = j;
