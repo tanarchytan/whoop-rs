@@ -25,6 +25,7 @@ pub mod hrv;
 pub mod hrv_freq;
 pub mod hydration;
 pub mod imu_features;
+pub mod lda;
 pub mod nap;
 pub mod ppg;
 pub mod ramps;
