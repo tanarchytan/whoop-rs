@@ -100,6 +100,30 @@ pub fn read_rr(dir: &Path) -> Vec<RrRun> {
     rr
 }
 
+/// Whole-second beat stamps spread back out by their own intervals, the reconstruction the stager
+/// runs before any cardiac statistic sees them. Several beats share one stamp on our wire, so
+/// feeding the raw stamps to a successive-difference statistic would report dt=0 between them.
+///
+/// A REPLICA of the private `v2::beats_in`, which is frozen and cannot be called or extracted. Kept
+/// here, once, with its clamp: `mesa::degrade_timing` models the same wire but ROUNDS the interval
+/// and does not clamp, so the two are not interchangeable and neither is the definition.
+pub fn reconstruct_beats(runs: &[RrRun]) -> Vec<(f64, f64)> {
+    let mut beats: Vec<(f64, f64)> = Vec::new();
+    for run in runs {
+        let mut off = 0.0;
+        for (k, ms) in run.intervals.iter().enumerate() {
+            let ms = (*ms as f64).clamp(300.0, 2000.0);
+            // An interval is the gap from the PREVIOUS beat, so the first of a run sits on the stamp.
+            if k > 0 {
+                off += ms / 1000.0;
+            }
+            beats.push((run.ts as f64 + off, ms));
+        }
+    }
+    beats.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    beats
+}
+
 /// `truth.csv` as epoch index -> label. Empty when the set carries no labels, which is how a harness
 /// tells "unlabelled" apart from "all wake" — several sets have no truth at all.
 pub fn read_truth(dir: &Path) -> BTreeMap<usize, i32> {
