@@ -34,8 +34,11 @@ cargo run -p whoopctl -- scan
 # THE IGNORED SUITE IS NOT OPTIONAL, and nothing else runs it. 52 tests: the cohort gates, every
 # negative control, and the source-text cross-checks that exist to stop two files drifting apart.
 # Two of those had gone stale unnoticed because this was never run.
-WHOOP_ZBIN_DIR=../whoop-firmware/.zbin-extract \
-WHOOP_CAPTURE=../whoop-data/own-data/noop-raw-capture-260729-0928.jsonl \
+# ABSOLUTE paths. Cargo runs each test binary with ITS OWN PACKAGE as the working directory, so a
+# relative ../whoop-firmware resolves inside crates/whoop-protocol and the firmware gate dies with
+# NotFound - measured 2026-09-01. It reads as a broken GATE when it is a broken COMMAND.
+WHOOP_ZBIN_DIR="$PWD/../whoop-firmware/.zbin-extract" \
+WHOOP_CAPTURE="$PWD/../whoop-data/own-data/noop-raw-capture-260729-0928.jsonl" \
   cargo test --release --workspace -- --ignored > /tmp/ignored.log 2>&1
 grep -E "^test result" /tmp/ignored.log      # expect: 52 passed, 0 failed
 #   BOTH env vars are REQUIRED. Without them two data-gated tests PANIC rather than skipping, which
@@ -99,12 +102,27 @@ patch once it does.
   on the blind path; legitimate ones (reboot, R22) have dedicated intentional methods a UI opt-in gates.
 - **Nothing pushed / no PR / no `git init`-and-push without explicit approval.**
 
-## Verification round — after every plan step, both halves
+## Verification round — THREE times per step, not once at the end
+
+Running it only at the end is how a step finishes and then has to be unpicked. Run it:
 
 ```bash
+# 1. BEFORE the step. If it is red now, the red is not yours - and you know that before you start.
+python ../dev-notes/whoop-rs/verify_round.py --fast
+
+# 2. DURING, after each meaningful edit. Four seconds, no cargo.
+python ../dev-notes/whoop-rs/verify_round.py --fast
+
+# 3. AFTER, in full, scoped to the step. This one runs the IGNORED suite.
 python ../dev-notes/whoop-rs/verify_round.py --since=<the commit the step started from>
+
 python ../dev-notes/whoop-rs/verify_round.py --self-test    # the checks must fire on a planted defect
 ```
+
+**The baseline run is the one that stops the backpedalling.** On 2026-09-01 the ignored suite failed
+at the END of a step on a firmware gate that had nothing to do with that step: the documented
+command used a relative `WHOOP_ZBIN_DIR`, and cargo runs each test binary with its own PACKAGE as
+the working directory. A baseline run would have shown it red before a line was written.
 
 The script does the MECHANICAL half: suite green, recorded counts re-derived rather than carried,
 clippy 0, constants not defined twice, public items added by this step that nothing calls, dataset
