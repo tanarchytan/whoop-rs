@@ -27,8 +27,6 @@ use physio_algo::sleep::cardiac;
 const EPOCH_S: f64 = 30.0;
 /// The window the order statistics are centred on, matching the spectral one already in the tree.
 const WINDOW_S: f64 = 270.0;
-const COVERAGE_KEEP: f64 = 0.60;
-const COVERAGE_SEED: u64 = 0xC0FFEE;
 
 /// One night's rows and their stages, blocks only where the window could carry one.
 fn night_rows(beats: &[Beat], stage: &[Option<usize>]) -> (Vec<[f64; 18]>, Vec<usize>) {
@@ -96,7 +94,7 @@ fn collect(nights: &[mesa::MesaNight], arm: &str) -> (Vec<[f64; 18]>, Vec<[f64; 
     for n in nights {
         let beats = match arm {
             "TIMING" => mesa::degrade_timing(&n.beats),
-            "COVERAGE" => mesa::degrade_coverage(&n.beats, COVERAGE_KEEP, COVERAGE_SEED),
+            "COVERAGE" => mesa::degrade_coverage(&n.beats, mesa::COVERAGE_KEEP, mesa::COVERAGE_SEED),
             _ => n.beats.clone(),
         };
         let (rows, labels) = night_rows(&beats, &n.stage);

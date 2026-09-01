@@ -68,7 +68,7 @@ HR-confirm median, span-cap, morning-stillness, motion-corroborated wake, the re
 selection reasons, habitual learning). `golden_tests.rs` pins the V2 hypnogram frozen-golden.
 `tests/dataset_parity.rs` (`--ignored`) asserts the DREAMT, AAUWSS and sleep-accel kappas and prints a
 sheet naming every fixture set with what its truth column IS, so no set sits unscored and unnamed.
-**1192 workspace tests, 0 clippy** (measured 2026-08-31; re-derive, never carry forward)**.**
+**1201 workspace tests, 0 clippy** (measured 2026-09-01; re-derive, never carry forward)**.**
 
 **The `#[ignore]`d suite is not optional and nothing else runs it** — the cohort gates, every negative
 control, and the source-text cross-checks that stop two files drifting apart all live there. Two had

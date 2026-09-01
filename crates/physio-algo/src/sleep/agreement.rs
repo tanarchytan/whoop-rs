@@ -66,14 +66,14 @@ pub struct Agreement {
     pub sd: f64,
     pub loa_lo: f64,
     pub loa_hi: f64,
-    /// OLS slope of the difference on the pair mean. Away from zero, the error depends on the
-    /// magnitude, and a single bias figure describes no one.
-    pub slope: f64,
-    /// Correlation between the difference and the pair mean; the slope's strength.
-    pub r: f64,
-    /// Slope of the difference on the REFERENCE, and the line's value at reference zero. This is the
-    /// one to trust: the pair mean contains half the difference, so regressing on it manufactures a
-    /// negative slope even from an unbiased device. Valid here only because the reference is gold.
+    /// OLS slope of the difference on the REFERENCE, and the line's value at reference zero. Away
+    /// from zero the error depends on the magnitude and a single bias figure describes no one.
+    ///
+    /// The textbook Bland-Altman slope regresses on the pair MEAN. That is deliberately NOT what
+    /// this is: the mean contains half the difference, so it manufactures a negative slope from an
+    /// unbiased device. Regressing on the reference is valid only because ours is a gold standard
+    /// rather than a second device, and it is not carried beside this one — an invalid statistic
+    /// kept next to a valid one is how the wrong one gets quoted.
     pub slope_ref: f64,
     pub intercept_ref: f64,
     /// SD of the residuals about the reference line, `n-2` degrees of freedom. The scale for limits
@@ -114,28 +114,14 @@ pub fn bland_altman(device: &[f64], reference: &[f64]) -> Option<Agreement> {
         return None;
     }
     let diff: Vec<f64> = device.iter().zip(reference).map(|(d, r)| d - r).collect();
-    let mean: Vec<f64> = device.iter().zip(reference).map(|(d, r)| (d + r) / 2.0).collect();
-
     let bias = diff.iter().sum::<f64>() / n as f64;
     let sd = (diff.iter().map(|d| (d - bias).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
-
-    let mbar = mean.iter().sum::<f64>() / n as f64;
-    let sxx: f64 = mean.iter().map(|m| (m - mbar).powi(2)).sum();
-    let sxy: f64 = mean.iter().zip(&diff).map(|(m, d)| (m - mbar) * (d - bias)).sum();
     let syy: f64 = diff.iter().map(|d| (d - bias).powi(2)).sum();
-    // Two different degeneracies. No spread in the MEANS leaves nothing to regress on, so the slope
-    // is unknown. Constant DIFFERENCES give a real slope of zero, and only the correlation is 0/0.
-    let slope = if sxx > f64::EPSILON { sxy / sxx } else { f64::NAN };
-    let r = if sxx > f64::EPSILON && syy > f64::EPSILON {
-        sxy / (sxx * syy).sqrt()
-    } else {
-        f64::NAN
-    };
 
-    // The same regression against the REFERENCE, which is what the proportional-bias test needs.
-    // Residuals: SSE = Syy - Sxy^2/Sxx; t = slope/SE at n-2 df, so it needs three pairs to say
-    // anything. A perfect fit divides by zero: with a real slope that is maximally significant,
-    // with a flat one it is a constant offset and there is no proportional bias to find.
+    // Regress the difference on the REFERENCE. No spread there leaves nothing to regress on, so the
+    // slope is unknown rather than zero. Residuals: SSE = Syy - Sxy^2/Sxx; t = slope/SE at n-2 df,
+    // so it needs three pairs to say anything. A perfect fit divides by zero: with a real slope that
+    // is maximally significant, with a flat one it is a constant offset and there is nothing to find.
     let rbar = reference.iter().sum::<f64>() / n as f64;
     let rxx: f64 = reference.iter().map(|x| (x - rbar).powi(2)).sum();
     let rxy: f64 = reference.iter().zip(&diff).map(|(x, d)| (x - rbar) * (d - bias)).sum();
@@ -161,8 +147,6 @@ pub fn bland_altman(device: &[f64], reference: &[f64]) -> Option<Agreement> {
         sd,
         loa_lo: bias - LOA_Z * sd,
         loa_hi: bias + LOA_Z * sd,
-        slope,
-        r,
         slope_ref,
         intercept_ref: bias - slope_ref * rbar,
         resid_sd,
@@ -238,23 +222,25 @@ mod tests {
         let a = bland_altman(&flat, &reference).unwrap();
         let b = bland_altman(&grows, &reference).unwrap();
         assert!((a.bias - b.bias).abs() < 1e-9, "the two must share a bias to make the point");
-        assert!(a.slope.abs() < 1e-9, "a constant offset has no proportional bias");
-        assert!(b.slope > 0.09, "a growing error must show as a slope, got {}", b.slope);
-        assert!(b.r > 0.99, "and it must be a strong one, got {}", b.r);
+        assert!(a.slope_ref.abs() < 1e-9, "a constant offset has no proportional bias");
+        assert!(b.slope_ref > 0.09, "a growing error must show as a slope, got {}", b.slope_ref);
+        assert!(b.proportional, "and it must resolve, t={}", b.slope_t);
     }
 
     /// Two degeneracies that must not be answered the same way. A constant DIFFERENCE has a real
-    /// slope of zero and no correlation; no spread in the MEANS has no slope at all.
+    /// slope of zero; no spread in the REFERENCE has no slope at all. Regressing on the pair mean
+    /// would tell these apart differently, which is one more reason not to.
     #[test]
     fn the_two_degenerate_cases_are_told_apart() {
         let offset = bland_altman(&[1.0, 2.0, 3.0], &[0.0, 1.0, 2.0]).unwrap();
-        assert_eq!(0.0, offset.slope, "a constant offset is zero proportional bias, not unknown");
-        assert!(offset.r.is_nan(), "but its correlation is 0/0");
+        assert_eq!(0.0, offset.slope_ref, "a constant offset is zero proportional bias, not unknown");
+        assert_eq!(0.0, offset.slope_t, "a perfect flat fit is t=0, not t=inf");
         assert_eq!(1.0, offset.bias);
 
-        // Every pair means 1.5, so there is nothing to regress the difference on.
-        let no_spread = bland_altman(&[1.0, 2.0, 3.0], &[2.0, 1.0, 0.0]).unwrap();
-        assert!(no_spread.slope.is_nan(), "no spread in the means cannot yield a slope");
+        // A constant reference: nothing to regress the difference on.
+        let no_spread = bland_altman(&[1.0, 2.0, 3.0], &[5.0, 5.0, 5.0]).unwrap();
+        assert!(no_spread.slope_ref.is_nan(), "no spread in the reference cannot yield a slope");
+        assert!(!no_spread.proportional, "and an unknown slope is not a resolved one");
 
         assert_eq!(None, bland_altman(&[1.0], &[1.0]), "one pair is not agreement");
         assert_eq!(None, bland_altman(&[1.0, 2.0], &[1.0]), "unpaired input is a caller bug");
@@ -287,7 +273,8 @@ mod tests {
     fn the_branch_is_significance_and_not_the_slopes_magnitude() {
         // Steep (0.57) but only 3 pairs, and the middle one far off the line: t = 1.16 at df 1.
         let steep = bland_altman(&[100.0, 400.0, 400.0], &[100.0, 200.0, 300.0]).unwrap();
-        assert!(steep.slope > 0.5, "must be steep to make the point: {}", steep.slope);
+        // Exactly 0.5 against the reference: diff [0,200,100] on reference [100,200,300].
+        assert!(steep.slope_ref >= 0.5, "must be steep to make the point: {}", steep.slope_ref);
         assert!(!steep.proportional, "3 scattered pairs cannot resolve it, t={}", steep.slope_t);
 
         // Shallow (0.02) but clean and over 40 pairs: resolvable.
@@ -298,7 +285,7 @@ mod tests {
             .map(|(i, r)| r + 0.02 * r + if i % 2 == 0 { 0.5 } else { -0.5 })
             .collect();
         let shallow = bland_altman(&dev, &refr).unwrap();
-        assert!(shallow.slope < 0.03, "must be shallow: {}", shallow.slope);
+        assert!(shallow.slope_ref < 0.03, "must be shallow: {}", shallow.slope_ref);
         assert!(shallow.proportional, "40 clean pairs resolve it, t={}", shallow.slope_t);
     }
 

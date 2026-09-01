@@ -38,6 +38,11 @@ fn stage_of(code: &str) -> Option<usize> {
 }
 
 /// Intervals outside this are not physiology; the same window the decoder applies.
+/// The COVERAGE arm: share of beats kept, and the seed that picks them. Defined ONCE here because
+/// two screens read them, and a screen carrying its own copy makes "COVERAGE" mean two things.
+pub const COVERAGE_KEEP: f64 = 0.60;
+pub const COVERAGE_SEED: u64 = 0xC0FFEE;
+
 const RR_MIN_MS: f64 = 250.0;
 const RR_MAX_MS: f64 = 2500.0;
 

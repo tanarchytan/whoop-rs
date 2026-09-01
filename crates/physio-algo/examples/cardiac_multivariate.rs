@@ -39,8 +39,6 @@ const RR_SUMMARY: [usize; 3] = [15, 16, 17];
 /// The 14 candidates: seven absolute percentiles then seven detrended.
 const PCTL: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 const PERM_SEED: u64 = 0x5EED_C0DE;
-const COVERAGE_KEEP: f64 = 0.60;
-const COVERAGE_SEED: u64 = 0xC0FFEE;
 
 struct Row {
     night: usize,
@@ -66,7 +64,7 @@ fn build(nights: &[MesaNight], arm: &str) -> Vec<Row> {
     for (ni, n) in nights.iter().enumerate() {
         let beats = match arm {
             "TIMING" => mesa::degrade_timing(&n.beats),
-            "COVERAGE" => mesa::degrade_coverage(&n.beats, COVERAGE_KEEP, COVERAGE_SEED),
+            "COVERAGE" => mesa::degrade_coverage(&n.beats, mesa::COVERAGE_KEEP, mesa::COVERAGE_SEED),
             _ => n.beats.clone(),
         };
         let pairs: Vec<(f64, f64)> = beats.iter().map(|b| (b.t, b.rr)).collect();

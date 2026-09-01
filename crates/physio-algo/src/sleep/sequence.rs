@@ -12,8 +12,6 @@
 /// Per-class occupancy, adjacent-pair transitions and bout lengths over one or more segments.
 #[derive(Clone, Debug)]
 pub struct Structure {
-    /// Epochs held by each class.
-    pub occupancy: [i64; 4],
     /// `[from][to]` over adjacent epoch pairs, the diagonal (staying) included.
     pub trans: [[i64; 4]; 4],
     /// Every maximal run's length in epochs, per class, censored runs included.
@@ -26,7 +24,6 @@ pub struct Structure {
 impl Default for Structure {
     fn default() -> Self {
         Self {
-            occupancy: [0; 4],
             trans: [[0; 4]; 4],
             bouts: std::array::from_fn(|_| Vec::new()),
             censored: [0; 4],
@@ -49,9 +46,6 @@ impl Structure {
             return;
         }
         self.segments += 1;
-        for c in seq {
-            self.occupancy[*c] += 1;
-        }
         for w in seq.windows(2) {
             self.trans[w[0]][w[1]] += 1;
         }
@@ -73,15 +67,6 @@ impl Structure {
     pub fn one(seq: &[usize]) -> Self {
         let mut s = Self::default();
         s.add(seq);
-        s
-    }
-
-    /// Build from segments in one call.
-    pub fn of(segments: &[Vec<usize>]) -> Self {
-        let mut s = Self::default();
-        for seg in segments {
-            s.add(seg);
-        }
         s
     }
 
@@ -250,7 +235,9 @@ mod tests {
     /// transition between them, which is how a per-cohort tally invents structure that never happened.
     #[test]
     fn segments_do_not_transition_into_each_other() {
-        let split = Structure::of(&[vec![0, 0, 0], vec![1, 1, 1]]);
+        let mut split = Structure::default();
+        split.add(&[0, 0, 0]);
+        split.add(&[1, 1, 1]);
         assert_eq!(split.trans[0][1], 0, "no transition across a segment edge");
         assert_eq!(split.pairs(), 4, "3+3 epochs give 2+2 pairs, not 5");
         assert_eq!(split.segments, 2);
@@ -265,7 +252,8 @@ mod tests {
         const GAP: usize = 4;
         let s = Structure::one(&[0, 0, GAP, 1, 1]);
         assert_eq!(s.trans[0][1], 0, "the gap must not become a transition");
-        assert_eq!(s.occupancy, [2, 2, 0, 0], "the gap holds no class");
+        let held = |c: usize| s.bouts[c].iter().sum::<usize>();
+        assert_eq!([held(0), held(1)], [2, 2], "the gap itself holds no class");
         assert_eq!(s.segments, 2);
     }
 
@@ -321,7 +309,7 @@ mod tests {
         // Truth moves 0<->1 freely and reaches 2 exactly once.
         let mut truth = [0usize, 0, 1, 1, 0, 0, 1, 1].repeat(8);
         truth[3] = 2;
-        let t = Structure::of(&[truth]);
+        let t = Structure::one(&truth);
         let rare = t.rare_set(0.02);
         assert!(rare[1][2] || rare[2][1], "the single excursion must be rare");
         assert!(!rare[0][1] && !rare[1][0], "the common pair must not be");
@@ -340,7 +328,8 @@ mod tests {
     fn tail_mass_separates_scattered_epochs_from_one_long_bout() {
         let scattered = Structure::one(&[2usize, 0, 0, 0].repeat(20));
         let massed = Structure::one(&[vec![2usize; 20], vec![0; 60]].concat());
-        assert_eq!(scattered.occupancy[2], massed.occupancy[2], "same number of epochs");
+        let held = |s: &Structure| s.bouts[2].iter().sum::<usize>();
+        assert_eq!(held(&scattered), held(&massed), "same number of epochs");
         assert_eq!(scattered.tail_mass(2, 10), Some(0.0));
         assert_eq!(massed.tail_mass(2, 10), Some(1.0));
     }
