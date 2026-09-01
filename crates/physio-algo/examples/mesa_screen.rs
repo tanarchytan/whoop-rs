@@ -24,18 +24,14 @@ mod common;
 use common::mesa::{self, Beat};
 use physio_algo::sleep::cardiac;
 
-const EPOCH_S: f64 = 30.0;
-/// The window the order statistics are centred on, matching the spectral one already in the tree.
-const WINDOW_S: f64 = 270.0;
-
 /// One night's rows and their stages, blocks only where the window could carry one.
 fn night_rows(beats: &[Beat], stage: &[Option<usize>]) -> (Vec<[f64; 18]>, Vec<usize>) {
     let pairs: Vec<(f64, f64)> = beats.iter().map(|b| (b.t, b.rr)).collect();
     let (mut x, mut y) = (Vec::new(), Vec::new());
     for (e, s) in stage.iter().enumerate() {
         let Some(s) = s else { continue };
-        let centre = e as f64 * EPOCH_S + EPOCH_S / 2.0;
-        if let Some(b) = cardiac::extract(&pairs, centre - WINDOW_S / 2.0, centre + WINDOW_S / 2.0) {
+        let centre = e as f64 * mesa::EPOCH_S + mesa::EPOCH_S / 2.0;
+        if let Some(b) = cardiac::extract(&pairs, centre - mesa::WINDOW_S / 2.0, centre + mesa::WINDOW_S / 2.0) {
             x.push(b.row());
             y.push(*s);
         }
@@ -120,7 +116,11 @@ fn cells(x: &[[f64; 18]], y: &[usize], f: usize) -> (Vec<String>, f64) {
 fn main() {
     let limit: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(60);
     let nights = mesa::nights(limit);
-    println!("MESA order-statistics screen — {} nights, window {WINDOW_S} s centred", nights.len());
+    println!(
+        "MESA order-statistics screen — {} nights, window {} s centred",
+        nights.len(),
+        mesa::WINDOW_S
+    );
     println!("`rr_dt_*` are detrended by a least-squares linear fit; the sources do not define it.");
     println!("RAW pools recordings; Z re-scores each column within its recording first.\n");
 

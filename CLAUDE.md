@@ -24,7 +24,7 @@ There is no `whoop-metrics` crate — it became `physio-algo`. Full graph: `docs
 ```bash
 cd whoop-rs
 cargo build
-cargo test                 # 1201 passed, 0 failed, 52 #[ignore]d  (2026-09-01; re-derive, never carry forward)
+cargo test                 # 1202 passed, 0 failed, 52 #[ignore]d  (2026-09-01; re-derive, never carry forward)
 cargo clippy --workspace --all-targets
 cargo run -p whoopctl -- scan
 
@@ -98,6 +98,37 @@ patch once it does.
 - **Gated writes only.** `command::FORBIDDEN`/`DESTRUCTIVE` refuse firmware-load/trim/DFU/config-write
   on the blind path; legitimate ones (reboot, R22) have dedicated intentional methods a UI opt-in gates.
 - **Nothing pushed / no PR / no `git init`-and-push without explicit approval.**
+
+## Verification round — after every plan step, both halves
+
+```bash
+python ../dev-notes/whoop-rs/verify_round.py --since=<the commit the step started from>
+python ../dev-notes/whoop-rs/verify_round.py --self-test    # the checks must fire on a planted defect
+```
+
+The script does the MECHANICAL half: suite green, recorded counts re-derived rather than carried,
+clippy 0, constants not defined twice, public items added by this step that nothing calls, dataset
+columns the loader never opens, mixed line endings. Scoped to `--since` on purpose — over the whole
+tree the orphan check reports 380 items, nearly all the deliberately-unwired FFI surface, and a
+report nobody reads catches nothing.
+
+**A green script does not mean the round passed.** These are the ones it cannot do, each of which
+caught something real on 2026-08-31/09-01:
+
+1. **Break every new gate and watch it fire.** Then check the BREAK APPLIED — a search-and-replace
+   against CRLF with `\n` anchors patches nothing, and reads as "the gate is broken" when the gate
+   was never tested. Assert the anchor matched.
+2. **Re-run the headline on a disjoint slice.** A prefix is reproducible and is still one slice: 60
+   MESA nights gave +0.088, a disjoint 60 gave +0.042, 400 settled it at +0.087.
+3. **Any recall gain: print the predicted share beside it.** Recall is invariant to the cohort's
+   class balance, NOT to the engine calling a class more. Sub-proportional is a loss wearing a gain.
+4. **After a refactor, reproduce the numbers bit-for-bit.** Not "looks similar" — identical.
+5. **Read every comment you wrote and ask whether the code does it.** One claimed a ridge sweep that
+   did not exist until the claim was checked.
+6. **Ask what the instrument CANNOT see**, and write that down beside the result. A confusion matrix
+   cannot see a shuffle; the segment/confusion cross-check compares membership, not order.
+7. **Trace a number to the code path that produced it**, not to the constant that names it. The
+   written transition diagonal said long deep bouts were impossible; the decoder emits them anyway.
 
 ## Style
 

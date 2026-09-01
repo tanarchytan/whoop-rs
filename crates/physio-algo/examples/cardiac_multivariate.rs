@@ -27,8 +27,6 @@ use physio_algo::lda::Lda;
 use physio_algo::sleep::cardiac;
 use physio_algo::sleep::metrics::{balanced_accuracy, confusion4, recall, Confusion4};
 
-const EPOCH_S: f64 = 30.0;
-const WINDOW_S: f64 = 270.0;
 const FOLDS: usize = 5;
 /// Ridge on the pooled within-class scatter. The percentile columns are near-collinear by
 /// construction, so without it the solve fails outright. Swept per arm, because a result that
@@ -76,8 +74,8 @@ fn build(nights: &[MesaNight], arm: &str) -> Vec<Row> {
         let (mut raw, mut ys) = (Vec::new(), Vec::new());
         for (e, s) in n.stage.iter().enumerate() {
             let Some(s) = s else { continue };
-            let c = e as f64 * EPOCH_S + EPOCH_S / 2.0;
-            if let Some(b) = cardiac::extract(&pairs, c - WINDOW_S / 2.0, c + WINDOW_S / 2.0) {
+            let c = e as f64 * mesa::EPOCH_S + mesa::EPOCH_S / 2.0;
+            if let Some(b) = cardiac::extract(&pairs, c - mesa::WINDOW_S / 2.0, c + mesa::WINDOW_S / 2.0) {
                 raw.push(b.row());
                 ys.push(*s);
             }
