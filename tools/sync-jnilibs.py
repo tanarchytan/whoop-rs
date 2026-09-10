@@ -36,7 +36,9 @@ ROOT = HERE.parent
 WHOOP = ROOT.parent
 # The app tree the artifacts land in. `--app-src` retargets it: several worktrees of the app share this
 # one checkout, and writing into the wrong one leaves another tree holding artifacts it did not build.
-APP_SRC = WHOOP / "noop-wt-tan" / "android" / "app" / "src"
+# The worktrees were consolidated into `noop` on 2026-08-14; the old default pointed at a deleted tree
+# and `:app:syncRustJniLibs` failed on every clean checkout until 2026-09-10.
+APP_SRC = WHOOP / "noop" / "android" / "app" / "src"
 JNILIBS = APP_SRC / "main" / "jniLibs"
 BINDINGS = APP_SRC / "main" / "java" / "uniffi" / "whoop_ffi"
 STAMP = JNILIBS / ".fingerprint"
@@ -148,7 +150,7 @@ def main() -> int:
     ap.add_argument("--ensure", action="store_true",
                     help="rebuild ONLY when stale; the build's entry point, cheap when nothing moved")
     ap.add_argument("--app-src", type=Path, default=None,
-                    help="the app's src/ to write bindings + jniLibs into (default: the noop-wt-tan worktree)")
+                    help="the app's src/ to write bindings + jniLibs into (default: the noop checkout)")
     args = ap.parse_args()
     if args.app_src is not None:
         retarget(args.app_src)
