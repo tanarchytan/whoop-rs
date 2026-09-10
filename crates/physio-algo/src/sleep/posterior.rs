@@ -9,8 +9,9 @@
 //! The transition arrives the way `conditioned::viterbi_with` takes it — `trans(t)` is the matrix
 //! for the step INTO epoch `t` — so one implementation serves the fixed shipped matrix and the
 //! per-epoch conditioned one alike, and the closure is called exactly once per step as the decoder
-//! calls it. The same zero floor and the same uniform start are applied, so these marginals assume
-//! exactly what `v2::viterbi` assumes.
+//! calls it. The same zero floor and a uniform start are applied, so these marginals assume exactly
+//! what `v2::viterbi` assumes; the start is normalised where the decoder's is not, which is a
+//! constant offset on every path and cannot move a marginal or an argmax.
 //!
 //! Consumed by the decode rules, not by a pipeline step of its own; nothing shipped decodes with it.
 
@@ -33,7 +34,7 @@ fn log_sum_exp4(v: [f64; 4]) -> f64 {
     m + v.iter().map(|x| (x - m).exp()).sum::<f64>().ln()
 }
 
-/// Largest index of `v`, ties to the earlier one — the tie rule both decoders here use.
+/// Index of the largest value in `v`, ties to the earlier index — the rule both decoders here use.
 fn argmax4(v: &[f64; 4]) -> usize {
     (1..4).fold(0usize, |b, s| if v[s] > v[b] { s } else { b })
 }
@@ -88,9 +89,9 @@ fn backward(em: &[[f64; 4]], log_t: &[[[f64; 4]; 4]]) -> Vec<[f64; 4]> {
     beta
 }
 
-/// Per-epoch `P(stage | whole night)` in probability space, rows summing to 1. `trans(t)` is the
-/// matrix for the step INTO epoch `t`; zeros are floored and the start uniform, as in `v2::viterbi`.
-/// Empty input gives an empty result.
+/// Per-epoch `P(stage | whole night)` in probability space, rows summing to 1; empty in, empty out.
+/// `trans(t)` is the matrix for the step INTO epoch `t`; zeros are floored and the start uniform, as
+/// in `v2::viterbi`. A row whose evidence has collapsed past `f64` falls back to uniform.
 pub fn forward_backward(em: &[[f64; 4]], trans: impl Fn(usize) -> [[f64; 4]; 4]) -> Vec<[f64; 4]> {
     if em.is_empty() {
         return Vec::new();
@@ -135,13 +136,9 @@ pub fn posterior_marginal_decode(post: &[[f64; 4]]) -> Vec<SleepStage> {
     post.iter().map(|p| STAGE_ORDER[argmax4(p)]).collect()
 }
 
-/// Bayes-risk-minimising label per epoch under the per-class epoch costs `fc` only: `fc[c]` is
-/// charged when truth is `c` and the call is not, so calling `a` risks `S - p[a]*fc[a]` with `S`
-/// free of `a`, and the rule is `argmax p[a]*fc[a]`. At `Costs::UNIT` this is the plain argmax.
-///
-/// `ft` and `fh` are SEQUENCE-level: they price where a boundary sits, which is a property of a
-/// pair of epochs and not of one. No per-epoch rule can charge them, so they are ignored here and a
-/// rule that prices them has to decode over adjacent pairs.
+/// Bayes-risk-minimising label per epoch under the per-class epoch costs `fc` ONLY: `fc[c]` is
+/// charged on the TRUE class, so the rule is `argmax p[a]*fc[a]`, `Costs::UNIT` is the plain argmax
+/// and a dearer class is called MORE. `ft`/`fh` price a PAIR, so no per-epoch rule can charge them.
 pub fn decode_with_costs(post: &[[f64; 4]], costs: &Costs) -> Vec<SleepStage> {
     post.iter()
         .map(|p| {
