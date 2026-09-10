@@ -22,6 +22,7 @@
 mod common;
 
 use common::mesa::{self, Beat};
+use common::screen;
 use physio_algo::sleep::cardiac;
 
 /// One night's rows and their stages, blocks only where the window could carry one.
@@ -30,8 +31,8 @@ fn night_rows(beats: &[Beat], stage: &[Option<usize>]) -> (Vec<[f64; 18]>, Vec<u
     let (mut x, mut y) = (Vec::new(), Vec::new());
     for (e, s) in stage.iter().enumerate() {
         let Some(s) = s else { continue };
-        let centre = e as f64 * mesa::EPOCH_S + mesa::EPOCH_S / 2.0;
-        if let Some(b) = cardiac::extract(&pairs, centre - mesa::WINDOW_S / 2.0, centre + mesa::WINDOW_S / 2.0) {
+        let centre = e as f64 * screen::EPOCH_S + screen::EPOCH_S / 2.0;
+        if let Some(b) = cardiac::extract(&pairs, centre - screen::WINDOW_S / 2.0, centre + screen::WINDOW_S / 2.0) {
             x.push(b.row());
             y.push(*s);
         }
@@ -119,7 +120,7 @@ fn main() {
     println!(
         "MESA order-statistics screen — {} nights, window {} s centred",
         nights.len(),
-        mesa::WINDOW_S
+        screen::WINDOW_S
     );
     println!("`rr_dt_*` are detrended by a least-squares linear fit; the sources do not define it.");
     println!("RAW pools recordings; Z re-scores each column within its recording first.\n");

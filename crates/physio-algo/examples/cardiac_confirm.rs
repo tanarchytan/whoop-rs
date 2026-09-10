@@ -21,18 +21,12 @@
 mod common;
 
 use common::{dirs_of, read_meta, read_rr, read_truth, reconstruct_beats, require_psg};
+use common::screen::{self, MEAN_HR, PCTL, PERM_SEED, RIDGE, RR_SUMMARY};
 use physio_algo::lda::Lda;
 use physio_algo::sleep::cardiac;
 use physio_algo::sleep::metrics::{balanced_accuracy, confusion4, recall, Confusion4};
 
 const COHORT: &str = "aauwss";
-const EPOCH_S: f64 = 30.0;
-const WINDOW_S: f64 = 270.0;
-const RIDGE: f64 = 1e-2;
-const MEAN_HR: usize = 14;
-const RR_SUMMARY: [usize; 3] = [15, 16, 17];
-const PCTL: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-const PERM_SEED: u64 = 0x5EED_C0DE;
 /// Two draws is thin, and it is what 13 recordings will carry in reasonable time. The null is
 /// reported as its RANGE rather than a single figure so that thinness is visible.
 const NULL_DRAWS: u64 = 3;
@@ -67,8 +61,8 @@ fn build() -> (Vec<Row>, usize) {
                 continue;
             }
             // Windows are centred on the epoch, in the fixture's own clock.
-            let c = w0 as f64 + *k as f64 * EPOCH_S + EPOCH_S / 2.0;
-            if let Some(b) = cardiac::extract(&beats, c - WINDOW_S / 2.0, c + WINDOW_S / 2.0) {
+            let c = w0 as f64 + *k as f64 * screen::EPOCH_S + screen::EPOCH_S / 2.0;
+            if let Some(b) = cardiac::extract(&beats, c - screen::WINDOW_S / 2.0, c + screen::WINDOW_S / 2.0) {
                 raw.push(b.row());
                 ys.push(*t as usize);
             }

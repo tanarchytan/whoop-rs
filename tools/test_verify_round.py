@@ -160,6 +160,22 @@ def test_scope_is_the_step():
     check("the same orphan INSIDE it is", in_scope, [vr.WARN])
 
 
+def test_untracked_files_are_in_scope():
+    """`git diff` cannot see an untracked file, and a new harness is untracked until staged. Seven
+    duplicated constants passed an after-step round that way. Every line of one must count."""
+    check("names_in reads a const, a pub fn and a pub field",
+          vr.names_in(["const RARE_SHARE: f64 = 0.5;", "pub fn zz_new() {}", "    pub zz_field: u8,"]),
+          {"RARE_SHARE", "zz_new", "zz_field"})
+    probe = vr.CRATES / "physio-algo" / "src" / "verify_round_untracked_probe.rs"
+    try:
+        probe.write_text("pub const ZZ_UNTRACKED_PROBE: u8 = 1;\n", encoding="utf-8")
+        scope = vr.added_names("HEAD")
+        check("an UNTRACKED file's constant is in the step's scope",
+              scope is not None and "ZZ_UNTRACKED_PROBE" in scope, True)
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 def every_check_is_covered():
     """The guard against 3-of-7 recurring: a new check without a test fails this file."""
     found = {n for n, f in inspect.getmembers(vr, inspect.isfunction) if n.startswith("check_")}
@@ -169,7 +185,7 @@ def every_check_is_covered():
 
 def main() -> int:
     for fn in (test_counts, test_ignored_suite, test_clippy, test_evidence, test_dataset_columns,
-               test_file_checks, test_scope_is_the_step, every_check_is_covered):
+               test_file_checks, test_scope_is_the_step, test_untracked_files_are_in_scope, every_check_is_covered):
         print(f"\n{fn.__name__}")
         fn()
     print(f"\n{'FAILED: ' + ', '.join(FAILED) if FAILED else 'all verification-round checks pass'}")

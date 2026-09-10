@@ -173,13 +173,27 @@ def added_names(since):
     )
     if p.returncode != 0:
         return None
+    added = [ln[1:] for ln in p.stdout.splitlines()
+             if ln.startswith("+") and not ln.startswith("+++")]
+    # `git diff` does not see UNTRACKED files, and a brand-new harness is untracked until it is
+    # staged. Every line of one counts as added, or the step's newest file is the one unscanned --
+    # which is how seven duplicated constants passed an after-step round on 2026-09-01.
+    u = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "--", "crates"],
+                       cwd=RS, capture_output=True, text=True, errors="replace")
+    for rel in u.stdout.split():
+        f = RS / rel
+        if f.suffix == ".rs" and f.exists():
+            added.extend(f.read_text(encoding="utf-8", errors="replace").splitlines())
+    return names_in(added)
+
+
+def names_in(lines):
+    """Public items, constants and pub struct fields declared on these lines."""
     names = set()
-    for line in p.stdout.splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
-            body = line[1:]
-            names.update(PUB_ITEM.findall(body))
-            names.update(CONST_DEF.findall(body))
-            names.update(re.findall(r"^\s+pub ([a-z_][a-z0-9_]*):", body))
+    for body in lines:
+        names.update(PUB_ITEM.findall(body))
+        names.update(CONST_DEF.findall(body))
+        names.update(re.findall(r"^\s+pub ([a-z_][a-z0-9_]*):", body))
     return names
 
 

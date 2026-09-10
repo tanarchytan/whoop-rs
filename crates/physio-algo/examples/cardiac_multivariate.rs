@@ -23,20 +23,12 @@
 mod common;
 
 use common::mesa::{self, MesaNight};
+use common::screen::{self, MEAN_HR, PCTL, PERM_SEED, RIDGE, RR_SUMMARY};
 use physio_algo::lda::Lda;
 use physio_algo::sleep::cardiac;
 use physio_algo::sleep::metrics::{balanced_accuracy, confusion4, recall, Confusion4};
 
 const FOLDS: usize = 5;
-/// Ridge on the pooled within-class scatter. The percentile columns are near-collinear by
-/// construction, so without it the solve fails outright. Swept per arm, because a result that
-/// depends on the regulariser is a result about the regulariser.
-const RIDGE: f64 = 1e-2;
-const MEAN_HR: usize = 14;
-const RR_SUMMARY: [usize; 3] = [15, 16, 17];
-/// The 14 candidates: seven absolute percentiles then seven detrended.
-const PCTL: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-const PERM_SEED: u64 = 0x5EED_C0DE;
 
 struct Row {
     night: usize,
@@ -74,8 +66,8 @@ fn build(nights: &[MesaNight], arm: &str) -> Vec<Row> {
         let (mut raw, mut ys) = (Vec::new(), Vec::new());
         for (e, s) in n.stage.iter().enumerate() {
             let Some(s) = s else { continue };
-            let c = e as f64 * mesa::EPOCH_S + mesa::EPOCH_S / 2.0;
-            if let Some(b) = cardiac::extract(&pairs, c - mesa::WINDOW_S / 2.0, c + mesa::WINDOW_S / 2.0) {
+            let c = e as f64 * screen::EPOCH_S + screen::EPOCH_S / 2.0;
+            if let Some(b) = cardiac::extract(&pairs, c - screen::WINDOW_S / 2.0, c + screen::WINDOW_S / 2.0) {
                 raw.push(b.row());
                 ys.push(*s);
             }

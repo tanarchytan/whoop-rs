@@ -45,12 +45,6 @@ fn stage_of(code: &str) -> Option<usize> {
 /// Intervals outside this are not physiology; the same window the decoder applies.
 /// The COVERAGE arm: share of beats kept, and the seed that picks them. Defined ONCE here because
 /// two screens read them, and a screen carrying its own copy makes "COVERAGE" mean two things.
-/// The epoch grid and the analysis window both screens centre on. Defined ONCE: two screens
-/// carrying their own copies is how the same arm name comes to mean two different things.
-pub const EPOCH_S: f64 = 30.0;
-/// 270 s is radha2019's window and sun2020's, and the spectral one already in the tree.
-pub const WINDOW_S: f64 = 270.0;
-
 pub const COVERAGE_KEEP: f64 = 0.60;
 pub const COVERAGE_SEED: u64 = 0xC0FFEE;
 
