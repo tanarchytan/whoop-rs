@@ -14,6 +14,9 @@
 //! constant offset on every path and cannot move a marginal or an argmax.
 //!
 //! Consumed by the decode rules, not by a pipeline step of its own; nothing shipped decodes with it.
+//! `markov_loss`'s `ft` and `fh` price where a boundary SITS, which is a property of a PAIR of
+//! epochs, so no per-epoch rule below can charge them and a rule that prices them must decode over
+//! adjacent pairs.
 
 use super::markov_loss::Costs;
 use super::{SleepStage, STAGE_ORDER};
@@ -136,9 +139,9 @@ pub fn posterior_marginal_decode(post: &[[f64; 4]]) -> Vec<SleepStage> {
     post.iter().map(|p| STAGE_ORDER[argmax4(p)]).collect()
 }
 
-/// Bayes-risk-minimising label per epoch under the per-class epoch costs `fc` ONLY: `fc[c]` is
-/// charged on the TRUE class, so the rule is `argmax p[a]*fc[a]`, `Costs::UNIT` is the plain argmax
-/// and a dearer class is called MORE. `ft`/`fh` price a PAIR, so no per-epoch rule can charge them.
+/// Bayes-risk-minimising label per epoch under the per-class epoch costs `fc` ONLY, indexed in
+/// [`STAGE_ORDER`] columns like `post`. `fc[c]` is charged on the TRUE class, so the rule is
+/// `argmax p[a]*fc[a]`: `Costs::UNIT` is the plain argmax, and a DEARER class is called MORE.
 pub fn decode_with_costs(post: &[[f64; 4]], costs: &Costs) -> Vec<SleepStage> {
     post.iter()
         .map(|p| {
