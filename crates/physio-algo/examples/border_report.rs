@@ -22,8 +22,13 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
+use common::screen::{PERM_SEED, RIDGE};
 use common::{dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, require_psg};
+use physio_algo::lda::Lda;
 use physio_algo::sleep::agreement::{bland_altman, summarise, NightSummary};
+use physio_algo::sleep::cardiac_emit::{self, CardiacEmit, COLS};
 use physio_algo::sleep::metrics::{
     balanced_accuracy, bootstrap_kappa_ci, confusion4, f1, kappa3, kappa4,
     kappa_after_reassignment, kappa_class_bonus, merge3, min_recall, per_recording, precision,
@@ -32,7 +37,7 @@ use physio_algo::sleep::metrics::{
 use physio_algo::sleep::conditioned::ConditionedCfg;
 use physio_algo::sleep::pipeline::{run, DecodeCfg, EmitCfg, SleepConfig};
 use physio_algo::sleep::sequence::{bout_w1, min_run_smooth, Structure};
-use physio_algo::sleep::{epoch_starts_v2, params::Params, SleepInput};
+use physio_algo::sleep::{epoch_starts_v2, params::Params, prepare_v2, SleepInput};
 
 const EPOCH: i64 = 30;
 const EPOCH_MIN: f64 = 0.5;
@@ -51,6 +56,10 @@ const SMOOTH_MIN: usize = 6;
 const MIN_LABEL_DENSITY: f64 = 0.95;
 const BOOTSTRAP_DRAWS: usize = 2000;
 const BOOTSTRAP_SEED: u64 = 0x5EED;
+/// At or below this many recordings a FITTED arm holds out one at a time; above it the fold-to-fold
+/// spread is the smaller worry and the runtime is the larger, so it holds out a fifth.
+const LORO_MAX_NIGHTS: usize = 40;
+const FOLDS: usize = 5;
 
 struct Night {
     cm: Confusion4,
@@ -61,11 +70,40 @@ struct Night {
     segs: Vec<(Vec<usize>, Vec<usize>)>,
 }
 
-/// Score one cohort under one config. Labels are aligned to truth BY TIME, not by position: an epoch
-/// carrying neither HR nor gravity is dropped from the staging, so the sequences can differ in length.
-fn score(ds: &str, cfg: &SleepConfig, p: &Params) -> Vec<Night> {
+/// One recording, loaded once and scored under every arm.
+struct Loaded {
+    input: SleepInput,
+    truth: BTreeMap<usize, i32>,
+    train: TrainNight,
+}
+
+/// One recording's training rows: the fourteen z-scored cardiac columns from the LIBRARY producer,
+/// each with the truth label of its own epoch. The emission reads the same rows from the same
+/// function, so a fit is never against a quantity the engine does not see.
+#[derive(Default)]
+struct TrainNight {
+    id: usize,
+    rows: Vec<[f64; COLS]>,
+    y: Vec<usize>,
+    /// Prepared epochs whose window held too few beats to carry columns at all.
+    missing: usize,
+    epochs: usize,
+}
+
+/// How an arm gets its config: a function of the TRAINING recordings. A fixed arm ignores them; a
+/// fitted one is refitted for every held-out recording and is never handed it.
+type Fit = Box<dyn Fn(&[&TrainNight]) -> Option<SleepConfig>>;
+struct Arm(Fit);
+
+fn fixed(cfg: SleepConfig) -> Arm {
+    Arm(Box::new(move |_| Some(cfg)))
+}
+
+/// Load a cohort once. Same order and same skips as the scoring loop, so a recording either carries
+/// a training set and a card row or neither.
+fn load(ds: &str) -> Vec<Loaded> {
     require_psg(ds);
-    let mut out = Vec::new();
+    let mut out: Vec<Loaded> = Vec::new();
     for dir in &dirs_of(ds) {
         let truth = read_truth(dir);
         let Some((w0, w1, _)) = read_meta(dir) else { continue };
@@ -74,7 +112,62 @@ fn score(ds: &str, cfg: &SleepConfig, p: &Params) -> Vec<Night> {
             continue;
         }
         let input = SleepInput { start: w0, end: w1, hr: read_hr(dir), rr: read_rr(dir), accel };
-        let st = run(&input, cfg, p);
+        let train = training_rows(out.len(), &input, &truth, w0);
+        out.push(Loaded { input, truth, train });
+    }
+    out
+}
+
+/// The cardiac columns on v2's own epoch grid, kept where the epoch also carries a truth label.
+fn training_rows(id: usize, input: &SleepInput, truth: &BTreeMap<usize, i32>, w0: i64) -> TrainNight {
+    let prep = prepare_v2(input, &Params::SHIPPED);
+    let cols = cardiac_emit::columns(input, &prep);
+    let mut t = TrainNight { id, epochs: cols.len(), ..TrainNight::default() };
+    for (s, c) in epoch_starts_v2(&prep).iter().zip(&cols) {
+        let Some(row) = c else {
+            t.missing += 1;
+            continue;
+        };
+        let Ok(k) = usize::try_from((*s - w0) / EPOCH) else { continue };
+        if let Some(v) = truth.get(&k).filter(|v| (0..4).contains(*v)) {
+            t.rows.push(*row);
+            t.y.push(*v as usize);
+        }
+    }
+    t
+}
+
+/// One config per recording. A fitted arm's fold assignment lives here, and the training set for a
+/// recording is asserted never to contain it.
+fn configs(loaded: &[Loaded], arm: &Arm) -> Vec<Option<SleepConfig>> {
+    let n = loaded.len();
+    let folds = if n <= LORO_MAX_NIGHTS { n } else { FOLDS }.max(1);
+    let mut cache: Vec<Option<Option<SleepConfig>>> = vec![None; folds];
+    (0..n)
+        .map(|i| {
+            let g = i % folds;
+            if cache[g].is_none() {
+                let idx: Vec<usize> = (0..n).filter(|j| j % folds != g).collect();
+                assert!(!idx.contains(&i), "recording {i} is in its own training set");
+                assert!(idx.len() < n, "the training set must be a strict subset");
+                let train: Vec<&TrainNight> = idx.iter().map(|j| &loaded[*j].train).collect();
+                cache[g] = Some((arm.0)(&train));
+            }
+            cache[g].expect("the fold was just filled")
+        })
+        .collect()
+}
+
+/// Score one cohort under one arm's per-recording configs. Labels are aligned to truth BY TIME, not
+/// by position: an epoch carrying neither HR nor gravity is dropped from the staging, so the
+/// sequences can differ in length.
+fn score(loaded: &[Loaded], cfgs: &[Option<SleepConfig>], p: &Params) -> Vec<Night> {
+    let mut out = Vec::new();
+    for (night, cfg) in loaded.iter().zip(cfgs) {
+        let Some(cfg) = cfg else { continue };
+        let (input, truth) = (&night.input, &night.truth);
+        let w0 = input.start;
+        let st = run(input, cfg, p);
         let (Some(stages), Some(prep)) = (st.stages.as_ref(), st.prepared.as_ref()) else { continue };
 
         let starts = epoch_starts_v2(prep);
@@ -86,7 +179,7 @@ fn score(ds: &str, cfg: &SleepConfig, p: &Params) -> Vec<Night> {
         let (mut d, mut r) = (Vec::new(), Vec::new());
         let mut segs: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
         let mut prev: Option<usize> = None;
-        for (k, t) in &truth {
+        for (k, t) in truth {
             let staged = (0..4).contains(t).then(|| at.get(&(w0 + *k as i64 * EPOCH))).flatten();
             let Some(lab) = staged else {
                 // An unlabelled or unstaged epoch is a hole, and a hole ends the segment.
@@ -330,6 +423,52 @@ fn structure(nights: &[Night], cm: &Confusion4) {
     );
 }
 
+fn splitmix(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Shuffle each column WITHIN one recording: distribution and per-night scaling survive, only the
+/// alignment to stage is destroyed. Keyed on the recording's own id, so a fold cannot change the
+/// draw a recording gets.
+fn shuffled(t: &TrainNight) -> Vec<[f64; COLS]> {
+    let mut rows = t.rows.clone();
+    for k in 0..COLS {
+        let mut r = PERM_SEED ^ splitmix(((t.id as u64) << 8) | k as u64);
+        for i in (1..rows.len()).rev() {
+            r = splitmix(r);
+            let j = (r >> 11) as usize % (i + 1);
+            let tmp = rows[i][k];
+            rows[i][k] = rows[j][k];
+            rows[j][k] = tmp;
+        }
+    }
+    rows
+}
+
+/// Fit the cardiac emission on the TRAINING recordings only. `permute` is the falsifier: the same
+/// rows with each column shuffled within its own recording, so the fit sees the family's
+/// distribution and none of its alignment to stage.
+fn cardiac_fit(train: &[&TrainNight], lambda_milli: u32, permute: bool) -> Option<SleepConfig> {
+    let (mut x, mut y) = (Vec::new(), Vec::new());
+    for t in train {
+        let rows = if permute { shuffled(t) } else { t.rows.clone() };
+        for (r, c) in rows.iter().zip(&t.y) {
+            x.push(r.to_vec());
+            y.push(*c);
+        }
+    }
+    let lda = Lda::fit(&x, &y, RIDGE)?;
+    let emit = EmitCfg::V2PlusCardiac(CardiacEmit::from_lda(&lda, lambda_milli)?);
+    Some(SleepConfig { emit, decode: DecodeCfg::Viterbi })
+}
+
+fn cardiac_arm(lambda_milli: u32, permute: bool) -> Arm {
+    Arm(Box::new(move |t| cardiac_fit(t, lambda_milli, permute)))
+}
+
 /// Mix every transition row toward uniform, leaving the emissions untouched. At 1.0 the decoder
 /// follows the emissions alone, which is the only arm that separates "the prior is doing the
 /// smoothing" from "the emissions cannot discriminate". `Params::SHIPPED` is never mutated.
@@ -363,14 +502,23 @@ fn main() {
         emit: EmitCfg::V2,
         decode: DecodeCfg::Conditioned(ConditionedCfg { beta_milli }),
     };
-    let arms: [(&str, SleepConfig, Params); 7] = [
-        ("v2 shipped recipe (NULL READING)", SleepConfig::shipped(), Params::SHIPPED),
-        ("transition 50% toward uniform", SleepConfig::shipped(), flattened(0.5)),
-        ("transition UNIFORM - emissions alone", SleepConfig::shipped(), flattened(1.0)),
-        ("wake>rem and wake>deep opened at truth's rate", SleepConfig::shipped(), wake_row_opened()),
-        ("conditioned diagonal, beta 0.25", conditioned(250), Params::SHIPPED),
-        ("conditioned diagonal, beta 0.5", conditioned(500), Params::SHIPPED),
-        ("conditioned diagonal, beta 1.0", conditioned(1000), Params::SHIPPED),
+    // The cardiac arms are FITTED, held out by recording. Their permuted twins fit on the same
+    // rows with the column-to-stage alignment destroyed: if the real arm's gain does not exceed
+    // theirs, what moved was the fit's freedom and not the family.
+    let arms: Vec<(&str, Arm, Params)> = vec![
+        ("v2 shipped recipe (NULL READING)", fixed(SleepConfig::shipped()), Params::SHIPPED),
+        ("transition 50% toward uniform", fixed(SleepConfig::shipped()), flattened(0.5)),
+        ("transition UNIFORM - emissions alone", fixed(SleepConfig::shipped()), flattened(1.0)),
+        ("wake>rem and wake>deep opened at truth's rate", fixed(SleepConfig::shipped()), wake_row_opened()),
+        ("conditioned diagonal, beta 0.25", fixed(conditioned(250)), Params::SHIPPED),
+        ("conditioned diagonal, beta 0.5", fixed(conditioned(500)), Params::SHIPPED),
+        ("conditioned diagonal, beta 1.0", fixed(conditioned(1000)), Params::SHIPPED),
+        ("cardiac emission, lambda 0.5", cardiac_arm(500, false), Params::SHIPPED),
+        ("cardiac emission, lambda 1.0", cardiac_arm(1000, false), Params::SHIPPED),
+        ("cardiac emission, lambda 2.0", cardiac_arm(2000, false), Params::SHIPPED),
+        ("cardiac PERMUTED null, lambda 0.5", cardiac_arm(500, true), Params::SHIPPED),
+        ("cardiac PERMUTED null, lambda 1.0", cardiac_arm(1000, true), Params::SHIPPED),
+        ("cardiac PERMUTED null, lambda 2.0", cardiac_arm(2000, true), Params::SHIPPED),
     ];
 
     println!("THE BORDER — what any engine is measured on. Minutes, except efficiency in percent.");
@@ -380,8 +528,19 @@ fn main() {
             println!("\n{ds}: missing");
             continue;
         }
-        for (arm, cfg, p) in &arms {
-            card(ds, arm, &score(ds, cfg, p));
+        let loaded = load(ds);
+        let (miss, eps) = loaded
+            .iter()
+            .fold((0usize, 0usize), |a, l| (a.0 + l.train.missing, a.1 + l.train.epochs));
+        let rows: usize = loaded.iter().map(|l| l.train.rows.len()).sum();
+        println!(
+            "
+{ds}: {} recording(s); {miss} of {eps} prepared epochs ({:.1}%) carry no cardiac columns; {rows} labelled rows to fit on",
+            loaded.len(),
+            miss as f64 / eps.max(1) as f64 * 100.0
+        );
+        for (arm, a, p) in &arms {
+            card(ds, arm, &score(&loaded, &configs(&loaded, a), p));
         }
     }
 }

@@ -6,8 +6,8 @@
 
 /// The epoch grid, and the analysis window the order statistics are centred on.
 pub const EPOCH_S: f64 = 30.0;
-/// 270 s is radha2019's window and sun2020's, and the spectral one already in the tree.
-pub const WINDOW_S: f64 = 270.0;
+/// The analysis window, from the library so a screen and the emission read the same span.
+pub use physio_algo::sleep::cardiac::WINDOW_S;
 /// Ridge on the pooled within-class scatter. The percentile columns are near-collinear by
 /// construction, so without it the solve fails outright; swept and inert over four decades.
 pub const RIDGE: f64 = 1e-2;
