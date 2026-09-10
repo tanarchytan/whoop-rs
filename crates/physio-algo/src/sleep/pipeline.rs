@@ -14,7 +14,8 @@
 //! 3..=9 currently fold into [`StepId::Assemble`], which digests the epoch grid and not the feature
 //! values.
 
-use super::v2::{anchor_of, emissions_at, epoch_starts, prepare, viterbi, Anchor, Prepared};
+use super::conditioned::{self, ConditionedCfg};
+use super::v2::{anchor_of, emission_terms, emissions_at, epoch_starts, prepare, viterbi, Anchor, Prepared};
 use super::{is_stageable, params::Params, SleepInput, SleepStage};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -253,6 +254,17 @@ fn digest_input(input: &SleepInput, ok: bool) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SleepConfig {
     pub emit: EmitCfg,
+    pub decode: DecodeCfg,
+}
+
+/// Decoder. `Viterbi` is the shipped path under `Params::transition`. `Conditioned` loosens the
+/// diagonal by each epoch's own motion; at `beta_milli: 0` it is `Viterbi` label for label. The
+/// ANCHOR is always chosen under the shipped decoder - the seam covers the final decode only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DecodeCfg {
+    #[default]
+    Viterbi,
+    Conditioned(ConditionedCfg),
 }
 
 /// Emission model. `V2` is the shipped recipe.
@@ -272,7 +284,7 @@ impl SleepConfig {
     /// Reproduces `v2::stage_with` label-for-label. Variants are named, not inherited from
     /// `#[default]`, so moving a default cannot silently redefine the control.
     pub fn shipped() -> Self {
-        SleepConfig { emit: EmitCfg::V2 }
+        SleepConfig { emit: EmitCfg::V2, decode: DecodeCfg::Viterbi }
     }
 }
 
@@ -312,13 +324,26 @@ pub fn run_to(input: &SleepInput, cfg: &SleepConfig, p: &Params, upto: StepId) -
                 st.record(step, d, "v2 emissions");
             }
             StepId::Decode => {
-                let labels = match st.emissions.as_ref() {
-                    Some(em) => viterbi(em, &p.transition),
-                    None => Vec::new(),
+                let labels = match (st.emissions.as_ref(), cfg.decode) {
+                    (Some(em), DecodeCfg::Viterbi) => viterbi(em, &p.transition),
+                    (Some(em), DecodeCfg::Conditioned(c)) => match st.prepared.as_ref() {
+                        Some(prep) => conditioned::decode(
+                            em,
+                            &p.transition,
+                            &conditioned::motion_of(&emission_terms(prep, p)),
+                            c.beta(),
+                        ),
+                        None => Vec::new(),
+                    },
+                    _ => Vec::new(),
                 };
                 let d = digest_stages(&labels);
                 st.stages = Some(labels);
-                st.record(step, d, "viterbi");
+                let note = match cfg.decode {
+                    DecodeCfg::Viterbi => "viterbi",
+                    DecodeCfg::Conditioned(_) => "conditioned viterbi",
+                };
+                st.record(step, d, note);
             }
             // 11..=12 run inside `emissions_at`; 15 is a constant; 17..=19 do not exist yet.
             _ => st.record(step, 0, "pass-through"),

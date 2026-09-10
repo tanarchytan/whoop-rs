@@ -29,7 +29,8 @@ use physio_algo::sleep::metrics::{
     kappa_after_reassignment, kappa_class_bonus, merge3, min_recall, per_recording, precision,
     recall, truth_marginals, Confusion4, Spread,
 };
-use physio_algo::sleep::pipeline::{run, SleepConfig};
+use physio_algo::sleep::conditioned::ConditionedCfg;
+use physio_algo::sleep::pipeline::{run, DecodeCfg, EmitCfg, SleepConfig};
 use physio_algo::sleep::sequence::{bout_w1, min_run_smooth, Structure};
 use physio_algo::sleep::{epoch_starts_v2, params::Params, SleepInput};
 
@@ -356,11 +357,20 @@ fn wake_row_opened() -> Params {
 
 fn main() {
     // One entry per arm. A new engine is a new SleepConfig here, never a change to the scoring above.
-    let arms: [(&str, SleepConfig, Params); 4] = [
+    // The conditioned arms are CONFIGS. Nothing below the arm table changes for them, which is
+    // the seam's own test: an arm that needed the scoring edited would mean the seam does not work.
+    let conditioned = |beta_milli: u32| SleepConfig {
+        emit: EmitCfg::V2,
+        decode: DecodeCfg::Conditioned(ConditionedCfg { beta_milli }),
+    };
+    let arms: [(&str, SleepConfig, Params); 7] = [
         ("v2 shipped recipe (NULL READING)", SleepConfig::shipped(), Params::SHIPPED),
         ("transition 50% toward uniform", SleepConfig::shipped(), flattened(0.5)),
         ("transition UNIFORM - emissions alone", SleepConfig::shipped(), flattened(1.0)),
         ("wake>rem and wake>deep opened at truth's rate", SleepConfig::shipped(), wake_row_opened()),
+        ("conditioned diagonal, beta 0.25", conditioned(250), Params::SHIPPED),
+        ("conditioned diagonal, beta 0.5", conditioned(500), Params::SHIPPED),
+        ("conditioned diagonal, beta 1.0", conditioned(1000), Params::SHIPPED),
     ];
 
     println!("THE BORDER — what any engine is measured on. Minutes, except efficiency in percent.");

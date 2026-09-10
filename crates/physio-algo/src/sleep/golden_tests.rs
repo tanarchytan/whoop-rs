@@ -275,6 +275,26 @@ fn analyze_finds_the_night_inside_a_waking_day_and_anchors_resting_hr_to_it() {
     assert_eq!(s.end, s.segments.last().unwrap().end);
 }
 
+/// The conditioned decoder at beta 0 is the shipped one label for label. This is the null every
+/// conditioned arm is read against, and it must hold on the REAL pipeline, not only in the unit test.
+#[test]
+fn conditioned_at_beta_zero_is_the_shipped_hypnogram() {
+    use super::conditioned::ConditionedCfg;
+    use super::pipeline::{run, DecodeCfg, EmitCfg, SleepConfig};
+
+    let input = golden_input();
+    let shipped = run(&input, &SleepConfig::shipped(), &Params::SHIPPED);
+    let null = SleepConfig { emit: EmitCfg::V2, decode: DecodeCfg::Conditioned(ConditionedCfg { beta_milli: 0 }) };
+    let cond = run(&input, &null, &Params::SHIPPED);
+    assert_eq!(shipped.stages, cond.stages, "beta 0 must reproduce the shipped labels");
+    assert!(!shipped.stages.as_ref().unwrap().is_empty());
+
+    // And a real beta must be ABLE to move it, or the seam is wired to nothing.
+    let loose = SleepConfig { emit: EmitCfg::V2, decode: DecodeCfg::Conditioned(ConditionedCfg { beta_milli: 3000 }) };
+    let moved = run(&input, &loose, &Params::SHIPPED);
+    assert_ne!(shipped.stages, moved.stages, "beta 3.0 on the golden night must change something");
+}
+
 /// The pipeline at `shipped()` must equal `stage_v2_with` segment for segment. Everything the staged
 /// refactor measures runs through `run_to`, so a drift here invalidates all of it.
 #[test]
