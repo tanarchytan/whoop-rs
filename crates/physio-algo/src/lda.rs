@@ -135,6 +135,20 @@ impl Lda {
         Some(Lda { coef, constant, centre, scale })
     }
 
+    /// The four discriminants themselves, in class order, before the argmax `predict` takes. The
+    /// rule is affine in the row, which is what lets `sleep::cardiac_emit` read the fitted map out
+    /// by probing. Same refusals as `predict`: wrong width or a non-finite value is `None`.
+    pub fn scores(&self, row: &[f64]) -> Option<[f64; CLASSES]> {
+        if row.len() != self.centre.len() || row.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let z: Vec<f64> =
+            (0..row.len()).map(|j| (row[j] - self.centre[j]) / self.scale[j]).collect();
+        Some(std::array::from_fn(|c| {
+            (0..z.len()).map(|j| z[j] * self.coef[c][j]).sum::<f64>() + self.constant[c]
+        }))
+    }
+
     /// Highest discriminant wins; ties resolve to the lower class. `None` when the row is the wrong
     /// width or carries a non-finite value, which is a different fact from predicting class 0.
     pub fn predict(&self, row: &[f64]) -> Option<usize> {
@@ -252,6 +266,30 @@ mod tests {
         assert_eq!(clean.centre, with_nan.centre, "a skipped row cannot move the fit");
         assert_eq!(None, clean.predict(&[f64::NAN, 1.0]), "missing is not a prediction");
         assert_eq!(None, clean.predict(&[1.0]), "the wrong width is a caller bug");
+    }
+
+    /// `predict` is the argmax of `scores`, and `scores` is affine in the row. Both are relied on
+    /// by `sleep::cardiac_emit`, which reads the fitted map out by probing the basis.
+    #[test]
+    fn scores_argmax_to_predict_and_are_affine_in_the_row() {
+        let (x, y) = blobs(30);
+        let m = Lda::fit(&x, &y, 1e-3).unwrap();
+        for r in &x {
+            let d = m.scores(r).expect("a finite row of the right width scores");
+            let arg = (0..CLASSES)
+                .max_by(|a, b| d[*a].total_cmp(&d[*b]).then(b.cmp(a)))
+                .unwrap();
+            assert_eq!(Some(arg), m.predict(r), "predict must be the argmax of scores");
+        }
+        // Affine: s(a + b) - s(0) must equal (s(a) - s(0)) + (s(b) - s(0)).
+        let (z, a, b) = ([0.0, 0.0], [3.0, 0.0], [0.0, -2.0]);
+        let (sz, sa, sb) = (m.scores(&z).unwrap(), m.scores(&a).unwrap(), m.scores(&b).unwrap());
+        let sab = m.scores(&[a[0] + b[0], a[1] + b[1]]).unwrap();
+        for c in 0..CLASSES {
+            assert!((sab[c] - sz[c] - (sa[c] - sz[c]) - (sb[c] - sz[c])).abs() < 1e-9, "class {c}");
+        }
+        assert_eq!(None, m.scores(&[f64::NAN, 1.0]), "missing is not a score");
+        assert_eq!(None, m.scores(&[1.0]), "the wrong width is a caller bug");
     }
 
     #[test]

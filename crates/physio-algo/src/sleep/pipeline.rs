@@ -14,6 +14,7 @@
 //! 3..=9 currently fold into [`StepId::Assemble`], which digests the epoch grid and not the feature
 //! values.
 
+use super::cardiac_emit::{self, CardiacEmit};
 use super::conditioned::{self, ConditionedCfg};
 use super::v2::{anchor_of, emission_terms, emissions_at, epoch_starts, prepare, viterbi, Anchor, Prepared};
 use super::{is_stageable, params::Params, SleepInput, SleepStage};
@@ -267,11 +268,14 @@ pub enum DecodeCfg {
     Conditioned(ConditionedCfg),
 }
 
-/// Emission model. `V2` is the shipped recipe.
+/// Emission model. `V2` is the shipped recipe. `V2PlusCardiac` adds a fitted linear discriminant
+/// over the night's fourteen R-R order statistics to v2's row; at `lambda_milli: 0` it is `V2` row
+/// for row - the built-in null. The map is fitted held out by recording, never here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum EmitCfg {
     #[default]
     V2,
+    V2PlusCardiac(CardiacEmit),
 }
 
 impl Default for SleepConfig {
@@ -314,14 +318,24 @@ pub fn run_to(input: &SleepInput, cfg: &SleepConfig, p: &Params, upto: StepId) -
             }
             StepId::Emit => {
                 let em = match (st.prepared.as_ref(), st.anchor) {
-                    (Some(prep), Some(a)) => match cfg.emit {
-                        EmitCfg::V2 => emissions_at(prep, p, a),
-                    },
+                    (Some(prep), Some(a)) => {
+                        let base = emissions_at(prep, p, a);
+                        match cfg.emit {
+                            EmitCfg::V2 => base,
+                            EmitCfg::V2PlusCardiac(ce) => {
+                                cardiac_emit::add(&base, &cardiac_emit::columns(input, prep), &ce)
+                            }
+                        }
+                    }
                     _ => Vec::new(),
                 };
                 let d = digest_emissions(&em);
                 st.emissions = Some(em);
-                st.record(step, d, "v2 emissions");
+                let note = match cfg.emit {
+                    EmitCfg::V2 => "v2 emissions",
+                    EmitCfg::V2PlusCardiac(_) => "v2 + cardiac emissions",
+                };
+                st.record(step, d, note);
             }
             StepId::Decode => {
                 let labels = match (st.emissions.as_ref(), cfg.decode) {

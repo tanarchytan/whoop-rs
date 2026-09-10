@@ -34,6 +34,26 @@ impl ZScore {
     }
 }
 
+/// Whole-second beat stamps spread back out by their own intervals: `(t_seconds, rr_ms)`, ascending.
+/// The reconstruction `v2` runs before any cardiac statistic sees a beat, and what `cardiac::extract`
+/// and the screening harnesses consume. Re-exported as `sleep::cardiac::reconstruct_beats`.
+pub fn reconstruct_beats(runs: &[RrRun]) -> Vec<(f64, f64)> {
+    let mut beats: Vec<(f64, f64)> = Vec::new();
+    for run in runs {
+        let mut off = 0.0;
+        for (k, ms) in run.intervals.iter().enumerate() {
+            let ms = (*ms as f64).clamp(300.0, 2000.0);
+            // An interval is the gap from the PREVIOUS beat, so the first of a run sits on the stamp.
+            if k > 0 {
+                off += ms / 1000.0;
+            }
+            beats.push((run.ts as f64 + off, ms));
+        }
+    }
+    beats.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    beats
+}
+
 /// Flatten grouped R-R runs into `(ts, rr_ms)` pairs in emission order — the shape the V2 stager buckets by
 /// second. A run reports several beats under one whole-second anchor.
 pub fn flatten_rr(runs: &[RrRun]) -> Vec<(i64, f64)> {
