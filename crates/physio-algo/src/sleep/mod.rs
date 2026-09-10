@@ -22,6 +22,7 @@ mod input;
 mod mainnight;
 pub mod agreement;
 pub mod cardiac;
+pub mod cardiac_emit;
 pub mod conditioned;
 pub mod features;
 pub mod hrv_bands;
@@ -31,7 +32,9 @@ pub mod movement;
 pub mod params;
 pub mod pipeline;
 pub mod posture;
+pub mod posterior;
 mod refine;
+pub mod resp_features;
 pub mod sequence;
 mod v2;
 
