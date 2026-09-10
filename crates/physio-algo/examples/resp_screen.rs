@@ -72,6 +72,17 @@ fn resp_cols() -> Vec<usize> {
     (NC..NF).collect()
 }
 
+/// The one respiratory term the shipped recipe already reads. The family's gain has to be split at
+/// this column, or it would be claiming credit for something the engine already has.
+fn conc_col() -> usize {
+    NC + resp_features::NAMES.iter().position(|n| *n == "resp_conc").expect("resp_conc is a column")
+}
+
+/// The columns this unit ADDS, over and above `conc_col`.
+fn new_cols() -> Vec<usize> {
+    resp_cols().into_iter().filter(|f| *f != conc_col()).collect()
+}
+
 /// One night's rows: both producers over the same centred window, each column then z-scored within
 /// that night. A column the night cannot carry stays NaN rather than becoming a manufactured mean.
 fn rows_of(beats: &[(f64, f64)], epochs: &[(f64, usize)], night: usize) -> Vec<Row> {
@@ -386,19 +397,32 @@ fn mesa_arm(nights: &[MesaNight], arm: &str) {
         ranked.push((d, f));
     }
 
+    let mut conc = base.clone();
+    conc.push(conc_col());
     let mut all = base.clone();
     all.extend(resp_cols());
-    if let Some(cm) = held_out(&rows, &all) {
-        let null = (0..MESA_DRAWS)
+    if let (Some(cc), Some(cm)) = (held_out(&rows, &conc), held_out(&rows, &all)) {
+        let null_all = (0..MESA_DRAWS)
             .filter_map(|k| {
                 held_out(&permuted(&rows, &resp_cols(), PERM_SEED ^ k), &all).map(|c| ba(&c) - ba(&cb))
             })
             .fold(f64::NEG_INFINITY, f64::max);
+        let null_new = (0..MESA_DRAWS)
+            .filter_map(|k| {
+                held_out(&permuted(&rows, &new_cols(), PERM_SEED ^ k), &all).map(|c| ba(&c) - ba(&cc))
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
         println!();
+        show("B_cardiac + resp_conc (have)", &cc);
         show("B_cardiac + ALL respiration", &cm);
         println!(
-            "  family d(BA) {:+.4} against a permuted-family null of {null:+.4}",
+            "  ALL respiration over B_cardiac   d(BA) {:+.4}  against a permuted null of {null_all:+.4}",
             ba(&cm) - ba(&cb)
+        );
+        println!(
+            "  the {} NEW columns over B_cardiac + resp_conc   d(BA) {:+.4}  null {null_new:+.4}",
+            new_cols().len(),
+            ba(&cm) - ba(&cc)
         );
         calling_guard(&cb, &cm);
     }
@@ -426,24 +450,41 @@ fn confirm() {
     let base = baseline();
     let mut all = base.clone();
     all.extend(resp_cols());
-    let (Some(cb), Some(ca)) = (loro(&rows, nights, &base), loro(&rows, nights, &all)) else {
+    let mut conc = base.clone();
+    conc.push(conc_col());
+    let (Some(cb), Some(cc), Some(ca)) =
+        (loro(&rows, nights, &base), loro(&rows, nights, &conc), loro(&rows, nights, &all))
+    else {
         println!("a baseline could not fit on any held-out night - nothing here would mean anything");
         return;
     };
     show("B_cardiac  (18 columns)", &cb);
+    show("B_cardiac + resp_conc (have)", &cc);
     show("B_cardiac + ALL respiration", &ca);
     coverage(&rows);
 
-    let nulls: Vec<f64> = (0..CONFIRM_DRAWS)
-        .filter_map(|k| {
-            loro(&permuted(&rows, &resp_cols(), PERM_SEED ^ k), nights, &all).map(|c| ba(&c))
-        })
-        .collect();
-    let lo = nulls.iter().cloned().fold(f64::INFINITY, f64::min) - ba(&cb);
-    let hi = nulls.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - ba(&cb);
+    let draw = |cols: &[usize]| -> (f64, f64) {
+        let v: Vec<f64> = (0..CONFIRM_DRAWS)
+            .filter_map(|k| loro(&permuted(&rows, cols, PERM_SEED ^ k), nights, &all).map(|c| ba(&c)))
+            .collect();
+        (
+            v.iter().cloned().fold(f64::INFINITY, f64::min),
+            v.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        )
+    };
+    let (lo_a, hi_a) = draw(&resp_cols());
+    let (lo_n, hi_n) = draw(&new_cols());
+    let (lo, hi) = (lo_a - ba(&cb), hi_a - ba(&cb));
     let d = ba(&ca) - ba(&cb);
-    println!("\n  family d(BA) {d:+.4}");
+    println!("\n  ALL respiration over B_cardiac   d(BA) {d:+.4}");
     println!("  permuted-family null d(BA) over {CONFIRM_DRAWS} draws: {lo:+.4} .. {hi:+.4}");
+    println!(
+        "  the {} NEW columns over B_cardiac + resp_conc   d(BA) {:+.4}, null {:+.4} .. {:+.4}",
+        new_cols().len(),
+        ba(&ca) - ba(&cc),
+        lo_n - ba(&cc),
+        hi_n - ba(&cc)
+    );
 
     println!(
         "\n  {:<18} {:>8} {:>9}   {:<23} call% w/l/d/r",
@@ -473,6 +514,10 @@ fn confirm() {
     println!(
         "\n  VERDICT: respiration {} its permuted null on a wrist cohort, on top of the cardiac family.",
         if d > hi { "CLEARS" } else { "DOES NOT CLEAR" }
+    );
+    println!(
+        "  and the columns this unit ADDS {} theirs, on top of the term the recipe already reads.",
+        if ba(&ca) - ba(&cc) > hi_n - ba(&cc) { "CLEAR" } else { "DO NOT CLEAR" }
     );
 }
 
