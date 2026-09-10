@@ -32,6 +32,7 @@ MEAS = ROOT / "whoop-research" / "_actual" / "meas"
 # Documents whose citations are gated. Add new ones here; a document not listed is not gated,
 # and therefore is not evidence.
 SCANNED = [
+    ROOT / "dev-notes" / "TANV1-TARGET-AUDIT-20260901.md",
     ROOT / "dev-notes" / "whoop-rs" / "HLD-LLD-SLEEP-MODEL.md",
     ROOT / "dev-notes" / "whoop-rs" / "SPEC-EMISSION-LADDER.md",
     ROOT / "whoop-research" / "_actual" / "CLAIMS.md",
