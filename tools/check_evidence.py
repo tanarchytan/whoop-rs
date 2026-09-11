@@ -42,6 +42,9 @@ SCANNED = [
 
 REF_RE = re.compile(r"\[REF:([a-z0-9]+)#(q\d+)\]")
 MEAS_RE = re.compile(r"\[MEAS:([a-z0-9_-]+)\]")
+# Anything that LOOKS like a citation. A key the strict patterns cannot parse used to vanish from
+# the scan instead of failing it: `[MEAS:Cardiac-emission-arm]` was invisible and the gate stayed green.
+LOOSE_RE = re.compile(r"\[(REF|MEAS):([^\]]*)\]")
 QUOTE_RE = re.compile(r"^##\s+(q\d+)\s*$", re.M)
 
 MEAS_REQUIRED = ["what:", "data:", "harness:", "date:", "result:", "falsified_by:"]
@@ -232,6 +235,8 @@ SELF_TESTS = [
      "whoop-research/_actual/CLAIMS.md", "[REF:varga2016#q1]", "[REF:yuanlin2006#q1]"),
     ("a measurement record with no falsifier",
      "whoop-research/_actual/meas/deep-dwell-tail.md", "falsified_by:", "was_falsified_by:"),
+    ("a citation whose key the strict pattern cannot parse",
+     "whoop-research/_actual/CLAIMS.md", "[MEAS:cardiac-emission-arm]", "[MEAS:Cardiac-emission-arm]"),
     ("a quote id that does not exist",
      "whoop-research/_actual/CLAIMS.md", "[REF:bizzotto2018#q2]", "[REF:bizzotto2018#q99]"),
     ("the artifact edited under quotes already checked against it",
@@ -298,6 +303,11 @@ def run_checks(quiet: bool = False) -> int:
         text = strip_code(doc.read_text(encoding="utf-8"))
         r = REF_RE.findall(text)
         m = MEAS_RE.findall(text)
+        strict = {x.group(0) for x in REF_RE.finditer(text)} | {x.group(0) for x in MEAS_RE.finditer(text)}
+        for x in LOOSE_RE.finditer(text):
+            if x.group(0) not in strict:
+                fails.append(f"{x.group(0)} -- malformed citation in {doc.name}; keys are lowercase "
+                             f"[a-z0-9_-] and a REF needs #qN")
         per_doc.append((doc.name, len(r), len(m)))
         for key, qid in r:
             refs_seen.add((key, qid))
