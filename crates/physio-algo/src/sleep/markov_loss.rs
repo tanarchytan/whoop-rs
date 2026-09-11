@@ -61,6 +61,19 @@ pub fn geometric_scale(fc: [f64; 4], power: f64) -> Option<[f64; 4]> {
     normalise_geometric(core::array::from_fn(|i| n[i].powf(power)))
 }
 
+use super::SleepStage;
+
+/// A per-class vector moved from one stage order into another, matched BY NAME. `fc`'s two
+/// consumers index it differently, and the harnesses that build it count in a third order, so the
+/// re-index is a named operation with a test rather than a line inside a caller.
+pub fn reindex(v: [f64; 4], from: [SleepStage; 4], to: [SleepStage; 4]) -> Option<[f64; 4]> {
+    let mut out = [0.0; 4];
+    for (i, s) in to.iter().enumerate() {
+        out[i] = v[from.iter().position(|x| x == s)?];
+    }
+    Some(out)
+}
+
 /// When the invented-boundary cost applies to a boundary that IS at the right index but goes to the
 /// wrong state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +235,31 @@ mod tests {
         let c = Costs { fc: [0.0, 0.0, 6.0, 0.0], ft: 0.0, fh: 5.0 };
         // Three wrong deep epochs at 6, plus the one boundary run straight through.
         assert_eq!(sequence_loss(&flat, &truth, &c, TransitionRule::OnlyInvented).unwrap(), 23.0);
+    }
+
+    /// THE mapping every weighted arm depends on. The harnesses count truth in `FIT_ORDER` and the
+    /// decoder reads `STAGE_ORDER`; the two differ in every position, so an off-by-one relabels
+    /// every class and the numbers stay plausible. Pinned on the real constants, not a stand-in.
+    #[test]
+    fn reindex_moves_a_vector_between_the_two_real_stage_orders_by_name() {
+        use crate::sleep::cardiac_emit::FIT_ORDER;
+        use crate::sleep::v2::STAGE_ORDER;
+
+        assert_ne!(FIT_ORDER, STAGE_ORDER, "the two orders must differ or this proves nothing");
+        // One distinct value per class, so any mis-mapping is visible.
+        let by_truth = [10.0, 20.0, 30.0, 40.0];
+        let got = reindex(by_truth, FIT_ORDER, STAGE_ORDER).expect("both orders hold every stage");
+        for (c, s) in STAGE_ORDER.iter().enumerate() {
+            let k = FIT_ORDER.iter().position(|x| x == s).unwrap();
+            assert_eq!(by_truth[k], got[c], "{s:?} landed in the wrong column");
+        }
+        // And the literal answer, so a change to either constant has to be looked at.
+        assert_eq!([30.0, 40.0, 20.0, 10.0], got);
+
+        // A rotation of the target order must NOT give the same answer - the guard against the
+        // mapping being right by coincidence on a symmetric input.
+        let rotated: [SleepStage; 4] = core::array::from_fn(|i| STAGE_ORDER[(i + 1) % 4]);
+        assert_ne!(got, reindex(by_truth, FIT_ORDER, rotated).unwrap());
     }
 
     fn gmean(v: &[f64; 4]) -> f64 {

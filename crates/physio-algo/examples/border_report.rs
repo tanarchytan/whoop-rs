@@ -476,14 +476,10 @@ fn cardiac_arm(lambda_milli: u32, permute: bool) -> Arm {
     Arm(Box::new(move |t| cardiac_fit(t, lambda_milli, permute)))
 }
 
-/// The decoder reads `fc` in `STAGE_ORDER`; truth labels are counted in `FIT_ORDER`. Both are
-/// constants, so the two are matched BY NAME and never by position.
+/// The decoder reads `fc` in `STAGE_ORDER`; truth labels are counted in `FIT_ORDER`. The re-index
+/// lives in the library because nothing in an example is run by `cargo test`.
 fn fc_in_stage_order(by_truth: [f64; 4]) -> [f64; 4] {
-    core::array::from_fn(|c| {
-        let k =
-            FIT_ORDER.iter().position(|s| *s == STAGE_ORDER[c]).expect("a stage is in FIT_ORDER");
-        by_truth[k]
-    })
+    markov_loss::reindex(by_truth, FIT_ORDER, STAGE_ORDER).expect("both orders hold every stage")
 }
 
 /// A seed that IS the fold: these ids are the fold's own training set, whichever recordings it
