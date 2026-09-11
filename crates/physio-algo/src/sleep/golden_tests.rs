@@ -295,6 +295,38 @@ fn conditioned_at_beta_zero_is_the_shipped_hypnogram() {
     assert_ne!(shipped.stages, moved.stages, "beta 3.0 on the golden night must change something");
 }
 
+/// The two posterior decode rules on the REAL pipeline: `MarkovLoss` at unit costs IS the marginal
+/// rule, a dearer class is called more, and the marginal rule is not just Viterbi renamed. Without
+/// the last assertion the seam could be wired to the shipped decoder and every arm would agree.
+#[test]
+fn the_posterior_rules_reach_the_pipeline_and_unit_costs_are_the_marginal_rule() {
+    use super::markov_loss::Costs;
+    use super::pipeline::{run, CostsCfg, DecodeCfg, EmitCfg, SleepConfig};
+    use super::SleepStage;
+
+    let input = golden_input();
+    let arm = |d: DecodeCfg| run(&input, &SleepConfig { emit: EmitCfg::V2, decode: d }, &Params::SHIPPED);
+
+    let shipped = arm(DecodeCfg::Viterbi);
+    let marginal = arm(DecodeCfg::PosteriorMarginal);
+    let unit = arm(DecodeCfg::MarkovLoss(CostsCfg(Costs::UNIT)));
+    assert!(marginal.stages.as_ref().is_some_and(|s| s.len() > 100), "the night must stage");
+    assert_eq!(marginal.stages, unit.stages, "unit costs must be the plain marginal argmax");
+    assert_ne!(shipped.stages, marginal.stages, "the marginal rule must not be viterbi renamed");
+
+    // `fc` is charged on the TRUE class, so a dearer class is called MORE. Indexed in STAGE_ORDER.
+    let deep = |s: &Option<Vec<SleepStage>>| {
+        s.as_ref().map_or(0, |v| v.iter().filter(|x| **x == SleepStage::Deep).count())
+    };
+    let dear = arm(DecodeCfg::MarkovLoss(CostsCfg(Costs { fc: [8.0, 1.0, 1.0, 1.0], ..Costs::UNIT })));
+    assert!(
+        deep(&dear.stages) > deep(&unit.stages),
+        "a dearer deep must be called more: {} vs {}",
+        deep(&dear.stages),
+        deep(&unit.stages)
+    );
+}
+
 /// The pipeline at `shipped()` must equal `stage_v2_with` segment for segment. Everything the staged
 /// refactor measures runs through `run_to`, so a drift here invalidates all of it.
 #[test]

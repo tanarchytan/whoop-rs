@@ -16,6 +16,8 @@
 
 use super::cardiac_emit::{self, CardiacEmit};
 use super::conditioned::{self, ConditionedCfg};
+use super::markov_loss::Costs;
+use super::posterior;
 use super::v2::{anchor_of, emission_terms, emissions_at, epoch_starts, prepare, viterbi, Anchor, Prepared};
 use super::{is_stageable, params::Params, SleepInput, SleepStage};
 
@@ -258,14 +260,44 @@ pub struct SleepConfig {
     pub decode: DecodeCfg,
 }
 
+/// `markov_loss::Costs` as a config value. Equality and hashing are over the bit patterns so they
+/// are total: two cost vectors differing in one entry must not collide in anything keyed on
+/// `SleepConfig`.
+#[derive(Clone, Copy, Debug)]
+pub struct CostsCfg(pub Costs);
+
+impl CostsCfg {
+    fn bits(&self) -> ([u64; 4], u64, u64) {
+        (core::array::from_fn(|i| self.0.fc[i].to_bits()), self.0.ft.to_bits(), self.0.fh.to_bits())
+    }
+}
+
+impl PartialEq for CostsCfg {
+    fn eq(&self, other: &Self) -> bool {
+        self.bits() == other.bits()
+    }
+}
+
+impl Eq for CostsCfg {}
+
+impl core::hash::Hash for CostsCfg {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.bits().hash(state);
+    }
+}
+
 /// Decoder. `Viterbi` is the shipped path under `Params::transition`. `Conditioned` loosens the
-/// diagonal by each epoch's own motion; at `beta_milli: 0` it is `Viterbi` label for label. The
-/// ANCHOR is always chosen under the shipped decoder - the seam covers the final decode only.
+/// diagonal by each epoch's own motion; at `beta_milli: 0` it is `Viterbi` label for label.
+/// `PosteriorMarginal` and `MarkovLoss` price each epoch on its own marginal and are one rule at
+/// `Costs::UNIT`; both read the FIXED transition, as `Viterbi` does. The ANCHOR is always chosen
+/// under the shipped decoder - the seam covers the final decode only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum DecodeCfg {
     #[default]
     Viterbi,
     Conditioned(ConditionedCfg),
+    PosteriorMarginal,
+    MarkovLoss(CostsCfg),
 }
 
 /// Emission model. `V2` is the shipped recipe. `V2PlusCardiac` adds a fitted linear discriminant
@@ -351,6 +383,13 @@ pub fn run_to(input: &SleepInput, cfg: &SleepConfig, p: &Params, upto: StepId) -
                         ),
                         None => Vec::new(),
                     },
+                    (Some(em), DecodeCfg::PosteriorMarginal) => posterior::posterior_marginal_decode(
+                        &posterior::forward_backward(em, |_| p.transition),
+                    ),
+                    (Some(em), DecodeCfg::MarkovLoss(c)) => posterior::decode_with_costs(
+                        &posterior::forward_backward(em, |_| p.transition),
+                        &c.0,
+                    ),
                     _ => Vec::new(),
                 };
                 let d = digest_stages(&labels);
@@ -358,6 +397,8 @@ pub fn run_to(input: &SleepInput, cfg: &SleepConfig, p: &Params, upto: StepId) -
                 let note = match cfg.decode {
                     DecodeCfg::Viterbi => "viterbi",
                     DecodeCfg::Conditioned(_) => "conditioned viterbi",
+                    DecodeCfg::PosteriorMarginal => "posterior-marginal argmax",
+                    DecodeCfg::MarkovLoss(_) => "posterior, bayes risk under fc",
                 };
                 st.record(step, d, note);
             }
