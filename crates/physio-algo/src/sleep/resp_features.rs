@@ -1,8 +1,8 @@
 //! Respiration from the beat series: respiratory sinus arrhythmia over one window.
 //!
 //! One producer for the stager and the screening harnesses, as `cardiac` is for the interval order
-//! statistics. The band, the beat floor and the summed HF power come from `hrv_bands`; the breath
-//! cycles are this module's own band-passed surrogate of the same tachogram.
+//! statistics. The band, the beat and coverage floors and the summed HF power all come from
+//! `hrv_bands`; the breath cycles are this module's own band-passed surrogate of the same tachogram.
 
 use std::f64::consts::PI;
 
@@ -10,8 +10,8 @@ use super::hrv_bands::{self, HF, MIN_BEATS, MIN_COVERAGE};
 use super::resp_regularity;
 use crate::stats::{mean, median, population_sd};
 
-/// Samples on the analysis grid. A power of two, so ONE transform serves the band peak, the band
-/// power and the band-pass; `hrv_bands` fixes the RATE instead and its grid is private.
+/// Samples on the analysis grid. A power of two, so ONE transform serves the band peak, its power
+/// and the band-pass; `hrv_bands` fixes the RATE instead and its grid is private.
 const N: usize = 1024;
 
 /// Fewest complete cycles a breath statistic needs. Under it the spread is reading two breaths.

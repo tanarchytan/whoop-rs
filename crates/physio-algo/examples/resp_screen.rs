@@ -12,9 +12,9 @@
 //! cardiac level would clear a weak baseline and mean nothing.
 //!
 //! Arms are EXACT-NN and TIMING-NN. NN keeps normal-to-normal intervals only, so an ectopic beat
-//! cannot masquerade as a breath; TIMING pushes the beats through our own whole-second wire first.
-//! There is no EXACT arm: a respiratory column that needs sub-second beat timing is not a candidate
-//! for this band, so the question is only whether NN survives the wire.
+//! cannot masquerade as a breath; TIMING pushes the beats through our own whole-second wire first,
+//! so the pair prices what that wire costs. The non-NN and COVERAGE arms the cardiac screen carries
+//! are not run here.
 //!
 //! The gate is the PERMUTED-COLUMN NULL - the same column shuffled WITHIN its own night, which keeps
 //! its distribution and its per-night scaling and destroys only its alignment to stage.
@@ -249,8 +249,8 @@ fn permuted(rows: &[Row], cols: &[usize], seed: u64) -> Vec<Row> {
     out
 }
 
-/// `fonseca2015` eq 5: absolute standardised mean difference of one class against the rest, over the
-/// pooled SD. A second ranking, so the ordering is not an artefact of using the held-out fit.
+/// Absolute standardised mean difference of one class against the rest, over the pooled SD. A
+/// second ranking, so the ordering is not an artefact of using the held-out fit.
 fn asmd(rows: &[Row], f: usize, c: usize) -> Option<f64> {
     let (mut a, mut b) = (Vec::new(), Vec::new());
     for r in rows {
