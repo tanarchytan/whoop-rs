@@ -28,16 +28,17 @@ use common::screen::{PERM_SEED, RIDGE};
 use common::{dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, require_psg};
 use physio_algo::lda::Lda;
 use physio_algo::sleep::agreement::{bland_altman, summarise, NightSummary};
-use physio_algo::sleep::cardiac_emit::{self, CardiacEmit, COLS};
+use physio_algo::sleep::cardiac_emit::{self, CardiacEmit, COLS, FIT_ORDER};
 use physio_algo::sleep::metrics::{
     balanced_accuracy, bootstrap_kappa_ci, confusion4, f1, kappa3, kappa4,
     kappa_after_reassignment, kappa_class_bonus, merge3, min_recall, per_recording, precision,
     recall, truth_marginals, Confusion4, Spread,
 };
 use physio_algo::sleep::conditioned::ConditionedCfg;
-use physio_algo::sleep::pipeline::{run, DecodeCfg, EmitCfg, SleepConfig};
+use physio_algo::sleep::markov_loss::{self, Costs};
+use physio_algo::sleep::pipeline::{run, CostsCfg, DecodeCfg, EmitCfg, SleepConfig};
 use physio_algo::sleep::sequence::{bout_w1, min_run_smooth, Structure};
-use physio_algo::sleep::{epoch_starts_v2, params::Params, prepare_v2, SleepInput};
+use physio_algo::sleep::{epoch_starts_v2, params::Params, prepare_v2, SleepInput, STAGE_ORDER};
 
 const EPOCH: i64 = 30;
 const EPOCH_MIN: f64 = 0.5;
@@ -88,6 +89,9 @@ struct TrainNight {
     /// Prepared epochs whose window held too few beats to carry columns at all.
     missing: usize,
     epochs: usize,
+    /// Labelled epochs per truth class, counted whether or not the epoch carries cardiac columns:
+    /// the weighted decode needs a prevalence on a cohort that carries no R-R at all.
+    truth_counts: [u64; 4],
 }
 
 /// How an arm gets its config: a function of the TRAINING recordings. A fixed arm ignores them; a
@@ -123,6 +127,9 @@ fn training_rows(id: usize, input: &SleepInput, truth: &BTreeMap<usize, i32>, w0
     let prep = prepare_v2(input, &Params::SHIPPED);
     let cols = cardiac_emit::columns(input, &prep);
     let mut t = TrainNight { id, epochs: cols.len(), ..TrainNight::default() };
+    for v in truth.values().filter(|v| (0..4).contains(*v)) {
+        t.truth_counts[*v as usize] += 1;
+    }
     for (s, c) in epoch_starts_v2(&prep).iter().zip(&cols) {
         let Some(row) = c else {
             t.missing += 1;
@@ -469,6 +476,84 @@ fn cardiac_arm(lambda_milli: u32, permute: bool) -> Arm {
     Arm(Box::new(move |t| cardiac_fit(t, lambda_milli, permute)))
 }
 
+/// The decoder reads `fc` in `STAGE_ORDER`; truth labels are counted in `FIT_ORDER`. Both are
+/// constants, so the two are matched BY NAME and never by position.
+fn fc_in_stage_order(by_truth: [f64; 4]) -> [f64; 4] {
+    core::array::from_fn(|c| {
+        let k =
+            FIT_ORDER.iter().position(|s| *s == STAGE_ORDER[c]).expect("a stage is in FIT_ORDER");
+        by_truth[k]
+    })
+}
+
+/// A seed that IS the fold: the held-out recording is the one absent from these ids, so the draw
+/// moves with the fold and with nothing else.
+fn fold_seed(train: &[&TrainNight]) -> u64 {
+    train.iter().fold(PERM_SEED, |h, t| splitmix(h ^ (t.id as u64).wrapping_add(1)))
+}
+
+/// The same four weights on different classes: the magnitudes survive, which class holds which does
+/// not. A constant vector comes back unmoved - then the arm and its control are one arm, which is
+/// the honest reading rather than a manufactured difference.
+fn permuted_weights(fc: [f64; 4], seed: u64) -> [f64; 4] {
+    if fc.iter().all(|v| *v == fc[0]) {
+        return fc;
+    }
+    let mut r = seed;
+    for _ in 0..16 {
+        let mut idx = [0usize, 1, 2, 3];
+        for i in (1..4).rev() {
+            r = splitmix(r);
+            idx.swap(i, (r >> 11) as usize % (i + 1));
+        }
+        let out: [f64; 4] = core::array::from_fn(|c| fc[idx[c]]);
+        if out != fc {
+            return out;
+        }
+    }
+    // A non-constant vector is always moved by a rotation, so this cannot return the input.
+    core::array::from_fn(|c| fc[(c + 1) % 4])
+}
+
+/// Inverse-prevalence per-class epoch costs from the TRAINING recordings' own class counts, raised
+/// to `power` (0 is unit costs) and mapped into the decoder's columns. Nothing is fitted beyond
+/// counting. `permute` is the falsifier: the same magnitudes on shuffled classes.
+fn prevalence_costs(train: &[&TrainNight], power: f64, permute: bool) -> Option<Costs> {
+    let mut counts = [0u64; 4];
+    for t in train {
+        for (c, n) in counts.iter_mut().zip(&t.truth_counts) {
+            *c += n;
+        }
+    }
+    let w = markov_loss::geometric_scale(markov_loss::inverse_prevalence(counts)?, power)?;
+    let mut fc = fc_in_stage_order(w);
+    if permute {
+        fc = permuted_weights(fc, fold_seed(train));
+    }
+    Some(Costs { fc, ..Costs::UNIT })
+}
+
+/// The weighted decode on v2's own emissions - the class weighting moved into the DECODE rather
+/// than the emission. `ft` and `fh` price a PAIR of epochs, so this per-epoch rule charges `fc`
+/// alone and choosing the full three-cost `r` stays open.
+fn loss_arm(power: f64, permute: bool) -> Arm {
+    Arm(Box::new(move |t| {
+        let costs = prevalence_costs(t, power, permute)?;
+        Some(SleepConfig { emit: EmitCfg::V2, decode: DecodeCfg::MarkovLoss(CostsCfg(costs)) })
+    }))
+}
+
+/// Both at once: the cardiac emission decoded under inverse-prevalence `fc`, each fitted on the
+/// same held-out training set. The arm that asks whether the weighted decode repairs what the
+/// emission's calling share costs.
+fn cardiac_loss_arm(lambda_milli: u32, power: f64) -> Arm {
+    Arm(Box::new(move |t| {
+        let base = cardiac_fit(t, lambda_milli, false)?;
+        let costs = prevalence_costs(t, power, false)?;
+        Some(SleepConfig { emit: base.emit, decode: DecodeCfg::MarkovLoss(CostsCfg(costs)) })
+    }))
+}
+
 /// Mix every transition row toward uniform, leaving the emissions untouched. At 1.0 the decoder
 /// follows the emissions alone, which is the only arm that separates "the prior is doing the
 /// smoothing" from "the emissions cannot discriminate". `Params::SHIPPED` is never mutated.
@@ -502,6 +587,9 @@ fn main() {
         emit: EmitCfg::V2,
         decode: DecodeCfg::Conditioned(ConditionedCfg { beta_milli }),
     };
+    let marginal = SleepConfig { emit: EmitCfg::V2, decode: DecodeCfg::PosteriorMarginal };
+    let unit_loss =
+        SleepConfig { emit: EmitCfg::V2, decode: DecodeCfg::MarkovLoss(CostsCfg(Costs::UNIT)) };
     // The cardiac arms are FITTED, held out by recording. Their permuted twins fit on the same
     // rows with the column-to-stage alignment destroyed: if the real arm's gain does not exceed
     // theirs, what moved was the fit's freedom and not the family.
@@ -519,6 +607,15 @@ fn main() {
         ("cardiac PERMUTED null, lambda 0.5", cardiac_arm(500, true), Params::SHIPPED),
         ("cardiac PERMUTED null, lambda 1.0", cardiac_arm(1000, true), Params::SHIPPED),
         ("cardiac PERMUTED null, lambda 2.0", cardiac_arm(2000, true), Params::SHIPPED),
+        // The decode seam. `PosteriorMarginal` and `MarkovLoss` at unit costs are ONE rule and must
+        // print the same card; the weighted arms move the class weighting into the decode, which is
+        // the rule a class-balanced objective implies.
+        ("posterior-marginal decode", fixed(marginal), Params::SHIPPED),
+        ("loss-matched decode, UNIT costs", fixed(unit_loss), Params::SHIPPED),
+        ("loss-matched decode, fc^0.5 inverse prevalence", loss_arm(0.5, false), Params::SHIPPED),
+        ("loss-matched decode, inverse-prevalence fc", loss_arm(1.0, false), Params::SHIPPED),
+        ("loss-matched decode, PERMUTED fc", loss_arm(1.0, true), Params::SHIPPED),
+        ("cardiac lambda 1.0 + inverse-prevalence fc", cardiac_loss_arm(1000, 1.0), Params::SHIPPED),
     ];
 
     println!("THE BORDER — what any engine is measured on. Minutes, except efficiency in percent.");
@@ -539,6 +636,14 @@ fn main() {
             loaded.len(),
             miss as f64 / eps.max(1) as f64 * 100.0
         );
+        // For reading only. Every fitted arm refits this on its own fold's training recordings.
+        let all: Vec<&TrainNight> = loaded.iter().map(|l| &l.train).collect();
+        if let Some(c) = prevalence_costs(&all, 1.0, false) {
+            println!(
+                "  inverse-prevalence fc over ALL recordings, STAGE_ORDER [deep rem light wake], geometric mean 1: {:.3} {:.3} {:.3} {:.3}",
+                c.fc[0], c.fc[1], c.fc[2], c.fc[3]
+            );
+        }
         for (arm, a, p) in &arms {
             card(ds, arm, &score(&loaded, &configs(&loaded, a), p));
         }
