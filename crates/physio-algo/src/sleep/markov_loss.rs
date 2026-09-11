@@ -9,6 +9,8 @@
 /// and a missed wake epoch are not obliged to cost the same, and we have never decided that they do.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Costs {
+    /// Per class in the CALLER's encoding: `sequence_loss` charges truth's own index,
+    /// `posterior::decode_with_costs` reads `STAGE_ORDER` columns. Only the ratios decide.
     pub fc: [f64; 4],
     /// Charged when the prediction puts a boundary where truth has none.
     pub ft: f64,
@@ -25,6 +27,38 @@ impl Costs {
     pub fn epochs_only(fc: [f64; 4]) -> Costs {
         Costs { fc, ft: 0.0, fh: 0.0 }
     }
+}
+
+/// `fc` rescaled so its four entries have geometric mean 1. Only the RATIOS of `fc` change a
+/// decode, so this fixes the free overall scale without moving any decision. `None` unless all
+/// four are finite and strictly positive.
+pub fn normalise_geometric(fc: [f64; 4]) -> Option<[f64; 4]> {
+    if fc.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        return None;
+    }
+    let g = (fc.iter().map(|v| v.ln()).sum::<f64>() / 4.0).exp();
+    if !g.is_finite() || g <= 0.0 {
+        return None;
+    }
+    Some(core::array::from_fn(|i| fc[i] / g))
+}
+
+/// Per-class epoch costs inversely proportional to class prevalence, at geometric mean 1. This is
+/// the weighting a class-balanced objective implies, with nothing fitted beyond counting. Indexed
+/// like `counts`; an absent class makes `1/0` infinite, which [`normalise_geometric`] rejects.
+pub fn inverse_prevalence(counts: [u64; 4]) -> Option<[f64; 4]> {
+    normalise_geometric(core::array::from_fn(|i| 1.0 / counts[i] as f64))
+}
+
+/// `fc` moved along the geometric path between unit costs and itself: `power` 0.0 is all ones, 1.0
+/// is `fc` renormalised, 0.5 half way in log space. Output is at geometric mean 1 whatever `power`
+/// is, so a scale sweep never doubles as a magnitude sweep.
+pub fn geometric_scale(fc: [f64; 4], power: f64) -> Option<[f64; 4]> {
+    if !power.is_finite() {
+        return None;
+    }
+    let n = normalise_geometric(fc)?;
+    normalise_geometric(core::array::from_fn(|i| n[i].powf(power)))
 }
 
 /// When the invented-boundary cost applies to a boundary that IS at the right index but goes to the
@@ -188,6 +222,54 @@ mod tests {
         let c = Costs { fc: [0.0, 0.0, 6.0, 0.0], ft: 0.0, fh: 5.0 };
         // Three wrong deep epochs at 6, plus the one boundary run straight through.
         assert_eq!(sequence_loss(&flat, &truth, &c, TransitionRule::OnlyInvented).unwrap(), 23.0);
+    }
+
+    fn gmean(v: &[f64; 4]) -> f64 {
+        (v.iter().map(|x| x.ln()).sum::<f64>() / 4.0).exp()
+    }
+
+    #[test]
+    fn inverse_prevalence_is_at_geometric_mean_one_and_prices_the_rarer_class_dearer() {
+        // Roughly DREAMT's truth shares: wake 25%, light 61%, deep 3.4%, REM 10.5%.
+        let w = inverse_prevalence([2510, 6100, 340, 1050]).expect("no class is empty");
+        assert!((gmean(&w) - 1.0).abs() < 1e-12, "geometric mean {}", gmean(&w));
+        assert!(w[2] > w[3] && w[3] > w[0] && w[0] > w[1], "dearest is rarest: {w:?}");
+        // The ratio is the inverse prevalence ratio exactly: deep is 61/3.4 = 17.9x light.
+        assert!((w[2] / w[1] - 6100.0 / 340.0).abs() < 1e-9, "{} vs {}", w[2] / w[1], 6100.0 / 340.0);
+        // Only the ratios matter, so the same shares at any total give the same weights.
+        let scaled = inverse_prevalence([251_000, 610_000, 34_000, 105_000]).expect("nonempty");
+        for (a, b) in w.iter().zip(&scaled) {
+            assert!((a - b).abs() < 1e-9, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn a_balanced_cohort_gives_unit_costs_and_an_empty_class_gives_nothing() {
+        let w = inverse_prevalence([7; 4]).expect("no class is empty");
+        for v in w {
+            assert!((v - 1.0).abs() < 1e-12, "equal prevalence must be Costs::UNIT, got {v}");
+        }
+        assert!(inverse_prevalence([5, 0, 5, 5]).is_none(), "1/0 is not a cost");
+        assert!(normalise_geometric([1.0, -1.0, 1.0, 1.0]).is_none());
+        assert!(normalise_geometric([1.0, f64::NAN, 1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn the_geometric_scale_runs_from_unit_costs_to_the_full_weighting() {
+        let w = inverse_prevalence([2510, 6100, 340, 1050]).expect("no class is empty");
+        let none = geometric_scale(w, 0.0).expect("power 0 is defined");
+        for v in none {
+            assert!((v - 1.0).abs() < 1e-12, "power 0 must be unit costs, got {v}");
+        }
+        let full = geometric_scale(w, 1.0).expect("power 1 is defined");
+        for (a, b) in full.iter().zip(&w) {
+            assert!((a - b).abs() < 1e-12, "power 1 must be the input, {a} vs {b}");
+        }
+        let half = geometric_scale(w, 0.5).expect("power 0.5 is defined");
+        assert!((gmean(&half) - 1.0).abs() < 1e-12, "every power stays at geometric mean 1");
+        // Half way in LOG space: the log-ratio to light is exactly halved, not the ratio.
+        assert!(((half[2] / half[1]).ln() - (w[2] / w[1]).ln() / 2.0).abs() < 1e-9);
+        assert!(half[2] < w[2] && half[2] > 1.0, "deep sits between unit and full: {}", half[2]);
     }
 
     #[test]
