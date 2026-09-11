@@ -349,6 +349,31 @@ mod tests {
         assert_eq!(first.get(), 1, "epoch 0 has no step into it");
     }
 
+    /// THE FLOOR ITSELF. A forbidden step against a legal route ten nats worse: the floor alone
+    /// decides which wins, so the bracket fires in both directions. `brute_force` reads
+    /// `TRANS_FLOOR` too, so nothing above can see this constant move.
+    #[test]
+    fn a_forbidden_step_stays_improbable_in_the_degree_the_floor_makes_it() {
+        let mut t = [[0.0f64; 4]; 4];
+        t[0] = [0.5, 0.0, 0.5, 0.0];
+        for r in t.iter_mut().skip(1) {
+            *r = [0.25; 4];
+        }
+        // Epoch 0 is state 0 beyond doubt; epoch 1 wants state 1, which state 0 may not reach, by
+        // ten nats over state 2, which it may.
+        let em = [[0.0, -40.0, -40.0, -40.0], [-40.0, 0.0, -10.0, -40.0]];
+        let post = forward_backward(&em, |_| t);
+        let forbidden = post[1][1];
+
+        assert!(forbidden > 1e-7, "the floor is not a floor, it is a wall: {forbidden:e}");
+        assert!(forbidden < 1e-3, "a forbidden step is winning on the floor alone: {forbidden:e}");
+        assert!(
+            post[1][2] > 0.99,
+            "the legal route must carry the epoch, not the floored one: {:e}",
+            post[1][2]
+        );
+    }
+
     #[test]
     fn empty_and_length_one_inputs_do_not_panic() {
         let base = Params::SHIPPED.transition;
