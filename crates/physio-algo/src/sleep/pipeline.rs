@@ -271,6 +271,8 @@ pub enum DecodeCfg {
 /// Emission model. `V2` is the shipped recipe. `V2PlusCardiac` adds a fitted linear discriminant
 /// over the night's fourteen R-R order statistics to v2's row; at `lambda_milli: 0` it is `V2` row
 /// for row - the built-in null. The map is fitted held out by recording, never here.
+// The fitted map is a value so the config stays `Copy`; boxing it would cost that.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum EmitCfg {
     #[default]

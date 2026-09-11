@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(0, fit_index(SleepStage::Wake));
 
         // A map that scores exactly one fitted class, and only that class's emission column moves.
-        for k in 0..CLASSES {
+        for (k, fitted_class) in FIT_ORDER.iter().enumerate() {
             let mut e = CardiacEmit {
                 weight: [[0.0; COLS]; CLASSES],
                 bias: [0.0; CLASSES],
@@ -228,7 +228,7 @@ mod tests {
             };
             e.bias[k] = 5.0;
             let d = e.delta(&[0.0; COLS]);
-            let want = STAGE_ORDER.iter().position(|s| *s == FIT_ORDER[k]).unwrap();
+            let want = STAGE_ORDER.iter().position(|s| s == fitted_class).unwrap();
             for (c, v) in d.iter().enumerate() {
                 assert_eq!(if c == want { 5.0 } else { 0.0 }, *v, "class {k} landed in column {c}");
             }
