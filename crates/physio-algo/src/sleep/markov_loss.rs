@@ -10,7 +10,7 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Costs {
     /// Per class in the CALLER's encoding: `sequence_loss` charges truth's own index,
-    /// `posterior::decode_with_costs` reads `STAGE_ORDER` columns. Only the ratios decide.
+    /// `posterior::decode_with_costs` reads `STAGE_ORDER` columns, where only their ratios decide.
     pub fc: [f64; 4],
     /// Charged when the prediction puts a boundary where truth has none.
     pub ft: f64,
@@ -30,8 +30,8 @@ impl Costs {
 }
 
 /// `fc` rescaled so its four entries have geometric mean 1. Only the RATIOS of `fc` change a
-/// decode, so this fixes the free overall scale without moving any decision. `None` unless all
-/// four are finite and strictly positive.
+/// decode, so this fixes the free overall scale without moving one. `None` unless all four are
+/// finite and strictly positive.
 pub fn normalise_geometric(fc: [f64; 4]) -> Option<[f64; 4]> {
     if fc.iter().any(|v| !v.is_finite() || *v <= 0.0) {
         return None;

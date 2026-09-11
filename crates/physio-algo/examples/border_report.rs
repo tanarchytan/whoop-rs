@@ -486,8 +486,8 @@ fn fc_in_stage_order(by_truth: [f64; 4]) -> [f64; 4] {
     })
 }
 
-/// A seed that IS the fold: the held-out recording is the one absent from these ids, so the draw
-/// moves with the fold and with nothing else.
+/// A seed that IS the fold: these ids are the fold's own training set, whichever recordings it
+/// holds out, so the draw moves with the fold and with nothing else.
 fn fold_seed(train: &[&TrainNight]) -> u64 {
     train.iter().fold(PERM_SEED, |h, t| splitmix(h ^ (t.id as u64).wrapping_add(1)))
 }
