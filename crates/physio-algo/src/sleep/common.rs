@@ -2,6 +2,11 @@
 //! primitives come from `crate::stats`. Kept private to the `sleep` module.
 
 use super::input::RrRun;
+
+/// The analysis window the beat-window features are taken over, seconds: nine 30 s epochs. One
+/// definition for the order statistics and the band powers alike, re-exported by `cardiac` and
+/// `hrv_bands` so each keeps its own path.
+pub const WINDOW_S: f64 = 270.0;
 pub(super) use crate::stats::median;
 use crate::stats::population_sd;
 

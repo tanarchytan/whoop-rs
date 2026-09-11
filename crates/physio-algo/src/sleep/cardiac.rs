@@ -11,9 +11,9 @@ use crate::stats::{mean, percentile, population_sd};
 /// input have one import. Defined once in `sleep::common`.
 pub use super::common::reconstruct_beats;
 
-/// Analysis window the order statistics are centred on, seconds: nine 30 s epochs. `cardiac_emit`
-/// centres it on the epoch; the screening harnesses read it from here.
-pub const WINDOW_S: f64 = 270.0;
+/// Analysis window the order statistics are centred on. `cardiac_emit` centres it on the epoch; the
+/// screening harnesses read it from here. Defined once in `sleep::common`, shared with `hrv_bands`.
+pub use super::common::WINDOW_S;
 
 /// Quantiles taken of both the absolute and the detrended interval series.
 pub const PCTS: [f64; 7] = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95];

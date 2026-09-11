@@ -13,8 +13,9 @@ use std::f64::consts::PI;
 
 /// Resample rate of the tachogram, Hz. Five times the top band edge.
 const FS: f64 = 4.0;
-/// Analysis window. Nine 30-s epochs, so VLF gets four cycles at its lower edge.
-pub const WINDOW_S: f64 = 270.0;
+/// Analysis window: nine 30-s epochs, so VLF gets four cycles at its lower edge. Defined once in
+/// `sleep::common`, shared with `cardiac` - the two read the same window over the same beats.
+pub use super::common::WINDOW_S;
 /// Fewest beats that can carry a spectrum. Below this the interpolation invents the signal.
 pub const MIN_BEATS: usize = 30;
 /// Fraction of the window the R-R intervals must themselves account for. Under it the grid is mostly
