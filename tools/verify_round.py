@@ -347,8 +347,29 @@ def check_line_endings():
         ", ".join(mixed[:8]) if mixed else "")
 
 
+def check_eol_flips():
+    """A file whose endings were flipped WHOLESALE, which the mixed check cannot see.
+
+    Rewriting a CRLF file as LF is internally consistent, so `check_line_endings` passes -- and the
+    diff becomes every line in the file, burying the real change. `git ls-files --eol` reports the
+    index and working-tree forms separately, so a flip shows as `i/crlf w/lf` or the reverse.
+    """
+    p = subprocess.run(["git", "ls-files", "--eol", "--", "crates", "tools"],
+                       cwd=RS, capture_output=True, text=True, errors="replace")
+    bad = []
+    for line in p.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or not parts[0].startswith("i/"):
+            continue
+        idx, work = parts[0][2:], parts[1][2:]
+        if idx in ("crlf", "lf") and work in ("crlf", "lf") and idx != work:
+            bad.append(f"{parts[-1]} (index {idx}, tree {work})")
+    say("no file flipped its line endings", OK if not bad else FAIL,
+        "; ".join(bad[:6]) if bad else "")
+
+
 SCOPED = [check_duplicate_consts, check_orphans]
-GLOBAL = [check_dataset_columns, check_line_endings]
+GLOBAL = [check_dataset_columns, check_line_endings, check_eol_flips]
 
 
 GREEN_RUN = "test result: ok. 40 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out"

@@ -190,6 +190,14 @@ pub fn balanced_accuracy(cm: &Confusion4) -> Option<f64> {
     (!r.is_empty()).then(|| r.iter().sum::<f64>() / r.len() as f64)
 }
 
+/// Mean of the per-class F1s over the classes that occur. Each term pairs recall with PRECISION, so
+/// calling a class more cannot buy it the way it buys [`balanced_accuracy`] — but F1 moves with class
+/// balance, so this compares ARMS WITHIN one cohort and never one cohort against another.
+pub fn macro_f1(cm: &Confusion4) -> Option<f64> {
+    let f: Vec<f64> = (0..4).filter_map(|c| f1(cm, c)).collect();
+    (!f.is_empty()).then(|| f.iter().sum::<f64>() / f.len() as f64)
+}
+
 /// The worst per-class recall. The mean can hide a class scoring zero; this cannot, and it is the
 /// scalarisation to prefer when one rare class is the thing being fixed.
 pub fn min_recall(cm: &Confusion4) -> Option<f64> {
@@ -346,6 +354,28 @@ mod tests {
 
     /// The bonus is what makes kappa unsafe to select on: it pays MORE for a rarer class, so a rule
     /// that maximises kappa is not the rule that maximises accuracy.
+    /// THE reason `macro_f1` exists beside `balanced_accuracy`: calling a rare class more lifts
+    /// balanced accuracy and cannot lift macro F1, because the second charges the precision the
+    /// first ignores. Both are computed on the SAME pair of matrices.
+    #[test]
+    fn calling_a_rare_class_more_buys_balanced_accuracy_and_not_macro_f1() {
+        // Truth: 80 of the common class, 20 of the rare one. Rows are truth, columns prediction.
+        let tight: Confusion4 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 76, 4], [0, 0, 10, 10]];
+        // The rare class called more than twice as often: its recall rises 0.50 -> 0.75 and the
+        // common class gives up 0.95 -> 0.80, so the unweighted mean of recalls RISES.
+        let loose: Confusion4 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 64, 16], [0, 0, 5, 15]];
+
+        let (ba0, ba1) = (balanced_accuracy(&tight).unwrap(), balanced_accuracy(&loose).unwrap());
+        let (f0, f1v) = (macro_f1(&tight).unwrap(), macro_f1(&loose).unwrap());
+        assert!(ba1 > ba0, "calling deep more must lift balanced accuracy: {ba0} -> {ba1}");
+        assert!(f1v < f0, "and it must NOT lift macro F1: {f0} -> {f1v}");
+
+        // Macro F1 is the unweighted mean of the per-class F1s that exist, nothing else.
+        let want: f64 = (0..4).filter_map(|c| f1(&loose, c)).sum::<f64>()
+            / (0..4).filter_map(|c| f1(&loose, c)).count() as f64;
+        assert!((f1v - want).abs() < 1e-12);
+    }
+
     #[test]
     fn the_kappa_bonus_grows_as_a_class_gets_rarer() {
         // Truth marginals 0.5 / 0.3 / 0.15 / 0.05, imperfectly staged so kappa is under 1.

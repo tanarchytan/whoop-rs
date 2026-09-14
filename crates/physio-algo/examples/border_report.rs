@@ -31,7 +31,8 @@ use physio_algo::sleep::agreement::{bland_altman, summarise, NightSummary};
 use physio_algo::sleep::cardiac_emit::{self, CardiacEmit, COLS, FIT_ORDER};
 use physio_algo::sleep::metrics::{
     balanced_accuracy, bootstrap_kappa_ci, confusion4, f1, kappa3, kappa4,
-    kappa_after_reassignment, kappa_class_bonus, merge3, min_recall, per_recording, precision,
+    kappa_after_reassignment, kappa_class_bonus, macro_f1, merge3, min_recall, per_recording,
+    precision,
     recall, truth_marginals, Confusion4, Spread,
 };
 use physio_algo::sleep::conditioned::ConditionedCfg;
@@ -252,8 +253,9 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
         s.map_or("  -  ".into(), |s| format!("{:.3} +/-{:.3} (n={})", s.mean, s.sd, s.n))
     };
     println!(
-        "  balanced acc {:.4}  min recall {:.4}   per-night {}",
+        "  balanced acc {:.4}  macro F1 {:.4}  min recall {:.4}   per-night {}",
         balanced_accuracy(&cm).unwrap_or(f64::NAN),
+        macro_f1(&cm).unwrap_or(f64::NAN),
         min_recall(&cm).unwrap_or(f64::NAN),
         show(per_recording(&cms, ba))
     );

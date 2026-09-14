@@ -60,6 +60,7 @@ COVERED = {
     "check_duplicate_consts": "planted probe file",
     "check_orphans": "planted probe file",
     "check_line_endings": "planted probe file",
+    "check_eol_flips": "flipped tracked file",
 }
 
 GREEN = "test result: ok. 40 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out"
@@ -120,6 +121,21 @@ def test_dataset_columns():
     check("a longer namesake does not count as read", still, ["Type"])
 
 
+def flipped(run=None):
+    """Flip a TRACKED file to LF in the working tree, run one check, always restore.
+
+    `check_eol_flips` compares the index form against the tree form, so an untracked probe cannot
+    exercise it. `metrics.rs` is CRLF in the index, and it is the file the real flip happened to.
+    """
+    target = vr.CRATES / "physio-algo" / "src" / "sleep" / "metrics.rs"
+    original = target.read_bytes()
+    try:
+        target.write_bytes(original.replace(b"\r\n", b"\n"))
+        return verdicts(run or vr.check_eol_flips)
+    finally:
+        target.write_bytes(original)
+
+
 def planted(probe_text=None, probe_bytes=None, run=None):
     """Write a probe file into the crate tree, run one check, always clean up."""
     target = vr.CRATES / "physio-algo" / "src" / "verify_round_probe.rs"
@@ -148,6 +164,13 @@ def test_file_checks():
     check("a pub item WITH a caller is not an orphan",
           planted("pub fn kappa4_probe() {}\n", run=lambda: vr.check_orphans({"nothing_added"})),
           [vr.OK])
+    # `check_eol_flips` needs a TRACKED file -- an untracked probe has no index form to disagree
+    # with -- so it flips a real one and restores the bytes. This is the defect the mixed-endings
+    # check cannot see: a wholesale flip is internally consistent and buries the real diff.
+    check("a file flipped WHOLESALE to LF FAILS", flipped(), [vr.FAIL])
+    check("and the mixed-endings check stays GREEN on that same flip",
+          flipped(run=vr.check_line_endings), [vr.OK])
+    check("an unflipped tree is fine", verdicts(vr.check_eol_flips), [vr.OK])
 
 
 def test_scope_is_the_step():
