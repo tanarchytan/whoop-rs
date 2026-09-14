@@ -52,7 +52,7 @@ def verdicts(run) -> list[str]:
 
 # Each check maps to the function carrying its verdict, so the meta-test can demand coverage.
 COVERED = {
-    "check_counts": "compare_counts",
+    "check_counts": "compare_counts + report_empty_targets",
     "check_ignored_suite": "report_ignored",
     "check_clippy": "count_clippy",
     "check_evidence": "report_evidence",
@@ -62,6 +62,13 @@ COVERED = {
     "check_line_endings": "planted probe file",
     "check_eol_flips": "flipped tracked file",
 }
+
+EMPTY_DOC = ("     Running unittests src/lib.rs (t/a.exe)\n"
+             "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+             "   Doc-tests foo\n\nrunning 0 tests\n\n"
+             "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n")
+EMPTY_FILE = ("     Running tests/empty.rs (t/b.exe)\n"
+              "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n")
 
 GREEN = "test result: ok. 40 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out"
 RED = ("failures:\n    sleep::v2::tests::a_probe\n"
@@ -85,6 +92,12 @@ def test_counts():
 def test_ignored_suite():
     check("a failing ignored suite FAILS", verdicts(lambda: vr.report_ignored(RED)), [vr.FAIL])
     check("a green ignored suite passes", verdicts(lambda: vr.report_ignored(GREEN)), [vr.OK])
+    # David asked about "many things with zero tests": all 8 are DOC-test targets (no `///`
+    # examples), which is a style choice. A real test FILE running nothing is a hole.
+    check("a doc-test target with 0 tests is fine",
+          verdicts(lambda: vr.report_empty_targets(EMPTY_DOC)), [vr.OK])
+    check("a TEST FILE with 0 tests FAILS",
+          verdicts(lambda: vr.report_empty_targets(EMPTY_FILE)), [vr.FAIL])
     # The case that actually happened: the command was wrong, so nothing ran. Silence is not green.
     check("an ignored suite that did not run FAILS",
           verdicts(lambda: vr.report_ignored("")), [vr.FAIL])

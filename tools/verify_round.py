@@ -93,10 +93,12 @@ def check_counts(fast):
     if fast:
         say("test counts fresh", WARN, "skipped (--fast)")
         return
-    passed, failed, ignored, n = parse_test_results(cargo(["test"]))
+    out = cargo(["test"])
+    passed, failed, ignored, n = parse_test_results(out)
     if n == 0:
         say("suite green", FAIL, "no `test result` lines - did cargo test run at all?")
         return
+    report_empty_targets(out)
     if failed:
         say("suite green", FAIL, f"{failed} failed")
         return
@@ -141,10 +143,38 @@ def report_ignored(out):
     passed, failed, _, n = parse_test_results(out)
     named = re.findall(r"^\s{4}(\S+::\S+)$", out, re.M)
     if n == 0:
-        say("ignored suite", FAIL, "no `test result` lines - it did not run")
+        # "It did not run" is the right verdict and a useless message on its own: the cause is a
+        # BUILD failure, and the commonest one here is another cargo holding the target lock, which
+        # reads as LNK1104 or "Blocking waiting for file lock". Carry the reason.
+        why = [l.strip() for l in out.splitlines()
+               if re.search(r"^error|LNK\d+|Blocking waiting for file lock|no such command", l.strip())]
+        tail = f" -- {why[0][:120]}" if why else " -- no cargo error either; is another build running?"
+        say("ignored suite", FAIL, "no `test result` lines - it did not run" + tail)
         return
     say("ignored suite", OK if failed == 0 else FAIL,
         f"{passed} passed, {failed} failed" + (f" -- {', '.join(named[:4])}" if failed else ""))
+
+
+def report_empty_targets(out):
+    """A test target that runs NOTHING. Doc-tests are excluded: a crate with no `///` example is a
+    style choice, but a test FILE that runs nothing is a hole that reads as green.
+    """
+    cur, empty = None, []
+    for line in out.splitlines():
+        m = re.search(r"Running (?:unittests )?(\S+)", line)
+        if m:
+            cur = m.group(1)
+            continue
+        if re.match(r"\s*Doc-tests ", line):
+            cur = None
+            continue
+        m = re.search(r"test result: \w+\. (\d+) passed; \d+ failed; (\d+) ignored", line)
+        if m and cur:
+            if int(m.group(1)) + int(m.group(2)) == 0:
+                empty.append(cur)
+            cur = None
+    say("no test target is empty", OK if not empty else FAIL,
+        ", ".join(empty[:6]) if empty else "")
 
 
 def check_clippy(fast):
