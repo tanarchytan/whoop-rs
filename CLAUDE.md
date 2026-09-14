@@ -162,6 +162,22 @@ caught something real on 2026-08-31/09-01:
    cannot see a shuffle; the segment/confusion cross-check compares membership, not order.
 7. **Trace a number to the code path that produced it**, not to the constant that names it. The
    written transition diagonal said long deep bouts were impossible; the decoder emits them anyway.
+8. **Count an absolute before writing it.** "No arm beats the null anywhere" was false — three of
+   fifty blocks did, and one was a SHUFFLED CONTROL, which is what calibrates the floor. State the
+   floor and whether anything cleared it; never state "none" without the count.
+9. **Every criterion needs a MAGNITUDE floor, and the permuted twin is it — per class.** A
+   sign-only test ("recall rose faster than calling") passed a shuffled control on three classes at
+   +0.001..+0.011. Compare each class against its own twin, not just the summary.
+10. **Anchor a parse on the BLOCK, never the row label.** `deep` and `rem` name a row in both the
+   agreement and STRUCTURE tables; matching the label alone returns censored counts that read as a
+   plausible coefficient. Sanity-check a parser against values known from elsewhere before trusting
+   it.
+11. **When a gate and your reasoning disagree, satisfy the gate.** `sync-jnilibs.py` fingerprints a
+   superset on purpose; a dependency-graph argument for skipping it is exactly what it exists to
+   make unnecessary.
+
+The errors these came from, with the mechanical guard each now has:
+`../dev-notes/ERROR-PATTERNS-20260914.md`.
 
 ## Style
 
