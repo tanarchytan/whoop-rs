@@ -400,9 +400,9 @@ fn stopping_early_leaves_the_prefix_identical() {
     );
 }
 
-/// The time-term ablation's contract: zeroing the three cycle scales leaves no time-dependent term
-/// in the emission. `cycle_prior` writes only the DEEP and REM columns of [`Terms::fixed`], so their
-/// spread across the night is the whole quantity. `border_report`'s "no time term" arm rests on this.
+/// The time-term ablation's contract: zeroing the two cycle scales and the early-REM penalty leaves
+/// no time-dependent term. `cycle_prior` writes only the DEEP and REM columns of [`Terms::fixed`], so
+/// their spread across the night is the whole quantity. `border_report`'s ablation arm rests on it.
 #[test]
 fn zeroing_the_cycle_scales_leaves_no_time_dependent_emission_term() {
     use super::{emission_terms, prepare_v2, STAGE_ORDER};

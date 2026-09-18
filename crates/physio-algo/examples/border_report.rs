@@ -594,9 +594,9 @@ fn flattened(alpha: f64) -> Params {
     p
 }
 
-/// Silence the time term. `cycle_prior` is the only reader of `Features::clock`, so zeroing its two
-/// scales and the early-REM step leaves the emission with no time-of-night contribution at all. The
-/// library pins that (`golden_tests::zeroing_the_cycle_scales_leaves_no_time_dependent_emission_term`).
+/// Silence the time term. `Features::clock` reaches the emission only through `cycle_prior`, read by
+/// `cycle_clock` and `rem_guard` and nowhere else, so zeroing the two scales and the early-REM penalty
+/// leaves no time-of-night contribution. `golden_tests::zeroing_the_cycle_scales_...` pins that.
 fn no_time_term() -> Params {
     Params {
         cycle_deep_scale: 0.0,
