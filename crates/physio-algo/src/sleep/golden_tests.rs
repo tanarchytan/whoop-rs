@@ -399,3 +399,33 @@ fn stopping_early_leaves_the_prefix_identical() {
         "step 1 must digest the input, not a constant"
     );
 }
+
+/// The time-term ablation's contract: zeroing the three cycle scales leaves no time-dependent term
+/// in the emission. `cycle_prior` writes only the DEEP and REM columns of [`Terms::fixed`], so their
+/// spread across the night is the whole quantity. `border_report`'s "no time term" arm rests on this.
+#[test]
+fn zeroing_the_cycle_scales_leaves_no_time_dependent_emission_term() {
+    use super::{emission_terms, prepare_v2, STAGE_ORDER};
+
+    let input = golden_input();
+    let shipped = Params::SHIPPED;
+    let off = Params {
+        cycle_deep_scale: 0.0,
+        cycle_rem_scale: 0.0,
+        cycle_rem_early_penalty: 0.0,
+        ..shipped
+    };
+    let col = |s: SleepStage| STAGE_ORDER.iter().position(|x| *x == s).expect("stage is ordered");
+    let spread = |p: &Params| {
+        let t = emission_terms(&prepare_v2(&input, p), p);
+        assert!(t.fixed.len() > 100, "the golden night must stage");
+        [col(SleepStage::Deep), col(SleepStage::Rem)].map(|c| {
+            let v: Vec<f64> = t.fixed.iter().map(|r| r[c]).collect();
+            v.iter().copied().fold(f64::MIN, f64::max) - v.iter().copied().fold(f64::MAX, f64::min)
+        })
+    };
+
+    let on = spread(&shipped);
+    assert!(on[0] > 0.1 && on[1] > 0.1, "the shipped time term must vary across the night: {on:?}");
+    assert_eq!([0.0, 0.0], spread(&off), "the ablation must leave no time-dependent term");
+}

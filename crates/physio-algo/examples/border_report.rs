@@ -594,6 +594,18 @@ fn flattened(alpha: f64) -> Params {
     p
 }
 
+/// Silence the time term. `cycle_prior` is the only reader of `Features::clock`, so zeroing its two
+/// scales and the early-REM step leaves the emission with no time-of-night contribution at all. The
+/// library pins that (`golden_tests::zeroing_the_cycle_scales_leaves_no_time_dependent_emission_term`).
+fn no_time_term() -> Params {
+    Params {
+        cycle_deep_scale: 0.0,
+        cycle_rem_scale: 0.0,
+        cycle_rem_early_penalty: 0.0,
+        ..Params::SHIPPED
+    }
+}
+
 /// Open the two structural zeros in the wake row at the rate the PSG truth shows, taking the mass
 /// from wake's self-loop and leaving every other row alone. Rows are `[deep, rem, light, awake]`,
 /// so row 3 is wake. The rates are the pooled truth counts over wake epochs, not fitted per cohort.
@@ -625,6 +637,10 @@ fn main() {
         ("transition 50% toward uniform", fixed(SleepConfig::shipped()), flattened(0.5)),
         ("transition UNIFORM - emissions alone", fixed(SleepConfig::shipped()), flattened(1.0)),
         ("wake>rem and wake>deep opened at truth's rate", fixed(SleepConfig::shipped()), wake_row_opened()),
+        // The only time-term arm this corpus supports: every fixture night is rebased onto ONE
+        // synthetic start, so a wall-clock or habitual-midpoint anchor carries no between-recording
+        // variation and is not measurable here. Ablation only.
+        ("no time term (cycle prior off)", fixed(SleepConfig::shipped()), no_time_term()),
         ("conditioned diagonal, beta 0.25", fixed(conditioned(250)), Params::SHIPPED),
         ("conditioned diagonal, beta 0.5", fixed(conditioned(500)), Params::SHIPPED),
         ("conditioned diagonal, beta 1.0", fixed(conditioned(1000)), Params::SHIPPED),
