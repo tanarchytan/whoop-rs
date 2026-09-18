@@ -348,6 +348,16 @@ pub fn paired_bar(deltas: &[f64]) -> Option<(f64, f64)> {
     Some((m, t95(n) * sd / (n as f64).sqrt()))
 }
 
+/// Two per-recording series paired BY RECORDING, over the recordings both carry, in id order. What
+/// [`paired_bar`] needs as input: position is not identity, so an arm that cannot score a night
+/// leaves every later night charged against a different one.
+pub fn pair_by_id(
+    base: &std::collections::BTreeMap<usize, f64>,
+    arm: &std::collections::BTreeMap<usize, f64>,
+) -> (Vec<f64>, Vec<f64>) {
+    base.iter().filter_map(|(id, b)| arm.get(id).map(|a| (*b, *a))).unzip()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -802,5 +812,32 @@ mod tests {
         assert!((s.mean - 0.30).abs() < 1e-3);
         assert!(s.sd < 1e-3);
         assert!(per_recording(&[no_deep], |cm| recall(cm, 2)).is_none());
+    }
+
+    /// Position is not identity. An arm that cannot score a night drops it, and a positional zip
+    /// then charges every later night against a different one - here 0.08 instead of 0.03.
+    #[test]
+    fn pairing_is_by_recording_and_not_by_position() {
+        use std::collections::BTreeMap;
+        let base = BTreeMap::from([(0, 0.30), (1, 0.40), (2, 0.50)]);
+        // Night 1 missing from the arm, and inserted out of order so key order is the only order.
+        let arm = BTreeMap::from([(2, 0.55), (0, 0.31)]);
+
+        let (b, a) = pair_by_id(&base, &arm);
+        assert_eq!(b, vec![0.30, 0.50], "the night the arm could not score must leave the pair");
+        assert_eq!(a, vec![0.31, 0.55], "and the survivors must stay in id order, not insert order");
+        let paired = paired_bar(&b.iter().zip(&a).map(|(x, y)| y - x).collect::<Vec<_>>())
+            .expect("two pairs")
+            .0;
+        assert!((paired - 0.03).abs() < 1e-12, "paired by id: {paired}");
+
+        // The answer a positional zip gives on the same two series, which is a different night pair.
+        let wrong: Vec<f64> = base.values().zip(arm.values()).map(|(x, y)| y - x).collect();
+        let by_position = paired_bar(&wrong).expect("two pairs").0;
+        assert!((by_position - 0.08).abs() < 1e-12, "by position: {by_position}");
+        assert!(
+            (by_position - paired).abs() > 0.04,
+            "a case the two orderings agree on cannot prove the pairing: {by_position} vs {paired}"
+        );
     }
 }
