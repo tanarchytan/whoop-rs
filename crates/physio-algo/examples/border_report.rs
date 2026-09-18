@@ -25,14 +25,15 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::screen::{PERM_SEED, RIDGE};
-use common::{dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, require_psg};
+use common::{compare, dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, require_psg,
+    Provenance};
 use physio_algo::lda::Lda;
 use physio_algo::sleep::agreement::{bland_altman, summarise, NightSummary};
 use physio_algo::sleep::cardiac_emit::{self, CardiacEmit, COLS, FIT_ORDER};
 use physio_algo::sleep::metrics::{
     balanced_accuracy, bootstrap_kappa_ci, confusion4, f1, kappa3, kappa4,
-    kappa_after_reassignment, kappa_class_bonus, macro_f1, merge3, min_recall, per_recording,
-    precision,
+    kappa_after_reassignment, kappa_class_bonus, macro_f1, merge3, min_recall, pair_by_id,
+    per_recording, precision,
     recall, truth_marginals, Confusion4, Spread,
 };
 use physio_algo::sleep::conditioned::ConditionedCfg;
@@ -64,6 +65,9 @@ const LORO_MAX_NIGHTS: usize = 40;
 const FOLDS: usize = 5;
 
 struct Night {
+    /// The recording this scored, so two arms are paired by NIGHT and never by position: an arm
+    /// whose config is `None` on a night drops it, and the arms then hold different rows.
+    id: usize,
     cm: Confusion4,
     /// `None` when the night is too sparsely labelled to summarise.
     pair: Option<(NightSummary, NightSummary)>,
@@ -210,6 +214,7 @@ fn score(loaded: &[Loaded], cfgs: &[Option<SleepConfig>], p: &Params) -> Vec<Nig
         let span = *truth.keys().last().unwrap() - *truth.keys().next().unwrap() + 1;
         let dense = (d.len() as f64) >= MIN_LABEL_DENSITY * span as f64;
         out.push(Night {
+            id: night.train.id,
             cm: confusion4(&d, &r),
             pair: dense.then(|| (summarise(&d, EPOCH_MIN), summarise(&r, EPOCH_MIN)))
                 .and_then(|(a, b)| Some((a?, b?))),
@@ -231,7 +236,20 @@ fn pooled(nights: &[Night]) -> Confusion4 {
     cm
 }
 
-fn card(ds: &str, arm: &str, nights: &[Night]) {
+/// `Params::SHIPPED` was hand-tuned watching all three of these cohorts, so the null reading every
+/// paired line below is measured against is an upper bound and not an opponent.
+const V2_PROVENANCE: Provenance =
+    Provenance::InSample("v2's 12 emission weights, transition, base rate and gates");
+
+/// One arm's per-night macro F1, keyed by recording. The input [`pair_by_id`] needs; a night whose
+/// confusion carries no class at all cannot answer and is absent rather than zero.
+fn macro_f1_by_night(nights: &[Night]) -> BTreeMap<usize, f64> {
+    nights.iter().filter_map(|n| Some((n.id, macro_f1(&n.cm)?))).collect()
+}
+
+/// Scores one arm, and returns its per-night macro F1 so the next arm can be paired against it.
+/// `base` is the null reading's own series over the SAME cohort.
+fn card(ds: &str, arm: &str, nights: &[Night], base: Option<&BTreeMap<usize, f64>>) -> BTreeMap<usize, f64> {
     let cm = pooled(nights);
     let cms: Vec<Confusion4> = nights.iter().map(|n| n.cm).collect();
     let ci = bootstrap_kappa_ci(&cms, BOOTSTRAP_DRAWS, 0.05, BOOTSTRAP_SEED);
@@ -259,6 +277,16 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
         min_recall(&cm).unwrap_or(f64::NAN),
         show(per_recording(&cms, ba))
     );
+
+    // The only PAIRED line on the card. Everything above subtracts two pooled numbers produced by
+    // two separate runs, which carries no bar; this differences the same nights under both arms.
+    let mine = macro_f1_by_night(nights);
+    let paired = base.map(|b| pair_by_id(b, &mine)).map_or_else(
+        || "  (this arm IS the baseline)".to_string(),
+        |(bv, av)| format!("  vs the null, paired on {} night(s): {}", bv.len(),
+                           compare(&bv, &av, V2_PROVENANCE).2),
+    );
+    println!("  per-night macro F1 {}{paired}", show(per_recording(&cms, macro_f1)));
 
     let tot: i64 = cm.iter().flatten().sum();
     let fmt = |v: Option<f64>| v.map_or("  -  ".into(), |x| format!("{x:.3}"));
@@ -343,6 +371,7 @@ fn card(ds: &str, arm: &str, nights: &[Night]) {
     if sparse > 0 {
         println!("  ({sparse} night(s) too sparsely labelled to summarise, scored epoch-wise only)");
     }
+    mine
 }
 
 /// Bout lengths and transition rates, with TRUTH beside every one of them. Nothing above this line
@@ -616,6 +645,8 @@ fn main() {
         ("cardiac lambda 1.0 + inverse-prevalence fc", cardiac_loss_arm(1000, 1.0), Params::SHIPPED),
     ];
 
+    assert!(arms[0].0.contains("NULL READING"), "the first arm is the baseline every paired line differences against");
+
     println!("THE BORDER — what any engine is measured on. Minutes, except efficiency in percent.");
     println!("Positive bias = the engine over-reports against PSG. Nothing here is a gate.");
     for ds in COHORTS {
@@ -642,8 +673,12 @@ fn main() {
                 c.fc[0], c.fc[1], c.fc[2], c.fc[3]
             );
         }
+        // The first arm is the null reading, and it is what every later arm's paired line is
+        // differenced against, on this cohort's own nights.
+        let mut base: Option<BTreeMap<usize, f64>> = None;
         for (arm, a, p) in &arms {
-            card(ds, arm, &score(&loaded, &configs(&loaded, a), p));
+            let f1 = card(ds, arm, &score(&loaded, &configs(&loaded, a), p), base.as_ref());
+            base.get_or_insert(f1);
         }
     }
 }
