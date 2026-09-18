@@ -190,9 +190,9 @@ pub fn balanced_accuracy(cm: &Confusion4) -> Option<f64> {
     (!r.is_empty()).then(|| r.iter().sum::<f64>() / r.len() as f64)
 }
 
-/// Mean of the per-class F1s over the classes that occur. Each term pairs recall with PRECISION, so
-/// calling a class more cannot buy it the way it buys [`balanced_accuracy`] — but F1 moves with class
-/// balance, so this compares ARMS WITHIN one cohort and never one cohort against another.
+/// Mean of the per-class F1s over the classes that occur. Calling a class MORE cannot buy it the way
+/// it buys [`balanced_accuracy`], but never calling it AT ALL drops its term from the mean and raises
+/// it, so read the predicted share beside this and compare arms WITHIN one cohort, never across two.
 pub fn macro_f1(cm: &Confusion4) -> Option<f64> {
     let f: Vec<f64> = (0..4).filter_map(|c| f1(cm, c)).collect();
     (!f.is_empty()).then(|| f.iter().sum::<f64>() / f.len() as f64)
@@ -384,6 +384,27 @@ mod tests {
         let want: f64 = (0..4).filter_map(|c| f1(&loose, c)).sum::<f64>()
             / (0..4).filter_map(|c| f1(&loose, c)).count() as f64;
         assert!((f1v - want).abs() < 1e-12);
+    }
+
+    /// The other direction of the same asymmetry, and the one that reads as a WIN: a class that is
+    /// never predicted has no precision, so [`f1`] is `None` and `macro_f1` averages over what is
+    /// left. Abolishing the class an arm is worst at therefore RAISES it while recall collapses.
+    #[test]
+    fn abolishing_a_class_raises_macro_f1_because_its_term_leaves_the_mean() {
+        // Same truth as above: 80 of the common class, 20 of the rare one. Rows truth, columns called.
+        let tight: Confusion4 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 76, 4], [0, 0, 10, 10]];
+        // The rare class never called once. Its recall is 0.0 and its precision does not exist.
+        let silent: Confusion4 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 80, 0], [0, 0, 20, 0]];
+
+        assert_eq!(2, (0..4).filter_map(|c| f1(&tight, c)).count(), "both classes must carry an F1");
+        assert_eq!(1, (0..4).filter_map(|c| f1(&silent, c)).count(), "the silent class must drop out");
+        assert_eq!(Some(0.0), recall(&silent, 3), "it is scored zero on recall, not absent");
+
+        let (f0, f1v) = (macro_f1(&tight).unwrap(), macro_f1(&silent).unwrap());
+        let (ba0, ba1) = (balanced_accuracy(&tight).unwrap(), balanced_accuracy(&silent).unwrap());
+        assert!(f1v > f0, "abolishing the rare class must RAISE macro F1: {f0} -> {f1v}");
+        assert!(ba1 < ba0, "while balanced accuracy falls: {ba0} -> {ba1}");
+        assert_eq!(Some(0.0), min_recall(&silent), "min recall is what does not hide it");
     }
 
     #[test]
