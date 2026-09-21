@@ -172,14 +172,16 @@ pub fn precision(cm: &Confusion4, class: usize) -> Option<f64> {
     (called > 0).then(|| cm[class][class] as f64 / called as f64)
 }
 
-/// Harmonic mean of this class's recall and precision. A DIAGNOSTIC, not the selection objective:
-/// its denominator carries the predicted share, so it moves when class prevalence moves even though
-/// the classifier has not. [`balanced_accuracy`] is the invariant counterpart.
+/// Harmonic mean of this class's recall and precision, and 0.0 when it occurs or is predicted but
+/// nothing about it is right. `None` ONLY when the class is absent from truth AND never predicted,
+/// which is the one case it is not a class of this cohort's problem. Feeds [`macro_f1`].
 pub fn f1(cm: &Confusion4, class: usize) -> Option<f64> {
-    match (recall(cm, class), precision(cm, class)) {
-        (Some(r), Some(p)) if r + p > 0.0 => Some(2.0 * r * p / (r + p)),
-        _ => None,
+    let (r, p) = (recall(cm, class), precision(cm, class));
+    if r.is_none() && p.is_none() {
+        return None;
     }
+    let (r, p) = (r.unwrap_or(0.0), p.unwrap_or(0.0));
+    Some(if r + p > 0.0 { 2.0 * r * p / (r + p) } else { 0.0 })
 }
 
 /// Mean of the per-class recalls over the classes that occur. Each term conditions on TRUTH, so a
@@ -190,9 +192,9 @@ pub fn balanced_accuracy(cm: &Confusion4) -> Option<f64> {
     (!r.is_empty()).then(|| r.iter().sum::<f64>() / r.len() as f64)
 }
 
-/// Mean of the per-class F1s over the classes that occur. Calling a class MORE cannot buy it the way
-/// it buys [`balanced_accuracy`], but never calling it AT ALL drops its term from the mean and raises
-/// it, so read the predicted share beside this and compare arms WITHIN one cohort, never across two.
+/// Mean of the per-class F1s over the classes that occur OR are predicted. Calling a class MORE
+/// cannot buy it the way it buys [`balanced_accuracy`], and never calling it AT ALL scores it zero
+/// rather than dropping its term, so abolishing a class lowers this. Compare arms WITHIN one cohort.
 pub fn macro_f1(cm: &Confusion4) -> Option<f64> {
     let f: Vec<f64> = (0..4).filter_map(|c| f1(cm, c)).collect();
     (!f.is_empty()).then(|| f.iter().sum::<f64>() / f.len() as f64)
@@ -386,25 +388,53 @@ mod tests {
         assert!((f1v - want).abs() < 1e-12);
     }
 
-    /// The other direction of the same asymmetry, and the one that reads as a WIN: a class that is
-    /// never predicted has no precision, so [`f1`] is `None` and `macro_f1` averages over what is
-    /// left. Abolishing the class an arm is worst at therefore RAISES it while recall collapses.
+    /// The other direction of the same asymmetry, which used to read as a WIN: a class never
+    /// predicted has no precision, and dropping its term from the mean RAISED macro F1 while recall
+    /// collapsed. It now scores zero and keeps its term, so abolishing a class costs what it should.
     #[test]
-    fn abolishing_a_class_raises_macro_f1_because_its_term_leaves_the_mean() {
+    fn abolishing_a_class_lowers_macro_f1_because_its_term_scores_zero() {
         // Same truth as above: 80 of the common class, 20 of the rare one. Rows truth, columns called.
         let tight: Confusion4 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 76, 4], [0, 0, 10, 10]];
         // The rare class never called once. Its recall is 0.0 and its precision does not exist.
         let silent: Confusion4 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 80, 0], [0, 0, 20, 0]];
 
         assert_eq!(2, (0..4).filter_map(|c| f1(&tight, c)).count(), "both classes must carry an F1");
-        assert_eq!(1, (0..4).filter_map(|c| f1(&silent, c)).count(), "the silent class must drop out");
+        assert_eq!(Some(0.0), f1(&silent, 3), "the silent class scores zero rather than dropping out");
+        assert_eq!(2, (0..4).filter_map(|c| f1(&silent, c)).count(), "so the mean is over the same two");
         assert_eq!(Some(0.0), recall(&silent, 3), "it is scored zero on recall, not absent");
 
         let (f0, f1v) = (macro_f1(&tight).unwrap(), macro_f1(&silent).unwrap());
         let (ba0, ba1) = (balanced_accuracy(&tight).unwrap(), balanced_accuracy(&silent).unwrap());
-        assert!(f1v > f0, "abolishing the rare class must RAISE macro F1: {f0} -> {f1v}");
-        assert!(ba1 < ba0, "while balanced accuracy falls: {ba0} -> {ba1}");
+        assert!((f0 - 0.752).abs() < 5e-4, "hand-computed: {f0}");
+        assert!((f1v - 0.444).abs() < 5e-4, "and 0.889 under the old drop-out rule: {f1v}");
+        assert!(f1v < f0, "abolishing the rare class must LOWER macro F1: {f0} -> {f1v}");
+        assert!(ba1 < ba0, "and balanced accuracy falls with it: {ba0} -> {ba1}");
         assert_eq!(Some(0.0), min_recall(&silent), "min recall is what does not hide it");
+    }
+
+    /// The two remaining cases, each pinned because each is a different fact. A class this cohort
+    /// does not have is not part of its problem and must leave the mean; a class it does not have
+    /// but the arm calls anyway is every call wrong, and inventing one may not be free.
+    #[test]
+    fn a_class_absent_from_truth_drops_out_only_while_nothing_predicts_it() {
+        // Class 3 in neither truth nor prediction: class 2 alone carries the mean.
+        let neither: Confusion4 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 80, 0], [0, 0, 0, 0]];
+        assert_eq!(None, recall(&neither, 3), "absent from truth");
+        assert_eq!(None, precision(&neither, 3), "and never called");
+        assert_eq!(None, f1(&neither, 3), "so it is not a class of this cohort's problem");
+        assert_eq!(Some(1.0), macro_f1(&neither), "only class 2 is in the mean");
+
+        // Same truth, and the arm calls class 3 on four epochs that are truly class 2. Recall is
+        // undefined, precision is 0.0, and the term is 0.0 rather than absent.
+        let invented: Confusion4 = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 76, 4], [0, 0, 0, 0]];
+        assert_eq!(Some(0.0), precision(&invented, 3), "nothing it called class 3 truly is");
+        assert_eq!(None, recall(&invented, 3), "and there is no class 3 to recall");
+        assert_eq!(Some(0.0), f1(&invented, 3), "an invented class costs a zero, not nothing");
+        // The drop-out answer would have been class 2's F1 alone. Keeping the zero halves it, which
+        // is the isolation: class 2 is identical in both readings of the SAME matrix.
+        let kept = macro_f1(&invented).unwrap();
+        assert!((kept - f1(&invented, 2).unwrap() / 2.0).abs() < 1e-12, "{kept}");
+        assert!(kept < f1(&invented, 2).unwrap(), "inventing an absent class may not be free");
     }
 
     #[test]
