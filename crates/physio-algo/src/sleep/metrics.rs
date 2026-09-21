@@ -956,4 +956,38 @@ mod tests {
                    format!("{}", paired_verdict(0.0375, 0.0215, Some(-0.1003))));
     }
 
+    /// The measured incident, from `dev-notes/_r11/border_report_no_time_term.txt`: the arm every
+    /// other reading called the worst printed the card's ONLY AHEAD in 50 paired arms, having given
+    /// rem up. Its worst class recall had fallen 0.1723 -> 0.0720, and that is what now reads.
+    #[test]
+    fn the_dreamt_time_term_ablation_reads_degenerate_not_ahead() {
+        // Row marginals are the measured dreamt truth shares over a nominal 100,000 epochs and the
+        // diagonals the measured per-class recalls. `min_recall` reads rows, so the scale cancels.
+        let rows = [25_100i64, 61_000, 3_400, 10_500];
+        let build = |recalls: [f64; 4]| -> Confusion4 {
+            let mut cm = [[0i64; 4]; 4];
+            for c in 0..4 {
+                let hit = (rows[c] as f64 * recalls[c]).round() as i64;
+                cm[c][c] = hit;
+                // Every miss into one other column; which one cannot move a row's recall.
+                cm[c][if c == WAKE { 1 } else { WAKE }] = rows[c] - hit;
+            }
+            cm
+        };
+        let null = build([0.427, 0.780, 0.1723, 0.388]);
+        let ablated = build([0.443, 0.876, 0.098, 0.0720]);
+
+        let (n_min, a_min) = (min_recall(&null).unwrap(), min_recall(&ablated).unwrap());
+        assert!((n_min - 0.1723).abs() < 1e-3, "measured null min recall: {n_min}");
+        assert!((a_min - 0.0720).abs() < 1e-3, "measured ablated min recall: {a_min}");
+        let delta = a_min - n_min;
+        assert!((delta + 0.1003).abs() < 1e-3, "the measured fall: {delta}");
+
+        // The measured paired headline over the same 100 nights: +0.0375 against a bar of 0.0215.
+        let v = paired_verdict(0.0375, 0.0215, Some(delta));
+        assert!(matches!(v, Verdict::Degenerate { .. }), "the card's only AHEAD in 50: {v}");
+        assert!(format!("{v}").contains("min recall -0.100"), "it must name the drop: {v}");
+        // And without the guard it is the reading that was printed, quoted, and believed.
+        assert_eq!(Verdict::Ahead(0.0375 / 0.0215), paired_verdict(0.0375, 0.0215, None));
+    }
 }
