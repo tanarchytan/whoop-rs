@@ -25,7 +25,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::screen::{PERM_SEED, RIDGE};
-use common::{compare, dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, require_psg,
+use common::{compare_guarded, dirs_of, read_accel, read_hr, read_meta, read_rr, read_truth, require_psg,
     Provenance};
 use physio_algo::lda::Lda;
 use physio_algo::sleep::agreement::{bland_altman, summarise, NightSummary};
@@ -247,9 +247,17 @@ fn macro_f1_by_night(nights: &[Night]) -> BTreeMap<usize, f64> {
     nights.iter().filter_map(|n| Some((n.id, macro_f1(&n.cm)?))).collect()
 }
 
-/// Scores one arm, and returns its per-night macro F1 so the next arm can be paired against it.
-/// `base` is the null reading's own series over the SAME cohort.
-fn card(ds: &str, arm: &str, nights: &[Night], base: Option<&BTreeMap<usize, f64>>) -> BTreeMap<usize, f64> {
+/// What one arm leaves behind for the next one to be judged against: its per-night macro F1 series
+/// and its pooled worst-class recall. The second is what stops a headline bought by giving a class
+/// up from printing AHEAD, so the card cannot report the gap without it.
+struct Reading {
+    f1: BTreeMap<usize, f64>,
+    min_recall: Option<f64>,
+}
+
+/// Scores one arm and returns its [`Reading`], so the next arm can be paired against it.
+/// `base` is the null reading's own, over the SAME cohort.
+fn card(ds: &str, arm: &str, nights: &[Night], base: Option<&Reading>) -> Reading {
     let cm = pooled(nights);
     let cms: Vec<Confusion4> = nights.iter().map(|n| n.cm).collect();
     let ci = bootstrap_kappa_ci(&cms, BOOTSTRAP_DRAWS, 0.05, BOOTSTRAP_SEED);
@@ -280,11 +288,14 @@ fn card(ds: &str, arm: &str, nights: &[Night], base: Option<&BTreeMap<usize, f64
 
     // The only PAIRED line on the card. Everything above subtracts two pooled numbers produced by
     // two separate runs, which carries no bar; this differences the same nights under both arms.
-    let mine = macro_f1_by_night(nights);
-    let paired = base.map(|b| pair_by_id(b, &mine)).map_or_else(
+    let mine = Reading { f1: macro_f1_by_night(nights), min_recall: min_recall(&cm) };
+    let paired = base.map(|b| (pair_by_id(&b.f1, &mine.f1), b.min_recall)).map_or_else(
         || "  (this arm IS the baseline)".to_string(),
-        |(bv, av)| format!("  vs the null, paired on {} night(s): {}", bv.len(),
-                           compare(&bv, &av, V2_PROVENANCE).2),
+        |((bv, av), base_min)| {
+            let drop = base_min.and_then(|b| Some(mine.min_recall? - b));
+            format!("  vs the null, paired on {} night(s): {}", bv.len(),
+                    compare_guarded(&bv, &av, V2_PROVENANCE, drop).2)
+        },
     );
     println!("  per-night macro F1 {}{paired}", show(per_recording(&cms, macro_f1)));
 
@@ -691,10 +702,10 @@ fn main() {
         }
         // The first arm is the null reading, and it is what every later arm's paired line is
         // differenced against, on this cohort's own nights.
-        let mut base: Option<BTreeMap<usize, f64>> = None;
+        let mut base: Option<Reading> = None;
         for (arm, a, p) in &arms {
-            let f1 = card(ds, arm, &score(&loaded, &configs(&loaded, a), p), base.as_ref());
-            base.get_or_insert(f1);
+            let reading = card(ds, arm, &score(&loaded, &configs(&loaded, a), p), base.as_ref());
+            base.get_or_insert(reading);
         }
     }
 }

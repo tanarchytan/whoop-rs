@@ -360,6 +360,51 @@ pub fn pair_by_id(
     base.iter().filter_map(|(id, b)| arm.get(id).map(|a| (*b, *a))).unzip()
 }
 
+/// What a paired headline says once the arm's worst class is looked at too. The mean of per-night
+/// differences cannot see that an arm bought its gap by abolishing a class; [`paired_verdict`]
+/// refuses to call that AHEAD, and this is what it returns instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Verdict {
+    /// The mean sits inside the bar this many paired nights can resolve.
+    Matches,
+    /// Ahead by this many bars, with no class left worse off than the baseline's worst.
+    Ahead(f64),
+    /// Behind by this many bars.
+    Behind(f64),
+    /// Ahead by `bars` while the worst per-class recall FELL by `min_recall_delta`. Not a win.
+    Degenerate { bars: f64, min_recall_delta: f64 },
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Verdict::Matches => write!(f, "matches"),
+            Verdict::Ahead(x) => write!(f, "AHEAD ({x:.2}x)"),
+            Verdict::Behind(x) => write!(f, "behind ({x:.2}x)"),
+            Verdict::Degenerate { bars, min_recall_delta } => {
+                write!(f, "DEGENERATE ({bars:.2}x, min recall {min_recall_delta:+.4})")
+            }
+        }
+    }
+}
+
+/// The verdict on a paired mean and its bar, refusing AHEAD when the arm's worst per-class recall
+/// fell against the baseline's. Any drop is enough: no threshold separates a gap bought by giving a
+/// class up from one earned. `min_recall_delta` is None when there is no baseline to difference.
+pub fn paired_verdict(mean: f64, bar: f64, min_recall_delta: Option<f64>) -> Verdict {
+    if mean.abs() <= bar {
+        return Verdict::Matches;
+    }
+    let bars = mean.abs() / bar;
+    if mean < 0.0 {
+        return Verdict::Behind(bars);
+    }
+    match min_recall_delta {
+        Some(d) if d < 0.0 => Verdict::Degenerate { bars, min_recall_delta: d },
+        _ => Verdict::Ahead(bars),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,4 +936,24 @@ mod tests {
             "a case the two orderings agree on cannot prove the pairing: {by_position} vs {paired}"
         );
     }
+
+    /// The guard is on AHEAD alone. An arm that is behind or inside its bar is already not being
+    /// quoted as a win, and flagging those catches honest noise: `sleep-accel / conditioned
+    /// diagonal, beta 0.25` matches at +0.0037 with min recall down 0.0030 and needs no catching.
+    #[test]
+    fn only_an_ahead_bought_by_a_fallen_min_recall_is_degenerate() {
+        assert_eq!(Verdict::Matches, paired_verdict(0.0037, 0.0050, Some(-0.0030)));
+        assert!(matches!(paired_verdict(-0.0375, 0.0215, Some(-0.1003)), Verdict::Behind(_)));
+        // Equal is not a fall, and the baseline arm itself has nothing to difference against.
+        assert!(matches!(paired_verdict(0.0375, 0.0215, Some(0.0)), Verdict::Ahead(_)));
+        assert!(matches!(paired_verdict(0.0375, 0.0215, None), Verdict::Ahead(_)));
+        // A rise is the honest shape: aauwss / cardiac emission lambda 1.0 moved min recall
+        // 0.4232 -> 0.5651. Its own headline sat inside its bar, so raise it past one here.
+        assert!(matches!(paired_verdict(0.0500, 0.0468, Some(0.1419)), Verdict::Ahead(_)));
+        // Exactly on the bar is not a gap in either direction, whatever the recalls did.
+        assert_eq!(Verdict::Matches, paired_verdict(0.0215, 0.0215, Some(-0.5)));
+        assert_eq!("DEGENERATE (1.74x, min recall -0.1003)",
+                   format!("{}", paired_verdict(0.0375, 0.0215, Some(-0.1003))));
+    }
+
 }

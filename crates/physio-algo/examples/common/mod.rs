@@ -562,16 +562,24 @@ pub enum Provenance {
 /// provenance. Returns `(mean, bar, line)`; the line carries a loud marker when the baseline is
 /// in-sample, so an invalid comparison cannot be quoted as a clean one.
 pub fn compare(base: &[f64], arm: &[f64], base_from: Provenance) -> (f64, f64, String) {
+    compare_guarded(base, arm, base_from, None)
+}
+
+/// [`compare`] told what the arm's worst per-class recall did against the baseline's, so a headline
+/// bought by abolishing a class reads DEGENERATE rather than AHEAD. The verdict lives in
+/// `metrics::paired_verdict` because `cargo test` does not build a test inside an example.
+pub fn compare_guarded(
+    base: &[f64],
+    arm: &[f64],
+    base_from: Provenance,
+    min_recall_delta: Option<f64>,
+) -> (f64, f64, String) {
     assert_eq!(base.len(), arm.len(), "a paired comparison needs the same nights on both sides");
     let d: Vec<f64> = base.iter().zip(arm).map(|(a, b)| b - a).collect();
     let Some((mean, bar)) = physio_algo::sleep::metrics::paired_bar(&d) else {
         return (f64::NAN, f64::NAN, "too few paired nights".to_string());
     };
-    let tag = if mean.abs() <= bar {
-        "matches".to_string()
-    } else {
-        format!("{} ({:.2}x)", if mean > 0.0 { "AHEAD" } else { "behind" }, mean.abs() / bar)
-    };
+    let tag = physio_algo::sleep::metrics::paired_verdict(mean, bar, min_recall_delta).to_string();
     let line = match base_from {
         Provenance::HeldOut => format!("{mean:>+8.4} {bar:>7.4}  {tag}"),
         Provenance::InSample(what) => format!(
