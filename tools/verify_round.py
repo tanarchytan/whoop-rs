@@ -398,8 +398,33 @@ def check_eol_flips():
         "; ".join(bad[:6]) if bad else "")
 
 
+# ---------------------------------------------------------------- 7. the frozen engine
+
+# v2 is the reference every new engine is measured against, so an edit to it moves the ruler and
+# every earlier number silently becomes a claim about different code. Both files were frozen here.
+FROZEN_AT = "bcba707"
+FROZEN = ["crates/physio-algo/src/sleep/v2.rs", "crates/physio-algo/src/sleep/params.rs"]
+
+
+def frozen_drift(seen):
+    """`seen` is (path, blob at the freeze commit, blob now). Git hashes the bytes as stored, so a
+    CRLF file compares correctly, and a file that cannot be hashed at either end counts as drift."""
+    moved = [f"{p} ({(w or 'missing')[:8]} -> {(g or 'missing')[:8]})" for p, w, g in seen if w != g]
+    say(f"the frozen sleep engine still matches {FROZEN_AT}", OK if not moved else FAIL,
+        "; ".join(moved))
+
+
+def check_frozen():
+    def git(args):
+        p = subprocess.run(["git", *args], cwd=RS, capture_output=True, text=True, errors="replace")
+        return p.stdout.strip() if p.returncode == 0 else None
+
+    frozen_drift([(f, git(["rev-parse", f"{FROZEN_AT}:{f}"]), git(["hash-object", f]))
+                  for f in FROZEN])
+
+
 SCOPED = [check_duplicate_consts, check_orphans]
-GLOBAL = [check_dataset_columns, check_line_endings, check_eol_flips]
+GLOBAL = [check_dataset_columns, check_line_endings, check_eol_flips, check_frozen]
 
 
 GREEN_RUN = "test result: ok. 40 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out"
@@ -460,6 +485,14 @@ def self_test():
         hit = unread == ["Type"]
         print(f"  {'caught ' if hit else 'MISSED '} a dataset column the loader never opens {unread}")
         ok &= hit
+
+        # Fabricated blobs rather than a real edit: planting this defect for real means writing to
+        # v2.rs, and a self-test that has to touch the frozen file to prove it is frozen is a risk.
+        ok &= probe("an edit to a frozen file", FAIL,
+                    lambda: frozen_drift([(FROZEN[0], "a" * 40, "b" * 40)]))
+        ok &= probe("a frozen file that cannot be read", FAIL,
+                    lambda: frozen_drift([(FROZEN[1], "a" * 40, None)]))
+        ok &= probe("the frozen files as they stand", OK, check_frozen)
     finally:
         target.unlink(missing_ok=True)
     print("\nself-test", "OK" if ok else "FAILED")

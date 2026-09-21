@@ -61,6 +61,7 @@ COVERED = {
     "check_orphans": "planted probe file",
     "check_line_endings": "planted probe file",
     "check_eol_flips": "flipped tracked file",
+    "check_frozen": "frozen_drift",
 }
 
 EMPTY_DOC = ("     Running unittests src/lib.rs (t/a.exe)\n"
@@ -212,6 +213,19 @@ def test_untracked_files_are_in_scope():
         probe.unlink(missing_ok=True)
 
 
+def test_frozen():
+    """v2 is the ruler. An edit to it makes every earlier number a claim about different code."""
+    check("a frozen file whose blob moved FAILS",
+          verdicts(lambda: vr.frozen_drift([("v2.rs", "a" * 40, "b" * 40)])), [vr.FAIL])
+    check("a frozen file that cannot be hashed FAILS",
+          verdicts(lambda: vr.frozen_drift([("params.rs", "a" * 40, None)])), [vr.FAIL])
+    check("an untouched frozen file passes",
+          verdicts(lambda: vr.frozen_drift([("v2.rs", "a" * 40, "a" * 40)])), [vr.OK])
+    # The real thing, against the real freeze commit: git hashes stored bytes, so CRLF is not an
+    # excuse for a mismatch. If this fails, someone edited the engine every result is measured on.
+    check("the frozen files in the tree match the freeze commit", verdicts(vr.check_frozen), [vr.OK])
+
+
 def every_check_is_covered():
     """The guard against 3-of-7 recurring: a new check without a test fails this file."""
     found = {n for n, f in inspect.getmembers(vr, inspect.isfunction) if n.startswith("check_")}
@@ -221,7 +235,8 @@ def every_check_is_covered():
 
 def main() -> int:
     for fn in (test_counts, test_ignored_suite, test_clippy, test_evidence, test_dataset_columns,
-               test_file_checks, test_scope_is_the_step, test_untracked_files_are_in_scope, every_check_is_covered):
+               test_file_checks, test_scope_is_the_step, test_untracked_files_are_in_scope,
+               test_frozen, every_check_is_covered):
         print(f"\n{fn.__name__}")
         fn()
     print(f"\n{'FAILED: ' + ', '.join(FAILED) if FAILED else 'all verification-round checks pass'}")
