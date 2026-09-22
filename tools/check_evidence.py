@@ -31,10 +31,16 @@ MEAS = ROOT / "whoop-research" / "_actual" / "meas"
 
 # Documents whose citations are gated. Add new ones here; a document not listed is not gated,
 # and therefore is not evidence.
+#
+# A SUPERSEDED document does not belong on this list. `HLD-LLD-SLEEP-MODEL.md` and
+# `SPEC-EMISSION-LADDER.md` were listed until 2026-09-22 and both carry a banner forbidding anyone
+# from quoting them, so their permanent `<-- NO CITATIONS` flag was a warning nobody could ever
+# clear. Their live replacements were NOT listed, while one of them claims in its own header to be
+# machine-gated. The list now points at what is current.
 SCANNED = [
     ROOT / "dev-notes" / "TANV1-TARGET-AUDIT-20260901.md",
-    ROOT / "dev-notes" / "whoop-rs" / "HLD-LLD-SLEEP-MODEL.md",
-    ROOT / "dev-notes" / "whoop-rs" / "SPEC-EMISSION-LADDER.md",
+    ROOT / "dev-notes" / "whoop-rs" / "HLD-SLEEP-MODEL-V2.md",
+    ROOT / "dev-notes" / "whoop-rs" / "LLD-SLEEP-MODEL-V2.md",
     ROOT / "whoop-research" / "_actual" / "CLAIMS.md",
     ROOT / "whoop-research" / "_actual" / "notes" / "synthesis" / "FEATURE-ROSTER.md",
     ROOT / "whoop-research" / "_actual" / "notes" / "synthesis" / "KAPPA-ALTERNATIVES.md",
