@@ -9,7 +9,7 @@
 //! Two devices agreeing is two devices agreeing, not proof either is right. Only a reference
 //! measurement can say that, and neither of these is one.
 
-use crate::stats::{mean, sample_sd};
+use crate::stats::{mean, sample_sd, LOA_Z};
 
 /// One moment measured by both devices. [reference] is the device being compared AGAINST, so a
 /// positive bias means [other] reads high.
@@ -36,9 +36,6 @@ pub struct Agreement {
     pub loa_low: f64,
     pub loa_high: f64,
 }
-
-/// Standard-normal multiplier for the 95% limits of agreement.
-const LOA_Z: f64 = 1.96;
 
 /// Compare two devices over [pairs]. `None` when there is nothing to compare.
 ///

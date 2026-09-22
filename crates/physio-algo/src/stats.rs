@@ -15,6 +15,10 @@ pub fn t95_df(df: usize) -> f64 {
     T95.iter().rev().find(|(k, _)| *k <= df).expect("the table starts at df 1").1
 }
 
+/// Standard-normal multiplier for the 95% limits of agreement, as Bland and Altman define them.
+/// Read by both agreement modules; unlike [`t95_df`] it does not widen at small n.
+pub const LOA_Z: f64 = 1.96;
+
 /// Arithmetic mean; `0.0` for an empty slice.
 pub fn mean(xs: &[f64]) -> f64 {
     if xs.is_empty() {

@@ -8,6 +8,9 @@
 //! the SAME window for device and reference. The window is the caller's to declare: these numbers are
 //! meaningless across two different spans.
 
+use crate::sleep::metrics::WAKE;
+use crate::stats::LOA_Z;
+
 /// One recording's summary measures, in MINUTES except `efficiency` in percent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NightSummary {
@@ -23,8 +26,6 @@ pub struct NightSummary {
     pub deep: f64,
     pub rem: f64,
 }
-
-const WAKE: usize = 0;
 
 /// Summarise one hypnogram. `epoch_min` is the epoch length in minutes.
 pub fn summarise(labels: &[usize], epoch_min: f64) -> Option<NightSummary> {
@@ -103,9 +104,6 @@ impl Agreement {
         (self.bias_at(reference) - half, self.bias_at(reference) + half)
     }
 }
-
-/// The 95% limits-of-agreement multiplier. Normal-theory, as Bland and Altman define them.
-const LOA_Z: f64 = 1.96;
 
 /// `device` and `reference` are paired per recording and must be the same length.
 pub fn bland_altman(device: &[f64], reference: &[f64]) -> Option<Agreement> {
