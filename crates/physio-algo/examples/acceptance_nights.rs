@@ -19,7 +19,7 @@ use physio_algo::sleep::{
     SleepInput, SleepStage, StepSample,
 };
 
-const ROOT: &str = "C:/Users/DavidGillot/Projects/whoop/whoop-data/harnesses/labelled-nights";
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../whoop-data/harnesses/labelled-nights");
 const EPOCH: i64 = 30;
 const MIN_BOUT: usize = 10;
 

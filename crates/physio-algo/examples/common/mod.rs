@@ -33,7 +33,7 @@ use physio_algo::sleep::{
 /// so defaulting to either would hand back a doubled R-R stream with no error. `_clean3` further repairs
 /// `aauwss/subject_12`'s placeholder gravity and all 31 gap-filled `sleep-accel` HR streams, and adds the
 /// DREAMT temp / BVP / apnea-event / demographics channels. `WHOOP_SLEEP_FIXTURES` overrides.
-const DEFAULT_ROOT: &str = "C:/Users/DavidGillot/Projects/whoop/sleep-benchmark/fixtures_multi_clean3";
+const DEFAULT_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../sleep-benchmark/fixtures_multi_clean3");
 
 pub fn fixtures_root() -> PathBuf {
     std::env::var("WHOOP_SLEEP_FIXTURES").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(DEFAULT_ROOT))
@@ -528,7 +528,7 @@ impl RefineCensus {
 /// path lists before this existed and adding a store meant editing all three.
 pub fn user_cohort() -> Vec<(String, String)> {
     const MANIFEST: &str =
-        "C:/Users/DavidGillot/Projects/whoop/whoop-data/harnesses/user-cohort/manifest.json";
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../../whoop-data/harnesses/user-cohort/manifest.json");
     let Ok(text) = fs::read_to_string(MANIFEST) else { return Vec::new() };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
     v["stores"]
@@ -539,7 +539,9 @@ pub fn user_cohort() -> Vec<(String, String)> {
         // total that then reads as coverage.
         .filter(|s| s["scorable"].as_bool() == Some(true))
         .filter_map(|s| {
-            Some((s["wearer"].as_str()?.to_string(), s["path"].as_str()?.to_string()))
+            // manifest paths are relative to the whoop/ root; an absolute one is kept as is
+            let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../..")).join(s["path"].as_str()?);
+            Some((s["wearer"].as_str()?.to_string(), path.to_string_lossy().into_owned()))
         })
         .collect()
 }

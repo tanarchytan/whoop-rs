@@ -12,6 +12,8 @@ not. The sample rate is measured from the row's own timestamp column, never assu
 Usage:
   python tools/aauwss_ecg_to_fixture.py [SRC_DIR] [OUT_DIR]
 """
+from pathlib import Path as _Path
+_WHOOP = str(_Path(__file__).resolve().parents[2])  # whoop/ project root
 
 import os
 import pickle
@@ -19,7 +21,7 @@ import sys
 
 import numpy as np
 
-DEFAULT_SRC = r"C:/Users/DavidGillot/Projects/whoop/whoop-data/datasets/AAUWSS/extracted/aligned_sleep_data_set/ecg"
+DEFAULT_SRC = _WHOOP + r"/whoop-data/datasets/AAUWSS/extracted/aligned_sleep_data_set/ecg"
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "crates", "physio-algo", "tests", "fixtures", "aauwss_ecg")
 
 # Stored integer = round(raw / SCALE). The published values are arbitrary EDF ECG-channel units with a

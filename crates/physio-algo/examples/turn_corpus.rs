@@ -91,7 +91,7 @@ fn jerk_series(grav: &[AccelSample], w0: i64, n: usize) -> Vec<Option<f64>> {
     norm
 }
 
-const LABELLED: &str = "C:/Users/DavidGillot/Projects/whoop/whoop-data/harnesses/labelled-nights";
+const LABELLED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../whoop-data/harnesses/labelled-nights");
 
 /// The nights with WEARER truth. Small, and the only thing here that can falsify a claim.
 fn labelled_nights() {

@@ -13,6 +13,8 @@ after it) so both fixtures cover the same 30 seconds.
 Usage:
   python tools/aauwss_ppg_to_fixture.py [SRC_DIR] [OUT_DIR]
 """
+from pathlib import Path as _Path
+_WHOOP = str(_Path(__file__).resolve().parents[2])  # whoop/ project root
 
 import os
 import pickle
@@ -20,7 +22,7 @@ import sys
 
 import numpy as np
 
-DEFAULT_SRC = r"C:/Users/DavidGillot/Projects/whoop/whoop-data/datasets/AAUWSS/extracted/aligned_sleep_data_set/ppg"
+DEFAULT_SRC = _WHOOP + r"/whoop-data/datasets/AAUWSS/extracted/aligned_sleep_data_set/ppg"
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "crates", "physio-algo", "tests", "fixtures", "aauwss_ppg")
 
 # Stored integer = round(raw / SCALE). Published PPG units are arbitrary; 0.1 keeps quantisation far
