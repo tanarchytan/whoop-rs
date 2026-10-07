@@ -105,6 +105,16 @@ fn report(name: &str, n_total: usize, on: &[f64], off: &[f64]) {
     }
 }
 
+/// SHIPPED and v2's two documented switches, the same three the border card carries.
+fn variants() -> [(&'static str, Params); 4] {
+    [
+        ("SHIPPED", Params::SHIPPED),
+        ("clamp_only_without_rr", Params { clamp_only_without_rr: true, ..Params::SHIPPED }),
+        ("quiescent_hr_z_max 0.5", Params { quiescent_hr_z_max: 0.5, ..Params::SHIPPED }),
+        ("both", Params { clamp_only_without_rr: true, quiescent_hr_z_max: 0.5, ..Params::SHIPPED }),
+    ]
+}
+
 fn main() {
     println!("PSG truth = first/last epoch opening a {SUSTAINED_EPOCHS}-epoch sustained sleep run");
     println!("percentages are of ALL nights in the cohort, so skipping a night counts as a miss");
@@ -116,7 +126,9 @@ fn main() {
         }
         println!("\n=== {cohort}, {} labelled nights", nights.len());
 
-        let (mut d_on, mut d_off, mut s_on, mut s_off) = (vec![], vec![], vec![], vec![]);
+        let (mut d_on, mut d_off) = (vec![], vec![]);
+        // One (onset, offset) error pair per v2 Params variant; the detector does not read Params.
+        let mut staged: Vec<(Vec<f64>, Vec<f64>)> = variants().iter().map(|_| (vec![], vec![])).collect();
         let mut no_truth = 0;
         for night in &nights {
             let Some((a, b)) = truth_bounds(&night.truth) else {
@@ -134,8 +146,9 @@ fn main() {
 
             // Arm 2: staging inside the reference window, which is the best case the emission layer
             // can reach - the window is handed to it, so only the labels can be wrong.
-            let prep = prepare_v2(&night.input, &Params::SHIPPED);
-            let segs = stage_v2_prepared(&prep, &Params::SHIPPED);
+            for (vi, (_, params)) in variants().iter().enumerate() {
+            let prep = prepare_v2(&night.input, params);
+            let segs = stage_v2_prepared(&prep, params);
             let lab: Vec<usize> = (0..night.n)
                 .map(|k| {
                     let mid = night.w0 + k as i64 * EPOCH + EPOCH / 2;
@@ -149,14 +162,17 @@ fn main() {
                 .rev()
                 .find(|i| sleep[..=*i].iter().rev().take(SUSTAINED_EPOCHS).all(|b| *b));
             if let (Some(f), Some(l)) = (f, l) {
-                s_on.push(err_min(night.w0 + f as i64 * EPOCH, t_on));
-                s_off.push(err_min(night.w0 + l as i64 * EPOCH, t_off));
+                staged[vi].0.push(err_min(night.w0 + f as i64 * EPOCH, t_on));
+                staged[vi].1.push(err_min(night.w0 + l as i64 * EPOCH, t_off));
+            }
             }
         }
         if no_truth > 0 {
             println!("  {no_truth} night(s) never reach a sustained sleep run in truth");
         }
         report("detector (detect_sessions on raw streams)", nights.len(), &d_on, &d_off);
-        report("staged   (stage_v2 inside the reference window)", nights.len(), &s_on, &s_off);
+        for ((name, _), (s_on, s_off)) in variants().iter().zip(&staged) {
+            report(&format!("staged   (stage_v2 inside the reference window) {name}"), nights.len(), s_on, s_off);
+        }
     }
 }

@@ -19,13 +19,14 @@
 mod common;
 
 use common::lr::{design_row, fit as fit_lr, scores, standardise_cols};
+use common::refit::{self, FitNight};
 use common::{
     cardiac_series, dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx,
 };
 use physio_algo::sleep::features::extract;
 use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar};
 use physio_algo::sleep::{
-    decode_v2, emission_terms, emissions_v2, params::Params, prepare_v2, weights_of, SleepInput,
+    decode_v2, emission_terms, emissions_v2, params::Params, prepare_v2, SleepInput,
     Terms, STAGE_ORDER,
 };
 
@@ -36,11 +37,6 @@ const MIN_EPOCHS: usize = 20;
 const WEIGHT_POWER: f64 = 0.5;
 /// v2's twelve fittable weights.
 const NW: usize = 12;
-/// Starting step. Halved whenever the objective rises, so the fit cannot oscillate past its own
-/// optimum and report a cap-hit as a failure to converge.
-const LR0: f64 = 1.0;
-const ITERS: usize = 40_000;
-const TOL: f64 = 1e-11;
 /// Shortest run a stage may hold. Emission-blind, so every arm gets it.
 const MIN_DWELL: [usize; CLASSES] = [1, 1, 6, 6];
 
@@ -86,85 +82,14 @@ fn load(set: &str) -> Vec<Night> {
     out
 }
 
-fn col_of(class: usize) -> usize {
-    (0..CLASSES).find(|c| stage_idx(STAGE_ORDER[*c]) == class).expect("class in STAGE_ORDER")
-}
-
-fn class_weights(y: &[usize]) -> [f64; CLASSES] {
-    let mut n = [0usize; CLASSES];
-    for c in y {
-        n[*c] += 1;
-    }
-    let mut w = [1.0f64; CLASSES];
-    for c in 0..CLASSES {
-        w[c] = if n[c] > 0 {
-            (y.len() as f64 / (CLASSES as f64 * n[c] as f64)).powf(WEIGHT_POWER)
-        } else {
-            0.0
-        };
-    }
-    let mass: f64 = (0..CLASSES).map(|c| n[c] as f64 * w[c]).sum::<f64>() / y.len() as f64;
-    for v in w.iter_mut() {
-        *v /= mass;
-    }
-    w
-}
-
-/// Refit v2's own twelve weights by weighted multinomial descent through [`Terms::emission`], so
-/// every non-linearity, the cycle prior, the gate and the clamp stay exactly as shipped.
+/// Refit v2's own twelve weights through [`Terms::emission`], so every non-linearity, the cycle
+/// prior, the gate and the clamp stay exactly as shipped. The fitter is `common::refit`.
 fn refit_v2(nights: &[&Night]) -> [f64; NW] {
-    let y: Vec<usize> = nights.iter().flat_map(|n| n.truth.iter().flatten().copied()).collect();
-    let cw = class_weights(&y);
-    let mut w = weights_of(&Params::SHIPPED);
-    let mut last = f64::MAX;
-    let mut lr = LR0;
-    let mut converged = false;
-    for _ in 0..ITERS {
-        let mut g = [0.0f64; NW];
-        let (mut nll, mut n) = (0.0f64, 0.0f64);
-        for nt in nights {
-            for (e, want) in nt.truth.iter().enumerate() {
-                let Some(want) = want else { continue };
-                let em = nt.terms.emission(e, &w);
-                let mx = em.iter().cloned().fold(f64::MIN, f64::max);
-                let ex: Vec<f64> = em.iter().map(|v| (v - mx).exp()).collect();
-                let sum: f64 = ex.iter().sum();
-                let col = col_of(*want);
-                nll -= cw[*want] * (ex[col] / sum).max(1e-300).ln();
-                n += 1.0;
-                // d(loss)/d(w_j) = sum_c (p_c - 1{c=y}) * d(em_c)/d(w_j), and d(em_c)/d(w_j) is the
-                // design cell, except where the awake clamp has zeroed the cardiac pair's gradient.
-                for (j, gj) in g.iter_mut().enumerate() {
-                    for (c, exc) in ex.iter().enumerate() {
-                        let mut d = nt.terms.design[e][c][j];
-                        if c == col_of(0) && (j == 8 || j == 9) && nt.terms.clamped[e] {
-                            let card = w[8] * nt.terms.design[e][c][8] + w[9] * nt.terms.design[e][c][9];
-                            if card > 0.0 {
-                                d = 0.0;
-                            }
-                        }
-                        *gj += cw[*want] * (exc / sum - if c == col { 1.0 } else { 0.0 }) * d;
-                    }
-                }
-            }
-        }
-        let nll = nll / n;
-        let drop = last - nll;
-        if (0.0..TOL).contains(&drop) {
-            converged = true;
-            break;
-        }
-        // A rise means the step overshot; back it off rather than letting it ring.
-        if drop < 0.0 {
-            lr *= 0.5;
-        }
-        last = nll;
-        for (j, gj) in g.iter().enumerate() {
-            w[j] -= lr * gj / n;
-        }
-    }
-    assert!(converged, "the v2 refit hit its cap; the arms are not comparable");
-    w
+    let fit_nights: Vec<FitNight> =
+        nights.iter().map(|n| FitNight { terms: &n.terms, extra: &[], truth: &n.truth, weight: 1.0 }).collect();
+    let f = refit::fit(&fit_nights, 0);
+    assert!(f.converged, "the v2 refit hit its cap; the arms are not comparable");
+    f.w.try_into().expect("twelve weights")
 }
 
 fn argmax(em: &[[f64; CLASSES]]) -> Vec<usize> {

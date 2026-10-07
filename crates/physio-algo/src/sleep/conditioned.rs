@@ -60,7 +60,7 @@ pub fn transition_at(base: &[[f64; 4]; 4], motion: f64, beta: f64) -> [[f64; 4];
 
 /// Most-likely path under a matrix that may differ at every epoch. `trans(t)` is the matrix for the
 /// step INTO epoch `t`; uniform start; ties resolve to the earlier stage index.
-fn viterbi_with(em: &[[f64; 4]], trans: impl Fn(usize) -> [[f64; 4]; 4]) -> Vec<SleepStage> {
+pub fn viterbi_with(em: &[[f64; 4]], trans: impl Fn(usize) -> [[f64; 4]; 4]) -> Vec<SleepStage> {
     if em.is_empty() {
         return Vec::new();
     }

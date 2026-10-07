@@ -16,6 +16,7 @@ pub mod cardiac;
 pub mod mesa;
 pub mod screen;
 pub mod lr;
+pub mod refit;
 pub use cardiac::{cardiac_series, per_second_hr, rank_pct, std_of_seconds, zscore};
 
 use std::collections::BTreeMap;
