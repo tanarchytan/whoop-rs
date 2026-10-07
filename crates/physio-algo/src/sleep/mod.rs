@@ -20,6 +20,7 @@ mod common;
 mod detect;
 mod input;
 mod mainnight;
+pub mod abstain;
 pub mod agreement;
 pub mod cardiac;
 pub mod cardiac_emit;
@@ -36,6 +37,7 @@ pub mod posterior;
 mod refine;
 pub mod resp_features;
 pub mod sequence;
+pub mod tanv1;
 mod v2;
 
 use crate::hrv::HrvReadiness;
@@ -87,11 +89,26 @@ pub struct Session {
     pub segments: Vec<StageSegment>,
     pub motion_grid: Vec<f64>,
     pub sleep_state_grid: Vec<i32>,
+    /// Spans the engine declines to score (abstention holes), `(start, end)` unix seconds. Empty for V2.
+    pub unscored: Vec<(i64, i64)>,
+}
+
+/// Which staging engine [`analyze_with`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    V2,
+    Tanv1,
 }
 
 /// Detect in-bed spans from a window's streams and stage each with the V2 recipe + motion-aware wake
 /// refinement, returning one [`Session`] per accepted span with its resting HR and windowed average HRV.
 pub fn analyze(streams: &SleepStreams) -> Vec<Session> {
+    analyze_with(streams, Engine::V2)
+}
+
+/// [`analyze`] with a choice of engine. `Engine::Tanv1` runs [`tanv1::Tanv1Cfg::DEFAULT`]: v2 labels plus
+/// abstention holes in [`Session::unscored`].
+pub fn analyze_with(streams: &SleepStreams, engine: Engine) -> Vec<Session> {
     let spans = detect::detect_sessions(
         &streams.hr,
         &streams.accel,
@@ -117,7 +134,14 @@ pub fn analyze(streams: &SleepStreams) -> Vec<Session> {
             rr: streams.rr.clone(),
             accel: streams.accel.clone(),
         };
-        let segments = refine::refine(&v2::stage(&input), &streams.accel, &streams.steps);
+        let (staged, unscored) = match engine {
+            Engine::V2 => (v2::stage(&input), Vec::new()),
+            Engine::Tanv1 => {
+                let t = tanv1::stage(&input, &tanv1::Tanv1Cfg::DEFAULT);
+                (t.segments, t.unscored)
+            }
+        };
+        let segments = refine::refine(&staged, &streams.accel, &streams.steps);
         let efficiency = detect::efficiency(span.start, span.end, &segments);
         let avg_hrv = HrvReadiness::windowed_avg_hrv(span.start as u32, span.end as u32, &beats);
         let motion_grid = detect::session_epoch_motion(span.start, span.end, &streams.accel);
@@ -131,6 +155,7 @@ pub fn analyze(streams: &SleepStreams) -> Vec<Session> {
             segments,
             motion_grid,
             sleep_state_grid,
+            unscored,
         });
     }
     out
@@ -139,10 +164,26 @@ pub fn analyze(streams: &SleepStreams) -> Vec<Session> {
 /// Stage a single detected span with the V2 recipe + the motion-aware wake refinement — the single-span
 /// re-stage a caller runs after editing a session's bounds.
 pub fn stage_refined(input: &SleepInput, steps: &[StepSample]) -> Vec<StageSegment> {
+    stage_refined_with(input, steps, Engine::V2).0
+}
+
+/// [`stage_refined`] with a choice of engine; also returns the spans the engine declines to score.
+pub fn stage_refined_with(
+    input: &SleepInput,
+    steps: &[StepSample],
+    engine: Engine,
+) -> (Vec<StageSegment>, Vec<(i64, i64)>) {
     if !is_stageable(input) {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    refine::refine(&v2::stage(input), &input.accel, steps)
+    let (staged, unscored) = match engine {
+        Engine::V2 => (v2::stage(input), Vec::new()),
+        Engine::Tanv1 => {
+            let t = tanv1::stage(input, &tanv1::Tanv1Cfg::DEFAULT);
+            (t.segments, t.unscored)
+        }
+    };
+    (refine::refine(&staged, &input.accel, steps), unscored)
 }
 
 /// Beats per hour of span below which a night cannot be staged.

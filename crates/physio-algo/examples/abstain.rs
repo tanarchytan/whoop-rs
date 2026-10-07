@@ -2,6 +2,7 @@
 //! like in a hypnogram.
 //!
 //!   cargo run --release -p physio-algo --example abstain
+//!   ABSTAIN_DRAWS=20 cargo run ...   # average both random nulls over 20 draws (default 1)
 //!
 //! Every epoch gets a stage today whether the evidence supports one or not. Ranking epochs by
 //! confidence and keeping the top fraction raises kappa on what is kept - but so does dropping
@@ -19,6 +20,7 @@
 mod common;
 
 use common::{dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx};
+use physio_algo::sleep::abstain::{self, refuse_among, MIN_EPOCHS};
 use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar};
 use physio_algo::sleep::{decode_v2, emissions_v2, params::Params, prepare_v2, SleepInput};
 
@@ -26,9 +28,6 @@ const COHORTS: [&str; 3] = ["dreamt", "aauwss", "sleep-accel"];
 const CLASSES: usize = 4;
 /// Fraction of epochs KEPT. 1.00 is today's behaviour.
 const COVERAGE: [f64; 5] = [0.95, 0.90, 0.80, 0.70, 0.60];
-/// Fewest epochs a night must carry to load, and the fewest retained after abstention - a night
-/// short enough to hit that floor is scored above the printed `keep`.
-const MIN_EPOCHS: usize = 20;
 /// Half-width, in epochs, of the smoothing applied to the margin before ranking. Smoothing is what
 /// turns scattered single-epoch refusals into stretches a hypnogram can draw.
 const SMOOTH: usize = 4;
@@ -59,9 +58,8 @@ struct Night {
     pred: Vec<usize>,
     truth: Vec<Option<usize>>,
     margin: Vec<f64>,
-    /// Epochs to the nearest decoded stage change, which lies BETWEEN two epochs, so the pair either
-    /// side of it both score 0. Needs the path only, no emissions. A night the decoder never changes
-    /// stage on scores every epoch [`f64::INFINITY`], so the index tie-break keeps the EARLIEST ones.
+    /// [`abstain::to_edge`] of the decoded path. A night the decoder never changes stage on scores
+    /// every epoch [`f64::INFINITY`], so the index tie-break keeps the EARLIEST ones.
     to_edge: Vec<f64>,
 }
 
@@ -86,8 +84,8 @@ fn load(set: &str) -> Vec<Night> {
         if em.len() < MIN_EPOCHS {
             continue;
         }
-        let pred: Vec<usize> =
-            decode_v2(&em, &Params::SHIPPED.transition).iter().map(|s| stage_idx(*s)).collect();
+        let path = decode_v2(&em, &Params::SHIPPED.transition);
+        let pred: Vec<usize> = path.iter().map(|s| stage_idx(*s)).collect();
         let margin: Vec<f64> = em
             .iter()
             .map(|row| {
@@ -96,17 +94,7 @@ fn load(set: &str) -> Vec<Night> {
                 v[0] - v[1]
             })
             .collect();
-        let edges: Vec<usize> =
-            (1..pred.len()).filter(|k| pred[*k] != pred[k - 1]).collect();
-        let to_edge = (0..pred.len())
-            .map(|k| {
-                let k = k as i64;
-                edges
-                    .iter()
-                    .map(|e| (*e as i64 - k).abs().min((*e as i64 - 1 - k).abs()) as f64)
-                    .fold(f64::INFINITY, f64::min)
-            })
-            .collect();
+        let to_edge = abstain::to_edge(&path);
         let truth = (0..em.len())
             .map(|k| {
                 raw.get(&k).copied().filter(|t| (0..CLASSES as i32).contains(t)).map(|t| t as usize)
@@ -117,8 +105,15 @@ fn load(set: &str) -> Vec<Night> {
     out
 }
 
-/// Deterministic pseudo-random score, so two runs refuse the same epochs.
-fn noise(seed: u64, k: usize) -> f64 {
+/// Random draws averaged for the two random nulls: `ABSTAIN_DRAWS`, default 1.
+fn draws() -> usize {
+    std::env::var("ABSTAIN_DRAWS").ok().and_then(|v| v.parse().ok()).filter(|n| *n >= 1).unwrap_or(1)
+}
+
+/// Deterministic pseudo-random score, so two runs refuse the same epochs. `draw` 0 is the original
+/// seed (the night index), so one draw reproduces the single-draw numbers exactly.
+fn noise(seed: u64, draw: usize, k: usize) -> f64 {
+    let seed = seed.wrapping_add((draw as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let mut x = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(k as u64 + 1);
     x ^= x >> 33;
     x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -138,13 +133,13 @@ fn smooth(v: &[f64]) -> Vec<f64> {
 }
 
 /// Per-epoch keep-score under one rule. Higher keeps.
-fn rank(nt: &Night, ni: usize, rule: Rule) -> Vec<f64> {
+fn rank(nt: &Night, ni: usize, draw: usize, rule: Rule) -> Vec<f64> {
     match rule {
         // `ClassMatchedRandom` takes its per-class quota from far-from-edge, so it cannot be a score.
         Rule::Random | Rule::ClassMatchedRandom => {
-            (0..nt.pred.len()).map(|k| noise(ni as u64, k)).collect()
+            (0..nt.pred.len()).map(|k| noise(ni as u64, draw, k)).collect()
         }
-        Rule::FarFromTransition => nt.to_edge.clone(),
+        Rule::FarFromTransition => unreachable!("far-from-edge is the library's refuse_among"),
         Rule::Margin => nt.margin.clone(),
         Rule::SmoothMargin => smooth(&nt.margin),
     }
@@ -153,7 +148,11 @@ fn rank(nt: &Night, ni: usize, rule: Rule) -> Vec<f64> {
 /// What one rule leaves at one coverage: kappa per night on the kept epochs, the run-lengths of
 /// what it refused, and the refused and labelled epoch counts per TRUTH class.
 struct Kept {
+    /// Per night; for a random rule the MEAN over the draws, so a paired delta against it is the
+    /// mean over draws of the per-night deltas.
     kappas: Vec<f64>,
+    /// Draws pooled into `runs`, `refused` and `labelled` (1 for the deterministic rules).
+    draws: usize,
     runs: Vec<usize>,
     refused: [usize; CLASSES],
     labelled: [usize; CLASSES],
@@ -173,16 +172,15 @@ impl Kept {
 
 /// One night's labelled epochs as (kept, refused) at one coverage, refused in epoch order. `None`
 /// when the night cannot reach `MIN_EPOCHS`.
-fn split(nt: &Night, ni: usize, keep: f64, rule: Rule) -> Option<(Vec<usize>, Vec<usize>)> {
+fn split(nt: &Night, ni: usize, draw: usize, keep: f64, rule: Rule) -> Option<(Vec<usize>, Vec<usize>)> {
     let mut idx: Vec<usize> = (0..nt.pred.len()).filter(|k| nt.truth[*k].is_some()).collect();
-    let take = ((idx.len() as f64 * keep).round() as usize).max(MIN_EPOCHS).min(idx.len());
-    if take < MIN_EPOCHS {
+    if idx.len() < MIN_EPOCHS {
         return None;
     }
     if rule == Rule::ClassMatchedRandom {
         // Refuse at random WITHIN each truth class, the same count per class that far-from-edge
         // refuses. The plain random null drops proportionally, so it prices a drop but not a skew.
-        let (_, edge) = split(nt, ni, keep, Rule::FarFromTransition)?;
+        let (_, edge) = split(nt, ni, draw, keep, Rule::FarFromTransition)?;
         let mut quota = [0usize; CLASSES];
         for k in &edge {
             quota[nt.truth[*k].unwrap()] += 1;
@@ -191,14 +189,20 @@ fn split(nt: &Night, ni: usize, keep: f64, rule: Rule) -> Option<(Vec<usize>, Ve
         for (c, q) in quota.iter().enumerate() {
             let mut of_class: Vec<usize> =
                 idx.iter().copied().filter(|k| nt.truth[*k] == Some(c)).collect();
-            of_class.sort_by(|a, b| noise(ni as u64, *a).total_cmp(&noise(ni as u64, *b)));
+            of_class.sort_by(|a, b| noise(ni as u64, draw, *a).total_cmp(&noise(ni as u64, draw, *b)));
             dropped.extend(of_class.into_iter().take(*q));
         }
         dropped.sort_unstable();
         let kept = idx.iter().copied().filter(|k| dropped.binary_search(k).is_err()).collect();
         return Some((kept, dropped));
     }
-    let score = rank(nt, ni, rule);
+    if rule == Rule::FarFromTransition {
+        let dropped = refuse_among(&nt.to_edge, &idx, keep);
+        let kept = idx.iter().copied().filter(|k| dropped.binary_search(k).is_err()).collect();
+        return Some((kept, dropped));
+    }
+    let take = ((idx.len() as f64 * keep).round() as usize).max(MIN_EPOCHS).min(idx.len());
+    let score = rank(nt, ni, draw, rule);
     // Ties broken by index so two rules with equal scores still refuse the same COUNT.
     idx.sort_by(|a, b| score[*b].total_cmp(&score[*a]).then(a.cmp(b)));
     let mut dropped = idx[take..].to_vec();
@@ -206,35 +210,48 @@ fn split(nt: &Night, ni: usize, keep: f64, rule: Rule) -> Option<(Vec<usize>, Ve
     Some((idx[..take].to_vec(), dropped))
 }
 
-/// Kappa per night on the kept epochs, and the run-lengths of what was refused.
+/// Kappa per night on the kept epochs, and the run-lengths of what was refused. The two random
+/// rules average kappa over `draws()` draws; the others are deterministic and use one.
 fn scored(nights: &[Night], keep: f64, rule: Rule) -> Kept {
+    let nd = if matches!(rule, Rule::Random | Rule::ClassMatchedRandom) { draws() } else { 1 };
     let (mut ks, mut runs) = (Vec::new(), Vec::new());
     let (mut refused, mut labelled) = ([0usize; CLASSES], [0usize; CLASSES]);
     for (ni, nt) in nights.iter().enumerate() {
-        let Some((kept, dropped)) = split(nt, ni, keep, rule) else { continue };
-        let (p, t): (Vec<usize>, Vec<usize>) =
-            kept.iter().map(|k| (nt.pred[*k], nt.truth[*k].unwrap())).unzip();
-        ks.push(kappa4(&confusion4(&p, &t)));
+        let mut sum = 0.0;
+        let mut ok = true;
+        for draw in 0..nd {
+            let Some((kept, dropped)) = split(nt, ni, draw, keep, rule) else {
+                ok = false;
+                break;
+            };
+            let (p, t): (Vec<usize>, Vec<usize>) =
+                kept.iter().map(|k| (nt.pred[*k], nt.truth[*k].unwrap())).unzip();
+            sum += kappa4(&confusion4(&p, &t));
 
-        // Run-lengths of the refusals, in epoch order, over the LABELLED epochs only: an epoch the
-        // reference is silent on is absent from the grid, so it splits one stretch into two.
-        for k in kept.iter().chain(&dropped) {
-            labelled[nt.truth[*k].unwrap()] += 1;
-        }
-        for k in &dropped {
-            refused[nt.truth[*k].unwrap()] += 1;
-        }
-        let mut i = 0;
-        while i < dropped.len() {
-            let mut j = i;
-            while j + 1 < dropped.len() && dropped[j + 1] == dropped[j] + 1 {
-                j += 1;
+            // Run-lengths of the refusals, in epoch order, over the LABELLED epochs only: an epoch
+            // the reference is silent on is absent from the grid, so it splits one stretch in two.
+            for k in kept.iter().chain(&dropped) {
+                labelled[nt.truth[*k].unwrap()] += 1;
             }
-            runs.push(j - i + 1);
-            i = j + 1;
+            for k in &dropped {
+                refused[nt.truth[*k].unwrap()] += 1;
+            }
+            let mut i = 0;
+            while i < dropped.len() {
+                let mut j = i;
+                while j + 1 < dropped.len() && dropped[j + 1] == dropped[j] + 1 {
+                    j += 1;
+                }
+                runs.push(j - i + 1);
+                i = j + 1;
+            }
+        }
+        // Whether a night is short enough to skip does not depend on the draw.
+        if ok {
+            ks.push(sum / nd as f64);
         }
     }
-    Kept { kappas: ks, runs, refused, labelled }
+    Kept { kappas: ks, draws: nd, runs, refused, labelled }
 }
 
 fn verdict(mean: f64, bar: f64) -> String {
@@ -311,7 +328,7 @@ fn main() {
                 let kappa = median(&mut k);
                 println!("  {:>4.0}% {:<16} {:>7.3} {:>+8.4} {:<14} {:<23} {:>6.0}% {:>7.1} {:>21}",
                          100.0 * keep, rule.name(), kappa, mr, verdict(mr, br), vs_edge, pct,
-                         this.runs.len() as f64 / scored_nights.max(1) as f64,
+                         this.runs.len() as f64 / (this.draws * scored_nights).max(1) as f64,
                          format!("{:.2}/{:.2}/{:.2}/{:.2}", b[0], b[1], b[2], b[3]));
             }
         }

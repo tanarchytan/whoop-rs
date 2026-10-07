@@ -17,7 +17,7 @@ fn rsa_wave(ph: usize, i: i64) -> i64 {
 }
 
 /// The crafted 4-phase night (deep-favorable → high-RSA → mild → restless) used by the frozen golden.
-fn golden_input() -> SleepInput {
+pub(super) fn golden_input() -> SleepInput {
     let start = REF_MIDNIGHT + 3_600;
     let phase: i64 = 90 * 60;
     let dur = phase * 4;

@@ -443,6 +443,42 @@ pub struct SleepSession {
     pub segments: Vec<SleepSegment>,
     pub motion_grid: Vec<f64>,
     pub sleep_state_grid: Vec<i32>,
+    /// Spans the engine declines to score, ascending; empty for the original engine.
+    pub unscored: Vec<SleepSpan>,
+}
+
+/// A `[start, end)` span in unix seconds.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct SleepSpan {
+    pub start: i64,
+    pub end: i64,
+}
+
+pub(crate) fn to_sleep_spans(spans: Vec<(i64, i64)>) -> Vec<SleepSpan> {
+    spans.into_iter().map(|(start, end)| SleepSpan { start, end }).collect()
+}
+
+/// Which staging engine to run: the shipped recipe, or the experimental one (abstention holes).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq)]
+pub enum SleepEngine {
+    Original,
+    Experimental,
+}
+
+impl From<SleepEngine> for sleep::Engine {
+    fn from(e: SleepEngine) -> Self {
+        match e {
+            SleepEngine::Original => sleep::Engine::V2,
+            SleepEngine::Experimental => sleep::Engine::Tanv1,
+        }
+    }
+}
+
+/// A re-staged span: motion-refined hypnogram plus the spans the engine declines to score.
+#[derive(uniffi::Record, Clone)]
+pub struct RefinedStaging {
+    pub segments: Vec<SleepSegment>,
+    pub unscored: Vec<SleepSpan>,
 }
 
 impl From<sleep::Session> for SleepSession {
@@ -456,6 +492,7 @@ impl From<sleep::Session> for SleepSession {
             segments: to_sleep_segments(s.segments),
             motion_grid: s.motion_grid,
             sleep_state_grid: s.sleep_state_grid,
+            unscored: to_sleep_spans(s.unscored),
         }
     }
 }

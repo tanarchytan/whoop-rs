@@ -19,6 +19,12 @@ pub fn analyze_sleep(streams: SleepStreams) -> Vec<SleepSession> {
     sleep::analyze(&streams.into()).into_iter().map(SleepSession::from).collect()
 }
 
+/// [`analyze_sleep`] with a choice of engine; `Original` is identical to `analyze_sleep`.
+#[uniffi::export]
+pub fn analyze_sleep_with(streams: SleepStreams, engine: SleepEngine) -> Vec<SleepSession> {
+    sleep::analyze_with(&streams.into(), engine.into()).into_iter().map(SleepSession::from).collect()
+}
+
 #[uniffi::export]
 pub fn main_night_index(blocks: Vec<MainNightBlock>, offset_s: i64, habitual_midsleep_sec: Option<i64>) -> Option<u32> {
     sleep::main_night_index(&to_night_blocks(&blocks), offset_s, habitual_midsleep_sec).map(|i| i as u32)
@@ -137,6 +143,21 @@ pub fn stage_sleep_refined(input: SleepInput, steps: Vec<SleepStepSample>) -> Ve
         .map(|s| sleep::StepSample { ts: s.ts, counter: s.counter, activity_class: s.activity_class })
         .collect();
     to_sleep_segments(sleep::stage_refined(&input.into(), &steps))
+}
+
+/// [`stage_sleep_refined`] with a choice of engine, plus the spans the engine declines to score.
+#[uniffi::export]
+pub fn stage_sleep_refined_with(
+    input: SleepInput,
+    steps: Vec<SleepStepSample>,
+    engine: SleepEngine,
+) -> RefinedStaging {
+    let steps: Vec<sleep::StepSample> = steps
+        .into_iter()
+        .map(|s| sleep::StepSample { ts: s.ts, counter: s.counter, activity_class: s.activity_class })
+        .collect();
+    let (segments, unscored) = sleep::stage_refined_with(&input.into(), &steps, engine.into());
+    RefinedStaging { segments: to_sleep_segments(segments), unscored: to_sleep_spans(unscored) }
 }
 
 /// Sleep efficiency in `[0, 1]` over the in-bed window `[start, end]`: asleep / in-bed, asleep =
@@ -332,5 +353,94 @@ mod tests {
             seg(75, 100, SleepStage::Wake),
         ];
         assert_eq!(sleep_efficiency(0, 100, stages), Some(0.75));
+    }
+
+    fn golden_streams() -> SleepStreams {
+        let start = 1_749_513_600i64 + 3_600;
+        let phase = 90 * 60i64;
+        let amp = [12i64, 60, 30, 20];
+        let (mut hr, mut rr, mut accel) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..phase * 4 {
+            let (ts, ph) = (start + i, (i / phase) as usize);
+            let restless = ph == 3 && (i % 20) < 6;
+            let (x, y, z) = if restless { (0.2, 0.15, 0.96) } else { (0.0, 0.0, 1.0) };
+            accel.push(SleepAccelSample { ts, x, y, z });
+            let bpm = match ph {
+                0 => 50,
+                1 => 54 + [0, 1, 2, 3, 2, 1][((i / 20) % 6) as usize],
+                2 => 56 + (i / 60) % 4,
+                _ => 66 + (i / 30) % 6,
+            };
+            hr.push(SleepHrSample { ts, bpm: bpm as u16 });
+            let wave = [0, amp[ph], 0, -amp[ph]][(i % 4) as usize];
+            rr.push(SleepRrRun { ts, intervals: vec![(60_000 / bpm + wave) as u16] });
+        }
+        SleepStreams {
+            hr,
+            rr,
+            accel,
+            steps: vec![],
+            tz_offset_s: 0,
+            wrist_off: vec![],
+            band_sleep_state: vec![],
+        }
+    }
+
+    fn key(s: &SleepSession) -> String {
+        let seg: Vec<_> = to_stage_segments(s.segments.clone());
+        format!("{} {} {} {:?} {:?} {:?} {:?} {:?}", s.start, s.end, s.efficiency, s.resting_hr, s.avg_hrv, seg, s.motion_grid, s.sleep_state_grid)
+    }
+
+    #[test]
+    fn original_engine_is_analyze_sleep_with_no_holes() {
+        let a = analyze_sleep(golden_streams());
+        let b = analyze_sleep_with(golden_streams(), SleepEngine::Original);
+        assert!(!a.is_empty());
+        assert_eq!(a.iter().map(key).collect::<Vec<_>>(), b.iter().map(key).collect::<Vec<_>>());
+        assert!(a.iter().chain(&b).all(|s| s.unscored.is_empty()));
+    }
+
+    #[test]
+    fn experimental_engine_keeps_the_sessions_and_reports_holes() {
+        let a = analyze_sleep(golden_streams());
+        let e = analyze_sleep_with(golden_streams(), SleepEngine::Experimental);
+        assert_eq!(a.len(), e.len());
+        assert!(e.iter().all(|s| !s.unscored.is_empty()));
+        for s in &e {
+            assert!(s.unscored.iter().all(|h| h.start < h.end && h.start >= s.start && h.end <= s.end));
+        }
+    }
+
+    #[test]
+    fn span_record_round_trips_from_the_core_session() {
+        let core = sleep::Session {
+            start: 0,
+            end: 100,
+            efficiency: 0.5,
+            resting_hr: None,
+            avg_hrv: None,
+            segments: vec![],
+            motion_grid: vec![],
+            sleep_state_grid: vec![],
+            unscored: vec![(10, 40), (60, 90)],
+        };
+        let s = SleepSession::from(core);
+        assert_eq!(s.unscored, vec![SleepSpan { start: 10, end: 40 }, SleepSpan { start: 60, end: 90 }]);
+        assert_eq!(sleep::Engine::from(SleepEngine::Original), sleep::Engine::V2);
+        assert_eq!(sleep::Engine::from(SleepEngine::Experimental), sleep::Engine::Tanv1);
+    }
+
+    #[test]
+    fn refined_with_original_is_stage_sleep_refined_and_experimental_adds_holes() {
+        let st = golden_streams();
+        let (start, end) = (st.hr[0].ts, st.hr[st.hr.len() - 1].ts + 1);
+        let input = || SleepInput { start, end, hr: st.hr.clone(), rr: st.rr.clone(), accel: st.accel.clone() };
+        let plain = to_stage_segments(stage_sleep_refined(input(), vec![]));
+        let orig = stage_sleep_refined_with(input(), vec![], SleepEngine::Original);
+        assert_eq!(plain, to_stage_segments(orig.segments));
+        assert!(orig.unscored.is_empty());
+        let exp = stage_sleep_refined_with(input(), vec![], SleepEngine::Experimental);
+        assert!(!exp.unscored.is_empty());
+        assert_eq!(plain.len(), exp.segments.len());
     }
 }
