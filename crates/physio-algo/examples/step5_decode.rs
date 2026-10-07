@@ -125,6 +125,9 @@ enum Dec {
     HsmmGeomPmfEnd,
     /// Explicit-duration Viterbi under a dwell estimated from TRAIN truth, mixed with a geometric.
     HsmmFit(f64),
+    /// The same fitted dwell for ONE [`STAGE_ORDER`] column only, the rest keeping the geometric.
+    /// Run for all four, so "deep is special" is a comparison and not an assumption.
+    HsmmOne(usize, f64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -155,11 +158,14 @@ impl Arm {
             Dec::HsmmGeom => "hsmm/geometric".to_string(),
             Dec::HsmmGeomPmfEnd => "hsmm/geom+pmf-end".to_string(),
             Dec::HsmmFit(l) => format!("hsmm/fit-dwell L{l}"),
+            Dec::HsmmOne(c, l) => {
+                format!("hsmm/{}-only L{l}", CLASS_NAMES[stage_idx(STAGE_ORDER[c])])
+            }
         }
     }
     /// True when the arm reads TRAIN truth, so its selection has to refit per inner fold.
     fn fitted(&self) -> bool {
-        matches!(self.dec, Dec::HsmmFit(_))
+        matches!(self.dec, Dec::HsmmFit(_) | Dec::HsmmOne(..))
     }
 }
 
@@ -459,6 +465,17 @@ fn dwell_fitted(runs: &[Vec<usize>], t: &[[f64; CLASSES]; CLASSES], lambda: f64)
     Dwell { log_pmf, log_surv }
 }
 
+/// `fitted`'s law for column `only`, the geometric one everywhere else. The all-class arm charges
+/// four estimated laws at once, so a class whose law is already right can pay for one whose is not.
+fn dwell_one_class(fitted: Dwell, geom: &Dwell, only: usize) -> Dwell {
+    let mut d = fitted;
+    for c in (0..CLASSES).filter(|c| *c != only) {
+        d.log_pmf[c].clone_from(&geom.log_pmf[c]);
+        d.log_surv[c].clone_from(&geom.log_surv[c]);
+    }
+    d
+}
+
 /// Truth run lengths per [`STAGE_ORDER`] column, over contiguous labelled blocks, dropping each
 /// block's first and last run because both are censored by the block edge.
 fn truth_runs(nights: &[&Night]) -> Vec<Vec<usize>> {
@@ -589,7 +606,9 @@ fn hsmm_viterbi(
 /// Decode one night under `arm`, returning class columns in [`STAGE_ORDER`].
 fn decode(arm: Arm, em: &[[f64; CLASSES]], p: &Params, dw: &Dwell, st: &mut DecStats) -> Vec<usize> {
     match arm.dec {
-        Dec::HsmmGeom | Dec::HsmmFit(_) => return hsmm_viterbi(em, &hsmm_exit(&p.transition), dw, false, st),
+        Dec::HsmmGeom | Dec::HsmmFit(_) | Dec::HsmmOne(..) => {
+            return hsmm_viterbi(em, &hsmm_exit(&p.transition), dw, false, st)
+        }
         Dec::HsmmGeomPmfEnd => return hsmm_viterbi(em, &hsmm_exit(&p.transition), dw, true, st),
         _ => {}
     }
@@ -859,6 +878,9 @@ fn arms() -> Vec<Arm> {
     v.push(Arm { dec: Dec::HsmmGeomPmfEnd, start: Start::Uniform, k: 1 });
     for l in LAMBDAS {
         v.push(Arm { dec: Dec::HsmmFit(l), start: Start::Uniform, k: 1 });
+        for c in 0..CLASSES {
+            v.push(Arm { dec: Dec::HsmmOne(c, l), start: Start::Uniform, k: 1 });
+        }
     }
     v
 }
@@ -871,6 +893,11 @@ fn shipped_ems(nights: &[Night]) -> Vec<Vec<[f64; CLASSES]>> {
 fn dwell_for(arm: Arm, p: &Params, train: &[&Night]) -> Dwell {
     match arm.dec {
         Dec::HsmmFit(l) => dwell_fitted(&truth_runs(train), &p.transition, l),
+        Dec::HsmmOne(c, l) => dwell_one_class(
+            dwell_fitted(&truth_runs(train), &p.transition, l),
+            &dwell_geometric(&p.transition),
+            c,
+        ),
         _ => dwell_geometric(&p.transition),
     }
 }
@@ -1083,10 +1110,12 @@ fn main() {
     println!();
 
     // ---- Per-class recall, and where the posterior's disagreements sit ----
-    println!("D0. per-class recall against truth, pooled over the three cohorts");
+    // Each recall carries the share of epochs the arm PREDICTED that class on, because recall rises
+    // on its own when a class is simply called more. Truth's own share is the first row.
+    println!("D0. per-class recall (predicted share), pooled over the three cohorts");
     print!("  {:<22}", "arm");
     for n in CLASS_NAMES {
-        print!(" {n:>8}");
+        print!(" {n:>15}");
     }
     println!();
     for arm in all.iter() {
@@ -1102,9 +1131,24 @@ fn main() {
                 }
             }
         }
+        if arm == &all[0] {
+            print!("  {:<22}", "TRUTH share");
+            let tot: i64 = cm.iter().flatten().sum();
+            for row in cm.iter() {
+                let t: i64 = row.iter().sum();
+                print!(" {:>8} ({:.3})", "-", t as f64 / tot as f64);
+            }
+            println!();
+        }
         print!("  {:<22}", arm.name());
+        let tot: i64 = cm.iter().flatten().sum();
         for c in 0..CLASSES {
-            print!(" {:>8.3}", recall(&cm, c).unwrap_or(f64::NAN));
+            let pred: i64 = cm.iter().map(|r| r[c]).sum();
+            print!(
+                " {:>8.3} ({:.3})",
+                recall(&cm, c).unwrap_or(f64::NAN),
+                pred as f64 / tot as f64
+            );
         }
         println!();
     }

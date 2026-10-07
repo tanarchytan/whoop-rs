@@ -104,6 +104,20 @@ struct TrainNight {
 type Fit = Box<dyn Fn(&[&TrainNight]) -> Option<SleepConfig>>;
 struct Arm(Fit);
 
+/// One row of the arm table: label, config, params, and the LABEL of the arm this one is built on.
+/// `None` is measured against the null alone, which is what a standalone arm wants.
+struct Row(&'static str, Arm, Params, Option<&'static str>);
+
+/// A standalone arm.
+fn arm(name: &'static str, a: Arm, p: Params) -> Row {
+    Row(name, a, p, None)
+}
+
+/// An arm built on an earlier one, which it is paired against as well as against the null.
+fn rung(name: &'static str, a: Arm, p: Params, on: &'static str) -> Row {
+    Row(name, a, p, Some(on))
+}
+
 fn fixed(cfg: SleepConfig) -> Arm {
     Arm(Box::new(move |_| Some(cfg)))
 }
@@ -247,17 +261,32 @@ fn macro_f1_by_night(nights: &[Night]) -> BTreeMap<usize, f64> {
     nights.iter().filter_map(|n| Some((n.id, macro_f1(&n.cm)?))).collect()
 }
 
-/// What one arm leaves behind for the next one to be judged against: its per-night macro F1 series
-/// and its pooled worst-class recall. The second is what stops a headline bought by giving a class
-/// up from printing AHEAD, so the card cannot report the gap without it.
+/// One arm's per-night balanced accuracy, keyed by recording. Its own series because an arm may
+/// move this and not macro F1, and then only a paired line on THIS statistic can resolve the gap.
+fn ba_by_night(nights: &[Night]) -> BTreeMap<usize, f64> {
+    nights.iter().filter_map(|n| Some((n.id, balanced_accuracy(&n.cm)?))).collect()
+}
+
+/// What one arm leaves behind for the next one to be judged against: its two per-night series and
+/// its pooled worst-class recall. The last is what stops a headline bought by giving a class up
+/// from printing AHEAD, so the card cannot report either gap without it.
 struct Reading {
     f1: BTreeMap<usize, f64>,
+    ba: BTreeMap<usize, f64>,
     min_recall: Option<f64>,
 }
 
-/// Scores one arm and returns its [`Reading`], so the next arm can be paired against it.
-/// `base` is the null reading's own, over the SAME cohort.
-fn card(ds: &str, arm: &str, nights: &[Night], base: Option<&Reading>) -> Reading {
+/// Scores one arm and returns its [`Reading`], so a later arm can be paired against it. `base` is
+/// the null reading's, over the SAME cohort. `prev` is the rung this arm is BUILT ON, when that is
+/// not the null: a combination arm's own question is what IT added, which the null line cannot
+/// answer.
+fn card(
+    ds: &str,
+    arm: &str,
+    nights: &[Night],
+    base: Option<&Reading>,
+    prev: Option<(&str, &Reading)>,
+) -> Reading {
     let cm = pooled(nights);
     let cms: Vec<Confusion4> = nights.iter().map(|n| n.cm).collect();
     let ci = bootstrap_kappa_ci(&cms, BOOTSTRAP_DRAWS, 0.05, BOOTSTRAP_SEED);
@@ -288,16 +317,49 @@ fn card(ds: &str, arm: &str, nights: &[Night], base: Option<&Reading>) -> Readin
 
     // The only PAIRED line on the card. Everything above subtracts two pooled numbers produced by
     // two separate runs, which carries no bar; this differences the same nights under both arms.
-    let mine = Reading { f1: macro_f1_by_night(nights), min_recall: min_recall(&cm) };
-    let paired = base.map(|b| (pair_by_id(&b.f1, &mine.f1), b.min_recall)).map_or_else(
-        || "  (this arm IS the baseline)".to_string(),
-        |((bv, av), base_min)| {
-            let drop = base_min.and_then(|b| Some(mine.min_recall? - b));
-            format!("  vs the null, paired on {} night(s): {}", bv.len(),
-                    compare_guarded(&bv, &av, V2_PROVENANCE, drop).2)
-        },
-    );
-    println!("  per-night macro F1 {}{paired}", show(per_recording(&cms, macro_f1)));
+    let mine = Reading {
+        f1: macro_f1_by_night(nights),
+        ba: ba_by_night(nights),
+        min_recall: min_recall(&cm),
+    };
+    // One differencer over either series and either base, so no two paired lines can drift apart.
+    // `drop` is the worst-class guard and applies to every one of them. The provenance is v2's on
+    // both sides: every arm descends from the same hand-tuned params, so pairing against a rung
+    // rather than the null does not launder that.
+    // `BORDER_NIGHTS` set prints the paired deltas themselves. Mean and bar cannot tell a few swung
+    // nights from a uniform widening, and that difference decides whether an arm has a per-night
+    // gate to find or nothing to find.
+    let shapes = std::env::var_os("BORDER_NIGHTS").is_some();
+    let against = |b: &Reading, pick: fn(&Reading) -> &BTreeMap<usize, f64>| {
+        let (bv, av) = pair_by_id(pick(b), pick(&mine));
+        let drop = b.min_recall.and_then(|x| Some(mine.min_recall? - x));
+        let shape = if shapes {
+            let d = pick(b)
+                .iter()
+                .filter_map(|(id, x)| pick(&mine).get(id).map(|y| format!("{id}:{:+.4}", y - x)))
+                .collect::<Vec<_>>();
+            format!("\n      per-night: {}", d.join(" "))
+        } else {
+            String::new()
+        };
+        format!(
+            "paired on {} night(s): {}{shape}",
+            bv.len(),
+            compare_guarded(&bv, &av, V2_PROVENANCE, drop).2
+        )
+    };
+    let paired = |pick: fn(&Reading) -> &BTreeMap<usize, f64>| match base {
+        None => "  (this arm IS the baseline)".to_string(),
+        Some(b) => {
+            let null = format!("  vs the null, {}", against(b, pick));
+            match prev {
+                Some((name, r)) => format!("{null}\n      vs {name}, {}", against(r, pick)),
+                None => null,
+            }
+        }
+    };
+    println!("  per-night macro F1 {}{}", show(per_recording(&cms, macro_f1)), paired(|r| &r.f1));
+    println!("  per-night balanced acc{}", paired(|r| &r.ba));
 
     let tot: i64 = cm.iter().flatten().sum();
     let fmt = |v: Option<f64>| v.map_or("  -  ".into(), |x| format!("{x:.3}"));
@@ -643,36 +705,47 @@ fn main() {
     // The cardiac arms are FITTED, held out by recording. Their permuted twins fit on the same
     // rows with the column-to-stage alignment destroyed: if the real arm's gain does not exceed
     // theirs, what moved was the fit's freedom and not the family.
-    let arms: Vec<(&str, Arm, Params)> = vec![
-        ("v2 shipped recipe (NULL READING)", fixed(SleepConfig::shipped()), Params::SHIPPED),
-        ("transition 50% toward uniform", fixed(SleepConfig::shipped()), flattened(0.5)),
-        ("transition UNIFORM - emissions alone", fixed(SleepConfig::shipped()), flattened(1.0)),
-        ("wake>rem and wake>deep opened at truth's rate", fixed(SleepConfig::shipped()), wake_row_opened()),
+    let arms: Vec<Row> = vec![
+        arm("v2 shipped recipe (NULL READING)", fixed(SleepConfig::shipped()), Params::SHIPPED),
+        arm("transition 50% toward uniform", fixed(SleepConfig::shipped()), flattened(0.5)),
+        arm("transition UNIFORM - emissions alone", fixed(SleepConfig::shipped()), flattened(1.0)),
+        arm("wake>rem and wake>deep opened at truth's rate", fixed(SleepConfig::shipped()), wake_row_opened()),
         // The only time-term arm this corpus supports: every fixture night is rebased onto ONE
         // synthetic start, so a wall-clock or habitual-midpoint anchor carries no between-recording
         // variation and is not measurable here. Ablation only.
-        ("no time term (cycle prior off)", fixed(SleepConfig::shipped()), no_time_term()),
-        ("conditioned diagonal, beta 0.25", fixed(conditioned(250)), Params::SHIPPED),
-        ("conditioned diagonal, beta 0.5", fixed(conditioned(500)), Params::SHIPPED),
-        ("conditioned diagonal, beta 1.0", fixed(conditioned(1000)), Params::SHIPPED),
-        ("cardiac emission, lambda 0.5", cardiac_arm(500, false), Params::SHIPPED),
-        ("cardiac emission, lambda 1.0", cardiac_arm(1000, false), Params::SHIPPED),
-        ("cardiac emission, lambda 2.0", cardiac_arm(2000, false), Params::SHIPPED),
-        ("cardiac PERMUTED null, lambda 0.5", cardiac_arm(500, true), Params::SHIPPED),
-        ("cardiac PERMUTED null, lambda 1.0", cardiac_arm(1000, true), Params::SHIPPED),
-        ("cardiac PERMUTED null, lambda 2.0", cardiac_arm(2000, true), Params::SHIPPED),
+        arm("no time term (cycle prior off)", fixed(SleepConfig::shipped()), no_time_term()),
+        arm("conditioned diagonal, beta 0.25", fixed(conditioned(250)), Params::SHIPPED),
+        arm("conditioned diagonal, beta 0.5", fixed(conditioned(500)), Params::SHIPPED),
+        arm("conditioned diagonal, beta 1.0", fixed(conditioned(1000)), Params::SHIPPED),
+        arm("cardiac emission, lambda 0.5", cardiac_arm(500, false), Params::SHIPPED),
+        arm("cardiac emission, lambda 1.0", cardiac_arm(1000, false), Params::SHIPPED),
+        arm("cardiac emission, lambda 2.0", cardiac_arm(2000, false), Params::SHIPPED),
+        arm("cardiac PERMUTED null, lambda 0.5", cardiac_arm(500, true), Params::SHIPPED),
+        arm("cardiac PERMUTED null, lambda 1.0", cardiac_arm(1000, true), Params::SHIPPED),
+        arm("cardiac PERMUTED null, lambda 2.0", cardiac_arm(2000, true), Params::SHIPPED),
         // The decode seam. `PosteriorMarginal` and `MarkovLoss` at unit costs are ONE rule and must
         // print the same card; the weighted arms move the class weighting into the decode, which is
         // the rule a class-balanced objective implies.
-        ("posterior-marginal decode", fixed(marginal), Params::SHIPPED),
-        ("loss-matched decode, UNIT costs", fixed(unit_loss), Params::SHIPPED),
-        ("loss-matched decode, fc^0.5 inverse prevalence", loss_arm(0.5, false), Params::SHIPPED),
-        ("loss-matched decode, inverse-prevalence fc", loss_arm(1.0, false), Params::SHIPPED),
-        ("loss-matched decode, PERMUTED fc", loss_arm(1.0, true), Params::SHIPPED),
-        ("cardiac lambda 1.0 + inverse-prevalence fc", cardiac_loss_arm(1000, 1.0), Params::SHIPPED),
+        arm("posterior-marginal decode", fixed(marginal), Params::SHIPPED),
+        arm("loss-matched decode, UNIT costs", fixed(unit_loss), Params::SHIPPED),
+        arm("loss-matched decode, fc^0.5 inverse prevalence", loss_arm(0.5, false), Params::SHIPPED),
+        arm("loss-matched decode, inverse-prevalence fc", loss_arm(1.0, false), Params::SHIPPED),
+        arm("loss-matched decode, PERMUTED fc", loss_arm(1.0, true), Params::SHIPPED),
+        // The one arm that stacks two seams. Against the null it cannot say which of the two moved
+        // it, so it also pairs against the emission it is built on.
+        rung("cardiac lambda 1.0 + inverse-prevalence fc", cardiac_loss_arm(1000, 1.0),
+             Params::SHIPPED, "cardiac emission, lambda 1.0"),
     ];
 
     assert!(arms[0].0.contains("NULL READING"), "the first arm is the baseline every paired line differences against");
+    // A rung can only be paired against something already scored, and a renamed arm must break the
+    // table rather than silently pair against the null.
+    for (i, r) in arms.iter().enumerate() {
+        if let Some(on) = r.3 {
+            let at = arms.iter().position(|x| x.0 == on);
+            assert!(at.is_some_and(|k| k < i), "{:?} is built on {on:?}, which is not an earlier arm", r.0);
+        }
+    }
 
     println!("THE BORDER — what any engine is measured on. Minutes, except efficiency in percent.");
     println!("Positive bias = the engine over-reports against PSG. Nothing here is a gate.");
@@ -702,10 +775,15 @@ fn main() {
         }
         // The first arm is the null reading, and it is what every later arm's paired line is
         // differenced against, on this cohort's own nights.
-        let mut base: Option<Reading> = None;
-        for (arm, a, p) in &arms {
-            let reading = card(ds, arm, &score(&loaded, &configs(&loaded, a), p), base.as_ref());
-            base.get_or_insert(reading);
+        let mut readings: Vec<Reading> = Vec::new();
+        for Row(name, a, p, on) in &arms {
+            let prev = on.map(|n| {
+                let k = arms.iter().position(|x| x.0 == n).expect("checked above");
+                (n, &readings[k])
+            });
+            let reading =
+                card(ds, name, &score(&loaded, &configs(&loaded, a), p), readings.first(), prev);
+            readings.push(reading);
         }
     }
 }

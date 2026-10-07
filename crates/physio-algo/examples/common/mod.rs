@@ -341,7 +341,8 @@ pub fn labels_at(segs: &[StageSegment], w0: i64, n: usize, epoch_sec: i64) -> Ve
         .collect()
 }
 
-/// `STAGE_ORDER`'s index for a stage: the column order every confusion matrix and fraction table uses.
+/// `FIT_ORDER`'s index for a stage: the column order every confusion matrix and fraction table uses.
+/// NOT `STAGE_ORDER`, which the decoder's rows are in; `markov_loss::reindex` bridges the two.
 pub fn stage_idx(s: SleepStage) -> usize {
     match s {
         SleepStage::Wake => 0,
