@@ -34,6 +34,7 @@ pub mod recovery_drivers;
 pub mod respiratory_rate;
 pub mod rest;
 pub mod resting_hr;
+pub mod rr;
 pub mod rr_irregularity;
 pub mod sleep;
 pub mod sleep_debt;

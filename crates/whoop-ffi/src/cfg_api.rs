@@ -230,3 +230,42 @@ pub fn sleep_window_cfg() -> SleepWindowCfgInfo {
         habitual_window_days: sleep::HABITUAL_WINDOW_DAYS as u32,
     }
 }
+
+/// The R-R filler rule: an exact `fill_rr_ms` beat with a same-second HR strictly below `fill_max_hr_bpm`.
+#[derive(uniffi::Record)]
+pub struct RrFillCfgInfo {
+    pub fill_rr_ms: u16,
+    pub fill_max_hr_bpm: u32,
+}
+
+/// The filler constants, so a SQL backfill binds them instead of declaring its own copy.
+#[uniffi::export]
+pub fn rr_fill_cfg() -> RrFillCfgInfo {
+    RrFillCfgInfo {
+        fill_rr_ms: physio_algo::rr::FILL_RR_MS,
+        fill_max_hr_bpm: physio_algo::rr::FILL_MAX_HR_BPM as u32,
+    }
+}
+
+/// True when this beat is the 500 ms filler at a resting HR (`hr_bpm` from the same second, `None` when
+/// the strap stored none: not flagged). Marked suspect by the caller, never deleted.
+#[uniffi::export]
+pub fn is_rr_fill(rr_ms: u16, hr_bpm: Option<u32>) -> bool {
+    physio_algo::rr::is_rr_fill(rr_ms, hr_bpm.map(|h| h.min(u8::MAX as u32) as u8))
+}
+
+#[cfg(test)]
+mod rr_fill_tests {
+    use super::*;
+
+    #[test]
+    fn ffi_matches_the_core_rule() {
+        let c = rr_fill_cfg();
+        assert_eq!((c.fill_rr_ms, c.fill_max_hr_bpm), (500, 100));
+        assert!(is_rr_fill(500, Some(99)));
+        assert!(!is_rr_fill(500, Some(100)));
+        assert!(!is_rr_fill(500, Some(100_000)));
+        assert!(!is_rr_fill(500, None));
+        assert!(!is_rr_fill(512, Some(60)));
+    }
+}
