@@ -1,9 +1,11 @@
 //! Shared fixture loading for the analysis harnesses, and the refinement guard.
 //!
-//! Every stream a harness reads out of the fixture corpus has its one reader here, `steps.csv` included —
-//! the app runs detect -> stage -> refine_wake, and a harness with no step stream stages only the first
-//! two. `verify_backup` is the one exception and reads a user-supplied backup export, not the corpus.
-//! `tools/docs-vs-code.py` re-checks that, because this paragraph has now been false twice.
+//! Every stream a harness reads out of the sleep fixture corpus has its one reader here, `steps.csv`
+//! included — the app runs detect -> stage -> refine_wake, and a harness with no step stream stages only
+//! the first two. Harnesses that open files themselves, each named in `tools/docs-vs-code.py`:
+//! `verify_backup` (a user backup export); `acceptance_nights` and `turn_corpus` (labelled nights);
+//! `ecg_morphology_corpus`, `rr_irregularity_corpus`, `rr_rhythm_corpus`, `rr_screen_eval`,
+//! `rr_screen_sweep` and `resp_splice` (ECG / R-R corpora); `step6_refine` (a set's `meta.txt` only).
 //!
 //! [`RefineCensus`] is how a harness refines under SHIPPED params: it counts which side of the density
 //! gate each span fell on, so an unrefined span is never pooled into a figure LABELLED refined. Two

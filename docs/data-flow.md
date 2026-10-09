@@ -3,28 +3,28 @@
 Two projects, one contract. **whoop-rs owns every algorithm, decode and score. noop-tan owns
 presentation, persistence, BLE transport and user policy.** The only seam is the uniffi FFI.
 `RustScores.kt` is the main adapter and holds most of the crossings, but it is **not** the only file
-that crosses: **35 hand-written Kotlin files under `main/` reach `uniffi.whoop_ffi` directly**,
+that crosses: **36 hand-written Kotlin files under `main/` reach `uniffi.whoop_ffi` directly**,
 including two screens. Counted by `tools/docs-vs-code.py`, so the day a screen stops calling Rust —
 or a new one starts — the number moves and this page has to say so.
 
-Re-counted 2026-10-09: **128 exported functions, all 127 called from hand-written app Kotlin, plus `is_rr_fill`,
-which only the test pinning the app's v103 SQL to it calls.** The `WhoopCodec`
-object carries a further **31 methods**, and `protocol/RustCodec.kt` is the only hand-written Kotlin file
+Re-counted 2026-10-09: **128 exported functions, all 128 called from hand-written app Kotlin**
+(`is_rr_fill` gained its app caller when live R-R filler started being flagged at parse time). The `WhoopCodec`
+object carries a further **32 methods**, and `protocol/RustCodec.kt` is the only hand-written Kotlin file
 that names the type at all — it constructs both codecs `private`ly and exposes nothing that returns one, so
-a codec cannot reach any other file. Which of the 31 it calls is **named, not counted**: a free function is
+a codec cannot reach any other file. Which of the 32 it calls is **named, not counted**: a free function is
 qualified by `uniffi.whoop_ffi.<name>` and a namesake cannot reach it, an object method has no such
 namespace, and four matchers in a row answered this one with a wrong integer. A wrong name is legible where
 a total moving from 16 to 18 is not.
 
 **Called from Kotlin** — `new`, `decode_history`, `decode_live`, `decode_response`, `decode_metadata`,
-`decode_ppg_frame`, `command_frame`, `get_battery_frame`, `buzz_frame`, `set_clock_frame`,
+`decode_ppg_frame`, `command_frame`, `get_battery_frame`, `buzz_frame_with`, `set_clock_frame`,
 `set_clock_legacy_frame`, `alarm_set_frame`, `alarm_set_frame_gen4`, `alarm_disable_frame`,
 `advertising_name_frame`, `set_config_frame`.
 
 **Not called** — `client_hello`, `r22_frames`, `feed`, `reset`, `offload_start`, `offload_abort`,
 `decode_imu_frame`, `get_hello_frame`, `get_data_range_frame`, `stop_raw_flood_frame`,
 `toggle_realtime_hr_frame`, `reboot_frame`, `broadcast_hr_frame`, `run_haptics_frame`,
-`advertising_name_frame_gen5`. Kept as codec-parity API for the CLI and a later call site.
+`advertising_name_frame_gen5`, `buzz_frame` (the one-pulse form). Kept as codec-parity API for the CLI and a later call site.
 
 Those are three different things, and only the last is awaiting a call site:
 

@@ -514,8 +514,7 @@ def main() -> int:
         # how a 20-row table got quoted as 17.
         ("algorithms.md", "Kotlin still owning maths", r"\*\*(\d+) Kotlin files still carry maths",
          kotlin_backlog_rows()),
-        ("sleep.md", "physio-algo tests", r"\*\*(\d+) `physio-algo` tests", None),
-        ("sleep.md", "whoop-ffi tests", r"`physio-algo` tests \+ (\d+) `whoop-ffi` tests", None),
+        ("sleep.md", "workspace tests", r"\*\*(\d+) workspace tests", None),
         ("architecture.md", "generation branches", r"there are \*\*(\d+)\*\* of those outside", family_branches()),
         ("data-flow.md", "FFI free-fn exports", r"\*\*(\d+) exported functions, all", len(exports)),
         ("data-flow.md", "FFI exports called", r"exported functions, all (\d+) called", free_fns_called(exports)),
@@ -535,8 +534,8 @@ def main() -> int:
         ("data-flow.md", "exports in no shipped doc", r"\*\*(\d+ of the \d+) appear in no shipped document\*\*",
          f"{len(exports_in_no_doc(exports))} of the {len(exports)}"),
         ("architecture.md", "exports reached only via a dead wrapper",
-         r"(\w+) of them\s+\(`spo2_rolling_reading`\) only through a Kotlin wrapper the app never calls",
-         "one" if len(exports_via_dead_wrapper(exports)) == 1 else str(exports_via_dead_wrapper(exports))),
+         r"\w+ of them\s+\(([^)]*)\) only through a Kotlin wrapper the app never calls",
+         ", ".join(f"`{n}`" for n in exports_via_dead_wrapper(exports))),
     ]
 
     if not a.no_tests:
@@ -549,10 +548,8 @@ def main() -> int:
             ("README.md", "ignored in that run", r"passed, (\d+) `#\[ignore\]`d\)", ws_ignored),
         ]
         for i, c in enumerate(claims):
-            if c[0] == "sleep.md" and c[1] == "physio-algo tests":
-                claims[i] = (*c[:3], pa)
-            if c[0] == "sleep.md" and c[1] == "whoop-ffi tests":
-                claims[i] = (*c[:3], cargo_counts(["-p", "whoop-ffi"])[0])
+            if c[0] == "sleep.md" and c[1] == "workspace tests":
+                claims[i] = (*c[:3], ws)
 
     bad = 0
     checked = 0
@@ -671,9 +668,13 @@ def main() -> int:
             print(f"  ok     {'algorithms.md':<16} {'kappa ' + cohort:<26} {target}")
 
     # `examples/common/mod.rs` claims it owns every fixture-corpus reader. That sentence has been false
-    # twice, so it gets a command: no harness but the declared exception may touch the filesystem itself.
+    # twice, so it gets a command: no harness but the declared exceptions may touch the filesystem itself.
     ex = ROOT / "crates" / "physio-algo" / "examples"
-    allowed = {"verify_backup.rs"}
+    allowed = {
+        "verify_backup.rs", "acceptance_nights.rs", "turn_corpus.rs", "ecg_morphology_corpus.rs",
+        "rr_irregularity_corpus.rs", "rr_rhythm_corpus.rs", "rr_screen_eval.rs", "rr_screen_sweep.rs",
+        "resp_splice.rs", "step6_refine.rs",
+    }
     rogue = sorted(
         p.name
         for p in ex.glob("*.rs")

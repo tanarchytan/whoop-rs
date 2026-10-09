@@ -9,10 +9,11 @@ Every entry point takes plain values (R-R runs, PPG samples, accel, per-epoch fi
 `HistoryRecord` slice, never a wire frame and never BLE. Absent signal returns `None`, never a fabricated
 number. Outputs are wellness estimates, never medical.
 
-`physio-algo` carries **724 unit tests** (golden vectors, parity fixtures, synthetic sweeps); the
-workspace runs **1041** (measured 2026-08-17 at HEAD; re-derive, never carry forward).
-**Five** sleep-dataset tests read external fixtures and are `#[ignore]`d by default - three assert a
-cohort kappa, the fourth prints the whole-corpus sheet and the fifth the stream census. Run
+`physio-algo` carries **952 unit tests** (golden vectors, parity fixtures, synthetic sweeps); the
+workspace runs **1276** (measured 2026-10-09; re-derive, never carry forward).
+**Six** sleep-dataset tests read external fixtures and are `#[ignore]`d by default - three assert a
+cohort kappa, the fourth prints the whole-corpus sheet, the fifth the stream census and the sixth the
+three-class report with a bootstrap interval on the four-class figure. Run
 `cargo test -p physio-algo --test dataset_parity -- --ignored` to check the published kappas.
 `tools/docs-vs-code.py` re-derives every count on this page from the source and fails on drift.
 

@@ -32,18 +32,18 @@ whoopctl (CLI)     whoop-ffi (uniffi → Kotlin + Swift)
 
 | Crate | Role | Size | Tests |
 |---|---|---|---|
-| `whoop-protocol` | Pure wire codec: framing, CRC, hex, records (opt-in `serde` Serialize), offload state machine, config/haptic/alarm builders, live-r22 decoder | ~2570 LOC | 67 |
-| `ble-core` | `BleTransport` async trait + neutral `Notification`/`BleError` + `MockTransport` | ~165 LOC | 1 |
-| `ble-btleplug` | btleplug 0.12 backend behind `BleTransport` (scan/connect/subscribe/notify/write) | ~440 LOC | 1 |
-| `whoop-client` | `WhoopClient<T: BleTransport>` — bond, history sync (keep/wipe + lossless frame tap), monitor, gated writes, capture encode+decode, backfill policy | ~900 LOC | 17 |
-| `physio-algo` | Every derived metric, pure and sans-IO: the whole sleep pipeline (detect / stage / refine / main-night), HRV, recovery, strain, resting HR, respiration, SpO2, calories, workout, steps, IMU features, the ages, vital banding, the hydration goal and the calibration timeline. `algorithms.md` is its per-formula record | ~10680 LOC | 308 + 4 `#[ignore]`d |
+| `whoop-protocol` | Pure wire codec: framing, CRC, hex, records (opt-in `serde` Serialize), offload state machine, config/haptic/alarm builders, live-r22 decoder | ~4240 LOC | 125 + 3 `#[ignore]`d |
+| `ble-core` | `BleTransport` async trait + neutral `Notification`/`BleError` + `MockTransport` | ~250 LOC | 4 |
+| `ble-btleplug` | btleplug 0.12 backend behind `BleTransport` (scan/connect/subscribe/notify/write) | ~450 LOC | 1 |
+| `whoop-client` | `WhoopClient<T: BleTransport>` — bond, history sync (keep/wipe + lossless frame tap), monitor, gated writes, capture encode+decode, backfill policy, gated flash | ~1610 LOC | 60 |
+| `physio-algo` | Every derived metric, pure and sans-IO: the whole sleep pipeline (detect / stage / refine / main-night, two engines), HRV, recovery, strain, resting HR, respiration, SpO2, calories, workout, steps, IMU features, the ages, vital banding, the hydration goal and the calibration timeline. `algorithms.md` is its per-formula record | ~31870 LOC | 952 + 49 `#[ignore]`d |
 | `whoop-store` | SQLite (rusqlite, bundled) per-(person, strap) nightly persistence + milestone-gated baselines and per-strap fits | ~340 LOC | 4 |
-| `whoopctl` | clap CLI, 16 subcommands (`scan`/`identify`/`info`/`pack`/`sync`/`monitor`/`hr`/`send`/`metrics`/`raw`/`wrist`/`r22on`/`buzz`/`reboot`/`ingest`/`decode-capture`) + `--person`/`--db`/`--hr-watch`, split into `cli` / `report` / `main` | ~760 LOC | 4 |
-| `whoop-ffi` | uniffi surface (depends on whoop-protocol **and** physio-algo): `WhoopCodec` (31 methods — decode history/live/response + offload + command frames) plus 79 derived-metric free fns to Kotlin + iOS from one Rust source. `data-flow.md` tables the surface | ~2710 LOC | 23 |
+| `whoopctl` | clap CLI, 16 subcommands (`scan`/`identify`/`info`/`pack`/`sync`/`monitor`/`hr`/`send`/`metrics`/`raw`/`wrist`/`r22on`/`buzz`/`reboot`/`ingest`/`decode-capture`) + `--person`/`--db`/`--hr-watch`, split into `cli` / `report` / `main` | ~5450 LOC | 94 |
+| `whoop-ffi` | uniffi surface (depends on whoop-protocol **and** physio-algo): `WhoopCodec` (32 methods — decode history/live/response + offload + command frames) plus 128 free fns to Kotlin + iOS from one Rust source. `data-flow.md` tables the surface | ~4060 LOC | 36 |
 
-**425 tests, 4 `#[ignore]`d, 0 warnings, 0 clippy lints.** The per-crate column sums to 425 under a
-workspace run: `whoopctl` turns on `whoop-protocol`'s `serde` feature, and one test module is gated on
-it, so that crate alone reads 66. `ble-btleplug` unit-tests only its pure `matches_whoop`
+**1276 tests, 52 `#[ignore]`d, 0 warnings, 0 clippy lints** (workspace run, 2026-10-09; LOC counts every
+line under `src/`, tests included). The per-crate column is read from a workspace run: `whoopctl` turns on
+`whoop-protocol`'s `serde` feature and one test module is gated on it, so `whoop-protocol` alone reads fewer. `ble-btleplug` unit-tests only its pure `matches_whoop`
 predicate; the radio path is hardware-integration-verified (`whoopctl scan`), not mockable in-process.
 
 Golden parity for the Android shadow-decode: `whoop-protocol` pins a 40-frame consecutive v26 PPG
@@ -61,10 +61,11 @@ gravity widen is asserted byte-for-byte on the worn v18 frame.
 - **One WHOOP module + a closed `Family { Gen4, Gen5 }` enum** — not split 4.0/5.0 modules, not
   trait-objects, not per-gen crates. Every per-generation FRAME-HEADER difference is *data* on a
   `HeaderSpec`, matched in exactly one place (`framing`). What is not header shape stays a branch at
-  its own site, and there are **8** of those outside `framing`/`family`: three in `whoop-client` (the
-  GEN5 client hello, the per-generation clock opcode, the GEN5-only R22 enable), the GEN5 event
-  residual in `live`, three GEN5-only record versions in `records`, and one label in `whoopctl`.
-  Adding a third generation makes every `match` a compiler-enforced porting checklist; those 8 are
+  its own site, and there are **10** of those outside `framing`/`family`: five in `whoop-client` (the
+  GEN5 client hello, the per-generation clock opcode, the two GEN5-only R22 enables, the GEN5-only
+  flash gate), the GEN5 event residual in `live`, three GEN5-only record versions in `records`, and
+  one label in `whoopctl`. Adding a third generation makes every `match` a compiler-enforced porting
+  checklist; those 10 are
   `if family ==`, so they would compile and be wrong.
 - **Decode everything inner-relative.** GEN5 frame-absolute offsets = GEN4 + 4, and the inner
   record starts at byte 8 (GEN5) vs 4 (GEN4), so the +4 cancels — one decoder serves both
@@ -275,8 +276,8 @@ decoder:
 - **command frames to write** (the FFI never writes) — `client_hello` / `offload_start` / `offload_abort` /
   `r22_frames` / `get_hello`/`get_battery`/`get_data_range` / `stop_raw_flood` / `toggle_realtime_hr` /
   `reboot` / `buzz` / `broadcast_hr` / `set_config` / `alarm_set`/`alarm_disable`.
-- **derived metrics** — 79 free fns, every one reached from hand-written Kotlin, one of them
-  (`spo2_rolling_reading`) only through a Kotlin wrapper the app never calls. A few of the shapes:
+- **derived metrics** — 128 free fns, every one reached from hand-written Kotlin, two of them
+  (`hrv_range_filter`, `spo2_rolling_reading`) only through a Kotlin wrapper the app never calls. A few of the shapes:
   `ppg_hr`, `hrv_rmssd_gap_aware`, `hrv_windowed_avg` (the app's stored session `avgHrv` — the mean of
   per-5-min-bucket gap-aware RMSSD over a span), `hrv_readiness`, `analyze_sleep_with`, `recovery_score`,
   `nightly_spo2_raw_means` (integer-truncated 4.0 raw red/IR ADC means over the in-bed spans — raw ADC,
@@ -309,7 +310,7 @@ iOS via an `.xcframework` for `aarch64-apple-ios` + SwiftUI (needs a Mac + Xcode
 ```bash
 cd whoop-rs
 cargo build           # whole workspace
-cargo test            # 425 tests (4 #[ignore]d dataset gates)
+cargo test            # 1276 passed, 52 #[ignore]d (2026-10-09; re-derive)
 cargo clippy --all-targets
 cargo run -p whoopctl -- scan
 ```
