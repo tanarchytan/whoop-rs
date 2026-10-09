@@ -46,7 +46,7 @@ linear-fit coefficients. All exposed through the uniffi FFI for Kotlin and Swift
 ### Protocol codec (pure, sans-IO)
 
 The wire codec (`whoop-protocol`) has zero runtime dependencies besides `thiserror`. It handles
-framing, CRC (CRC8/CRC16-Modbus/CRC32), 40 command opcodes, the historical offload state machine,
+framing, CRC (CRC8/CRC16-Modbus/CRC32), 44 command opcodes, the historical offload state machine,
 and record decode for the 4.0 v5/v7/v9/v12/v24/v25 and 5.0/MG v18/v20/v26 layouts plus the 100 Hz
 6-axis IMU deep buffer. Everything is inner-relative — one decoder serves both generations for
 shared record versions.

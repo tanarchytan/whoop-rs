@@ -2,8 +2,8 @@
 
 The whole WHOOP sleep pipeline lives here: detect the in-bed spans of a night, stage each into a
 per-30 s-epoch hypnogram, refine wake, and derive the day's main night. Pure and deterministic — no BLE,
-no IO, no async. The app (`noop-tan`) is a thin frontend: `analyzeSleep` is the whole-night door, and the
-app calls **15 further `sleep_api` exports** around it (single-span restage, the main-night family,
+no IO, no async. The app (`noop-tan`) is a thin frontend: `analyzeSleepWith` is the whole-night door, and the
+app calls **16 further `sleep_api` exports** around it (single-span restage, the main-night family,
 debt/regularity/need, naps); see `noop-tan/android/SLEEP-BORDER.md` for what stays app-side.
 
 ## One entry: `analyze`
@@ -19,9 +19,11 @@ pub fn analyze(streams: &SleepStreams) -> Vec<Session>
 detect_sessions  → v2::stage → refine::refine → efficiency + session_resting_hr + windowed avg_hrv + grids
 ```
 
-and returns one `Session { start, end, efficiency, resting_hr, avg_hrv, segments, motion_grid, sleep_state_grid }`
-per in-bed span. Also public: `stage_refined(input, steps)` (stage + refine one already-detected span, for
-the app's edit self-heal) and the main-night functions (`main_night_index/_group_indices/_selection`,
+and returns one `Session { start, end, efficiency, resting_hr, avg_hrv, segments, motion_grid, sleep_state_grid, unscored }`
+per in-bed span. `analyze` is `analyze_with(streams, Engine::V2)`; `Engine::Tanv1` (the app's "Experimental"
+engine) stages with `tanv1::BASE` and fills `unscored` with abstention holes (drawn only; `segments` and every
+total are unchanged). Also public: `stage_refined(input, steps)` / `stage_refined_with(.., engine)` (stage +
+refine one already-detected span, for the app's edit self-heal) and the main-night functions (`main_night_index/_group_indices/_selection`,
 `bridged_night_groups`, `habitual_midsleep_sec`).
 
 ## Modules
@@ -45,6 +47,8 @@ the app's edit self-heal) and the main-night functions (`main_night_index/_group
 | `movement.rs` / `posture.rs` | the motion families the epoch grid buckets |
 | `refine.rs` | motion-aware wake post-pass (hot-but-still WAKE → light; density self-gated on the observed streams). `RefineParams::SHIPPED.skip_window_edges` exempts the first and last epoch of a span, which is where sleep-onset latency and the final wake legitimately sit |
 | `mainnight.rs` | main-night selection by a learned-timing score, the two-tier gap bridge, and the circular-mean habitual midsleep |
+| `tanv1/mod.rs` | the Experimental engine: v2's decode under `tanv1::BASE` (SHIPPED + `clamp_only_without_rr`), then far-from-edge abstention at `DEFAULT_COVERAGE`. `Tanv1Cfg::NULL` is v2 label for label (the built-in control). Holes are computed on the unrefined labels; `refine` then runs on the segments as for v2 |
+| `abstain.rs` | far-from-edge abstention: `to_edge` (epochs to the nearest decoded stage change), `refuse_among`, `far_from_edge` (keep the `round(n * coverage)` farthest, never fewer than `MIN_EPOCHS`), `spans` (refused runs as unix spans). Needs the decoded path only, no emissions |
 | `params.rs` | every V2 emission weight, gate and transition in one `Params` struct. `Params::SHIPPED` is the tuned recipe; `stage` with anything else is the tuning path only |
 | `common.rs` | the per-night `ZScore`, the R-R run flattener `flatten_rr`, and `reconstruct_beats` — whole-second beat stamps spread back out by their own intervals, which every cardiac statistic is taken over. The numeric primitives (`median`, `population_sd`) live in `crate::stats` |
 | `input.rs` | the protocol-free sample types (`HrSample`/`RrRun`/`AccelSample`/`StepSample`) and the `SleepInput` bundle they arrive in |

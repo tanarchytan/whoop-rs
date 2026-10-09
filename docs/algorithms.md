@@ -33,8 +33,9 @@ Each algorithm below is tagged with how it reaches the app:
 - **Rust-only** — implemented here, not on the FFI surface. No app caller.
 - **internal** — a shared helper other algorithms depend on, not a metric.
 
-There is no **unwired** tag because there is nothing unwired: all 125 exported functions have a Kotlin
-caller (measured 2026-08-06; re-derive, never carry forward). What the app still computes itself is tracked in the noop-tan `ALGORITHMS.md`.
+There is no **unwired** tag because there is nothing unwired: all 128 exported functions have a Kotlin
+caller (measured 2026-10-09; re-derive, never carry forward; `is_rr_fill`'s caller is the test that pins
+the app's v103 SQL to it). What the app still computes itself is tracked in the noop-tan `ALGORITHMS.md`.
 
 ---
 
@@ -79,9 +80,9 @@ place is gone, and nothing in the workspace names it any more.
 
 ---
 
-## 1. Sleep detection + staging  ·  FFI `analyze_sleep`, `stage_sleep_refined`, `main_night_*`
+## 1. Sleep detection + staging  ·  FFI `analyze_sleep_with`, `stage_sleep_refined_with`, `main_night_*`
 
-One border call, `analyze_sleep(streams)`, carves in-bed spans from raw signals, stages each, and returns
+One border call, `analyze_sleep_with(streams, engine)`, carves in-bed spans from raw signals, stages each, and returns
 one `SleepSession` per detected night. `sleep.md` is the full record. In brief:
 
 **Detection** (`sleep/detect.rs`)
@@ -118,6 +119,16 @@ measurement (0.3657) and is not comparable to any of them. `tests/dataset_parity
 against constants 0.311 / 0.412 / 0.379 at ±0.008, so DREAMT's measured 0.312 sits 0.001 from its
 constant and the constant was left unchanged. The status table below quotes the same three; a frozen golden
 hypnogram test pins the tuned constants.
+
+**Two engines** (`sleep::Engine`, FFI `SleepEngine`). `Original` (`V2`, the default) is the recipe above.
+`Experimental` (`Tanv1`, `sleep/tanv1/`) is the same decode under `tanv1::BASE` = SHIPPED plus
+`clamp_only_without_rr` (the cardiac wake term is clamped while still only when the epoch has no R-R), then
+**far-from-edge abstention** (`sleep/abstain.rs`): the `round(0.80 n)` epochs farthest from a decoded stage
+change keep their label (never fewer than 20) and the rest come back as `SleepSession.unscored` spans. Holes
+are drawn only: segments, totals and efficiency are the labelled ones, unchanged. Holes come from the
+unrefined labels, before `refine`. Measured on the three PSG cohorts: the clamp is paired-ahead of SHIPPED
+on dreamt (kappa4 +0.013) and BA-ahead on aauwss, identical on sleep-accel (no R-R); abstention at 80% beats
+a class-matched random drop of the same size on all three, with no lone-epoch holes.
 
 **Motion-aware wake refinement** (`sleep/refine.rs`): a wake segment >= 5 min at the night motion floor with
 stable posture and no locomotion demotes its non-burst minutes to light.
@@ -395,6 +406,16 @@ and inside the typical-adult window (resp 12-20, SpO2 95-100, RHR 40-60, HRV 40-
 dev +/-0.6) before that and again once it goes stale. A `MetricCfg`'s physiological bounds are an outer
 guard only, never the in-range band. A skin-temp reading >= 20 degC is absolute, below it a deviation, and
 a history is filtered to one kind before folding. Wellness bands, never clinical cut points.
+
+## 30. R-R intake  ·  FFI `standard_rr_ms`, `rr_fill_cfg`, `is_rr_fill`
+
+`rr.rs`. `standard_rr_word_ms(raw, plain_ms)`: a standard-profile (0x2A37) R-R word is 1/1024 s per the
+spec (WHOOP 4.0, rounded to the nearest ms); a 5/MG already sends ms and passes through. **Filler:** the
+strap emits an exact 500 ms R-R at rest as a placeholder (500 is 120 bpm). `is_rr_fill(rr, hr)` =
+`rr == 500 && same-second HR < 100`; with no HR it is not flagged. The app marks such rows `tsSuspect`
+(schema v103, binding `rr_fill_cfg()` into its SQL) and its scoring reads skip them; nothing is deleted.
+Measured on three straps (two MG, one 4.0): the spike sits at exactly 500, with 512 flat, and HR < 100
+catches 95-99% of the excess over neighbouring values.
 
 ## Internal helpers
 

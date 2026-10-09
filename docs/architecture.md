@@ -278,7 +278,7 @@ decoder:
 - **derived metrics** — 79 free fns, every one reached from hand-written Kotlin, one of them
   (`spo2_rolling_reading`) only through a Kotlin wrapper the app never calls. A few of the shapes:
   `ppg_hr`, `hrv_rmssd_gap_aware`, `hrv_windowed_avg` (the app's stored session `avgHrv` — the mean of
-  per-5-min-bucket gap-aware RMSSD over a span), `hrv_readiness`, `analyze_sleep`, `recovery_score`,
+  per-5-min-bucket gap-aware RMSSD over a span), `hrv_readiness`, `analyze_sleep_with`, `recovery_score`,
   `nightly_spo2_raw_means` (integer-truncated 4.0 raw red/IR ADC means over the in-bed spans — raw ADC,
   never a calibrated percent). `data-flow.md` tables most of them with the count it covers; this is not
   the list.

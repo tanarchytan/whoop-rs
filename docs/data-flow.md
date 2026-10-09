@@ -3,11 +3,12 @@
 Two projects, one contract. **whoop-rs owns every algorithm, decode and score. noop-tan owns
 presentation, persistence, BLE transport and user policy.** The only seam is the uniffi FFI.
 `RustScores.kt` is the main adapter and holds most of the crossings, but it is **not** the only file
-that crosses: **32 hand-written Kotlin files under `main/` reach `uniffi.whoop_ffi` directly**,
+that crosses: **35 hand-written Kotlin files under `main/` reach `uniffi.whoop_ffi` directly**,
 including two screens. Counted by `tools/docs-vs-code.py`, so the day a screen stops calling Rust —
 or a new one starts — the number moves and this page has to say so.
 
-Re-counted 2026-08-06: **125 exported functions, all 125 called from hand-written Kotlin.** The `WhoopCodec`
+Re-counted 2026-10-09: **128 exported functions, all 127 called from hand-written app Kotlin, plus `is_rr_fill`,
+which only the test pinning the app's v103 SQL to it calls.** The `WhoopCodec`
 object carries a further **31 methods**, and `protocol/RustCodec.kt` is the only hand-written Kotlin file
 that names the type at all — it constructs both codecs `private`ly and exposes nothing that returns one, so
 a codec cannot reach any other file. Which of the 31 it calls is **named, not counted**: a free function is
@@ -39,7 +40,7 @@ Those are three different things, and only the last is awaiting a call site:
 The Kotlin copies are the ones with callers, so each table and each machine exists twice and only one side
 ships. Whether Kotlin should call across for them is a border decision, not drift.
 
-The tables below carry **48** of them; **62 of the 125 appear in no shipped document**, which is a gap in the
+The tables below carry **51** of them; **62 of the 128 appear in no shipped document**, which is a gap in the
 map rather than a claim about the code. `tools/docs-vs-code.py` re-derives every count here and fails on
 drift, and for the two lists above it prints the symmetric difference — which name appeared, which vanished.
 It also refuses to guess: a call to a codec method name whose receiver it cannot resolve is reported as
@@ -123,6 +124,9 @@ every algorithm above takes plain values.
 | `data_range_newest` | Newest plausible unix banked, scanning EVERY byte offset of a GET_DATA_RANGE frame and preferring the newest non-future word (falls back to newest-any). This is the sync gate — it REPLACES the fixed-offset `Response::DataRange` newest read. |
 | `data_range_oldest` | Oldest plausible unix banked (backlog depth), scanning only the aligned-from-7 grid (asymmetric with the newest scan by design, to dodge a WHOOP-4 straddle word). |
 | `ppg_hr` | HR from a v26 optical PPG buffer (24 Hz autocorrelation). |
+| `standard_rr_ms` | One standard BLE heart-rate (0x2A37) R-R word in ms: 1/1024 s per the spec (4.0, rounded), or plain ms passed through (5/MG). |
+| `rr_fill_cfg` | The R-R filler constants (500 ms, same-second HR < 100) the app binds into its v103 `tsSuspect` SQL, so it holds no copy. |
+| `is_rr_fill` | The filler predicate itself; the app's SQL is pinned to it by a test grid. Flagged rows are skipped by scoring reads, never deleted. |
 
 ### HRV
 
@@ -143,8 +147,8 @@ every algorithm above takes plain values.
 
 | export | what it computes |
 |---|---|
-| `analyze_sleep` | Detect + stage a night's streams: one call carves the in-bed spans and returns one session each. |
-| `stage_sleep_refined` | Stage one already-detected in-bed span with the V2 recipe + motion-aware wake refinement (the single-span edit self-heal path). Per-30 s-epoch stage segments over `[start, end]`. |
+| `analyze_sleep_with` | Detect + stage a night's streams: one call carves the in-bed spans and returns one session each, staged by `engine` (`Original` = v2; `Experimental` = v2 + `clamp_only_without_rr` + far-from-edge abstention, whose refused stretches come back as `unscored` spans, drawn only). |
+| `stage_sleep_refined_with` | Stage one already-detected in-bed span with `engine` + motion-aware wake refinement (the single-span edit self-heal path): per-30 s-epoch segments over `[start, end]`, plus the `unscored` spans. |
 | `rest_score` | Rest (sleep performance) composite [0, 100] from a night's aggregates. `None` when there is no asleep time. Absent `sleep_need_hours` defaults to 8 h; absent `consistency` defaults to a neutral 0.5. |
 | `sleep_debt_ledger` | Rolling sleep-debt ledger: Σ(slept − need) over the last `window` (default 14) nights with data. `need_hours` defaults to 8 h. Nights with no sleep are skipped, never zero-filled. |
 | `personal_sleep_need_hours` | Personal sleep need (hours) = mean of recent nightly asleep hours, floored at 7.5. For the Rest score's sleep-need input. |
