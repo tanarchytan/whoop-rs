@@ -30,6 +30,7 @@ it. Exit status is 1 when anything disagrees.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -39,7 +40,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 DOCS = ROOT / "docs"
 WHOOP = ROOT.parent
-KOTLIN = WHOOP / "noop-wt-tan" / "android" / "app" / "src" / "main" / "java"
+# NOOP_DIR points at an app worktree; the default is the shared `noop` checkout.
+KOTLIN = Path(os.environ.get("NOOP_DIR", WHOOP / "noop")).resolve() / "android" / "app" / "src" / "main" / "java"
 FIXTURES = WHOOP / "sleep-benchmark" / "fixtures_multi_clean3"
 
 # Small counts a document spells out rather than digits. Comparison is case-insensitive, so the word in
@@ -721,8 +723,9 @@ def main() -> int:
     declared = set(re.findall(r"^(?:pub )?mod (\w+);", body, re.M))
     if files or declared:
         checked += 1
-        phantom = sorted(f for f in files if not (sleep_dir / f).is_file())
-        unlisted = sorted(f"{m}.rs" for m in declared if f"{m}.rs" not in files)
+        # A token resolves under sleep/ or, for a harness the prose cites, under the crate root.
+        phantom = sorted(f for f in files if not ((sleep_dir / f).is_file() or (sleep_dir.parents[1] / f).is_file()))
+        unlisted = sorted(f"{m}.rs" for m in declared if f"{m}.rs" not in files and f"{m}/mod.rs" not in files)
         if phantom or unlisted:
             print(f"  WRONG  {'sleep.md':<16} {'module table files':<26} "
                   f"named but not on disk: {phantom}; declared in mod.rs but unlisted: {unlisted}")
