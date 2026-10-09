@@ -24,7 +24,7 @@ There is no `whoop-metrics` crate — it became `physio-algo`. Full graph: `docs
 ```bash
 cd whoop-rs
 cargo build
-cargo test                 # 1271 passed, 0 failed, 52 #[ignore]d  (2026-10-08; re-derive, never carry forward)
+cargo test                 # 1273 passed, 0 failed, 52 #[ignore]d  (2026-10-09; re-derive, never carry forward)
 cargo clippy --workspace --all-targets
 cargo run -p whoopctl -- scan
 
