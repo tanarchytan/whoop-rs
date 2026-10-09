@@ -16,12 +16,9 @@ use super::SleepStage;
 /// never keeps fewer, however low the coverage asked for.
 pub const MIN_EPOCHS: usize = 20;
 
-/// Fraction of epochs KEPT by default (the rest are refused).
-///
-/// Measured over 20 random draws in `_r13/abstain-20draws.log` (gate A3): at 80% coverage the
-/// class-matched random null LOSES to far-from-edge by 2.19x (dreamt), 2.44x (aauwss) and 3.10x
-/// (sleep-accel) of the paired bar, and 0% of its refusal runs are a lone epoch. At 90% it does not
-/// clear the null on aauwss, so this is 80%, not higher.
+/// Fraction of epochs KEPT by default (the rest are refused). At 80% far-from-edge beats a
+/// class-matched random drop of the same size on every scored cohort with no lone-epoch hole; at 90%
+/// it does not on all of them.
 pub const DEFAULT_COVERAGE: f64 = 0.80;
 
 /// Epochs from each epoch to the nearest decoded stage change, which lies BETWEEN two epochs, so the

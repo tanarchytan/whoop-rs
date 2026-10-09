@@ -93,3 +93,10 @@ fn default_differs_from_null_only_in_clamp_and_abstain() {
     assert_eq!(d.abstain, Some(abstain::DEFAULT_COVERAGE));
     assert_eq!(Tanv1Cfg::NULL.abstain, None);
 }
+
+/// The shipped abstention values, as literals: every other test reads them through the constants.
+#[test]
+fn shipped_abstention_is_80_percent_with_a_20_epoch_floor() {
+    assert_eq!(Tanv1Cfg::DEFAULT.abstain, Some(0.80));
+    assert_eq!(abstain::MIN_EPOCHS, 20);
+}

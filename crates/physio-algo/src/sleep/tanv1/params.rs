@@ -1,12 +1,10 @@
-//! tanv1 configuration. Minimal on purpose: U4+ add emission and transition fields.
+//! tanv1 configuration: the v2 base recipe and the abstention coverage.
 
 use super::super::abstain;
 use super::super::params::Params;
 
-/// The base v2 recipe tanv1 runs on: SHIPPED plus `clamp_only_without_rr`, adopted 2026-09-30.
-///
-/// Evidence: `_r13/border-params-switches.txt` (dreamt paired kappa4 +.0133 AHEAD 2.58x, macro F1 AHEAD
-/// 2.74x; aauwss BA AHEAD 2.07x; sleep-accel identical) and `_r13/u4b-card.txt` (no fitted arm beats it).
+/// The base v2 recipe tanv1 runs on: SHIPPED plus `clamp_only_without_rr`, which lets the awake cardiac
+/// terms speak while still whenever the epoch carries R-R.
 pub const BASE: Params = Params { clamp_only_without_rr: true, ..Params::SHIPPED };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
