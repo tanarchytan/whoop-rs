@@ -40,8 +40,12 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 DOCS = ROOT / "docs"
 WHOOP = ROOT.parent
-# NOOP_DIR points at an app worktree; the default is the shared `noop` checkout.
-KOTLIN = Path(os.environ.get("NOOP_DIR", WHOOP / "noop")).resolve() / "android" / "app" / "src" / "main" / "java"
+# NOOP_DIR points at the app tree. Default: the local SSD clone when it exists, else the sibling `noop`
+# (the NAS mirror is a stale checkout, so it is the last resort). Same rule in audit_kotlin_algorithms.py
+# and build_research_index.py.
+_LOCAL_NOOP = Path("C:/work/whoop/noop")
+NOOP = Path(os.environ.get("NOOP_DIR") or (_LOCAL_NOOP if _LOCAL_NOOP.exists() else WHOOP / "noop")).resolve()
+KOTLIN = NOOP / "android" / "app" / "src" / "main" / "java"
 FIXTURES = WHOOP / "sleep-benchmark" / "fixtures_multi_clean3"
 
 # Small counts a document spells out rather than digits. Comparison is case-insensitive, so the word in

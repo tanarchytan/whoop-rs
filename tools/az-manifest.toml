@@ -1828,7 +1828,7 @@ step = "E"
 section = "the two main-night scorers (section 4)"
 label = "the four backup days where the scorers split (73.7/62.8, 325.7/444.4, 246.5/334.5, 0.0/263.0)"
 documented = "4 of 31 backup days"
-note = "pinned by noop-tan MainNightScorerParityTest, not by a Rust harness: cd noop-wt-tan/android && ./gradlew.bat :app:testFullDebugUnitTest --tests '*MainNightScorerParityTest'"
+note = "pinned by noop-tan MainNightScorerParityTest, not by a Rust harness: cd noop/android && ./gradlew.bat :app:testFullDebugUnitTest --tests '*MainNightScorerParityTest'"
 
 # ───────────────────────────────── F: emissions and the cycle prior ─────────────────────────────────
 

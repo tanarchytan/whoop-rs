@@ -433,7 +433,7 @@ byte-for-byte twin of a Kotlin log line that ships, so the Rust half is a parity
 caller rather than an algorithm going unused. `HrWatch` is off the FFI too but is not orphaned:
 `whoopctl --hr-watch` prints it. That is the border in ONE
 direction. In the other, **20 Kotlin files still carry maths of their own**, listed in
-`noop-wt-tan/docs/ALGORITHMS.md` and re-derived against the code by
+`noop/docs/ALGORITHMS.md` and re-derived against the code by
 `dev-notes/noop-tan/audit_kotlin_algorithms.py`. What differs below is how strongly each is verified.
 
 ### ✅ Hardware-verified — run against a real 5.0/MG
