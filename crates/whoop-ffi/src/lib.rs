@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn stage_sleep_refined_tiles_a_synthetic_night() {
-        use super::{stage_sleep_refined, SleepAccelSample, SleepHrSample, SleepInput, SleepRrRun, SleepStage};
+        use super::{stage_sleep_refined_with, SleepAccelSample, SleepEngine, SleepHrSample, SleepInput, SleepRrRun, SleepStage};
         let start = 1_749_517_200i64;
         let dur = 90 * 60 * 4;
         let (mut hr, mut rr, mut accel) = (Vec::new(), Vec::new(), Vec::new());
@@ -355,7 +355,7 @@ mod tests {
             rr.push(SleepRrRun { ts, intervals: vec![(60_000 / bpm) as u16] });
         }
         let input = SleepInput { start, end: start + dur, hr, rr, accel };
-        let segs = stage_sleep_refined(input, Vec::new());
+        let segs = stage_sleep_refined_with(input, Vec::new(), SleepEngine::Original).segments;
         assert!(!segs.is_empty());
         assert_eq!(segs.first().unwrap().start, start);
         assert_eq!(segs.last().unwrap().end, start + dur);

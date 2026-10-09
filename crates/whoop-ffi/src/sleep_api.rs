@@ -13,13 +13,8 @@ fn to_scored_blocks(blocks: &[MainNightScoredBlock]) -> Vec<sleep::ScoredNightBl
         .collect()
 }
 
-/// Detect + stage a night's streams: one call carves the in-bed spans and returns one session each.
-#[uniffi::export]
-pub fn analyze_sleep(streams: SleepStreams) -> Vec<SleepSession> {
-    sleep::analyze(&streams.into()).into_iter().map(SleepSession::from).collect()
-}
-
-/// [`analyze_sleep`] with a choice of engine; `Original` is identical to `analyze_sleep`.
+/// Detect + stage a night's streams: one call carves the in-bed spans and returns one session each,
+/// staged by `engine` (`Original` is the v2 recipe, `Experimental` adds abstention holes).
 #[uniffi::export]
 pub fn analyze_sleep_with(streams: SleepStreams, engine: SleepEngine) -> Vec<SleepSession> {
     sleep::analyze_with(&streams.into(), engine.into()).into_iter().map(SleepSession::from).collect()
@@ -134,18 +129,8 @@ pub fn habitual_midsleep_series(
         .collect()
 }
 
-/// Stage one already-detected in-bed span with the V2 recipe + motion-aware wake refinement (the
-/// single-span edit self-heal path). Per-30 s-epoch stage segments over `[start, end]`.
-#[uniffi::export]
-pub fn stage_sleep_refined(input: SleepInput, steps: Vec<SleepStepSample>) -> Vec<SleepSegment> {
-    let steps: Vec<sleep::StepSample> = steps
-        .into_iter()
-        .map(|s| sleep::StepSample { ts: s.ts, counter: s.counter, activity_class: s.activity_class })
-        .collect();
-    to_sleep_segments(sleep::stage_refined(&input.into(), &steps))
-}
-
-/// [`stage_sleep_refined`] with a choice of engine, plus the spans the engine declines to score.
+/// Stage one already-detected in-bed span with `engine` + motion-aware wake refinement (the single-span
+/// edit self-heal path): per-30 s-epoch segments over `[start, end]`, plus the spans declined to score.
 #[uniffi::export]
 pub fn stage_sleep_refined_with(
     input: SleepInput,
@@ -391,9 +376,13 @@ mod tests {
         format!("{} {} {} {:?} {:?} {:?} {:?} {:?}", s.start, s.end, s.efficiency, s.resting_hr, s.avg_hrv, seg, s.motion_grid, s.sleep_state_grid)
     }
 
+    fn core_analyze() -> Vec<SleepSession> {
+        sleep::analyze(&golden_streams().into()).into_iter().map(SleepSession::from).collect()
+    }
+
     #[test]
-    fn original_engine_is_analyze_sleep_with_no_holes() {
-        let a = analyze_sleep(golden_streams());
+    fn original_engine_is_the_core_analyze_with_no_holes() {
+        let a = core_analyze();
         let b = analyze_sleep_with(golden_streams(), SleepEngine::Original);
         assert!(!a.is_empty());
         assert_eq!(a.iter().map(key).collect::<Vec<_>>(), b.iter().map(key).collect::<Vec<_>>());
@@ -402,7 +391,7 @@ mod tests {
 
     #[test]
     fn experimental_engine_keeps_the_sessions_and_reports_holes() {
-        let a = analyze_sleep(golden_streams());
+        let a = core_analyze();
         let e = analyze_sleep_with(golden_streams(), SleepEngine::Experimental);
         assert_eq!(a.len(), e.len());
         assert!(e.iter().all(|s| !s.unscored.is_empty()));
@@ -431,11 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn refined_with_original_is_stage_sleep_refined_and_experimental_adds_holes() {
+    fn refined_with_original_is_the_core_stage_refined_and_experimental_adds_holes() {
         let st = golden_streams();
         let (start, end) = (st.hr[0].ts, st.hr[st.hr.len() - 1].ts + 1);
         let input = || SleepInput { start, end, hr: st.hr.clone(), rr: st.rr.clone(), accel: st.accel.clone() };
-        let plain = to_stage_segments(stage_sleep_refined(input(), vec![]));
+        let plain = sleep::stage_refined(&input().into(), &[]);
         let orig = stage_sleep_refined_with(input(), vec![], SleepEngine::Original);
         assert_eq!(plain, to_stage_segments(orig.segments));
         assert!(orig.unscored.is_empty());

@@ -401,7 +401,7 @@ pub struct BandStateSample {
 }
 
 /// The full night-window stream bundle for detection + staging (raw signals + off-wrist / band-state /
-/// tz-offset). `analyze_sleep` carves the in-bed spans and stages each behind this one border call.
+/// tz-offset). `analyze_sleep_with` carves the in-bed spans and stages each behind this one border call.
 #[derive(uniffi::Record, Clone)]
 pub struct SleepStreams {
     pub hr: Vec<SleepHrSample>,
