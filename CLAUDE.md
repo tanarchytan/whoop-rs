@@ -19,6 +19,25 @@ the only crate that links a radio. `whoop-client` is `WhoopClient<T: BleTranspor
 transport, so it does NOT depend on `ble-btleplug`; `whoopctl` is the one crate that joins the two sides.
 There is no `whoop-metrics` crate — it became `physio-algo`. Full graph: `docs/architecture.md`.
 
+## Current shape (2026-10-09; the app's side is noop-tan `feat/rr-filler-v103`)
+
+- **Where to work:** the local clone `C:\work\whoop\whoop-rs` (`master`). `P:\whoop\whoop-rs` is a NAS mirror,
+  refreshed by `P:\whoop\dev-notes\mirror_nas.py`; never commit there. David pushes, SHA-pinned.
+- **Two sleep engines**, `sleep::Engine { V2, Tanv1 }`, picked per call through `analyze_with` /
+  `stage_refined_with` (FFI `analyze_sleep_with` / `stage_sleep_refined_with` + `SleepEngine`; the engine-less
+  exports are gone). `V2` = the app's "Original" (default), `Params::SHIPPED`, frozen. `Tanv1` = "Experimental":
+  the v2 decode under `tanv1::BASE` (SHIPPED + `clamp_only_without_rr`) plus far-from-edge abstention at
+  `abstain::DEFAULT_COVERAGE` 0.80 (floor `MIN_EPOCHS` 20). Holes land in `Session.unscored`, taken from the
+  REFINED segments (`abstain::holes`); the app draws them and changes no total. Contract: `docs/sleep.md`.
+- **R-R intake:** `rr::is_rr_fill` (`rr == 500 && same-second HR < 100`) is the firmware's 500 ms filler;
+  `rr_fill_cfg()` hands the app's v103 SQL its binds. `standard_rr_ms` decodes the 0x2A37 R-R word.
+- **Haptics:** `haptic::maverick_buzz_frame(seq, loops)` sets overallLoop = loops - 1, clamped 0..=7; FFI
+  `buzz_frame_with`; `buzz_frame` stays the one-pulse form. `whoop-client` sends one pulse.
+- **Tools:** `docs-vs-code.py` reads the app tree from `NOOP_DIR` (default `C:/work/whoop/noop` when present, else
+  the sibling `noop`). `sync-jnilibs.py` writes into the sibling `../noop/android/app/src` (`--app-src` overrides)
+  and reads the host library from `$CARGO_TARGET_DIR/release`, else `target/release`. No `RUSTUP_TOOLCHAIN` or
+  `CARGO_TARGET_DIR` is needed on the local clone (in-dir msvc override, `target/` on the SSD).
+
 ## Build / test / toolchain
 
 ```bash
