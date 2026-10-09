@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -95,6 +96,12 @@ def run(cmd: list[str], cwd: Path) -> None:
         raise SystemExit(f"error: {cmd[0]} failed with {r.returncode}")
 
 
+def host_release_dir() -> Path:
+    """Where `cargo build --release` (run from ROOT) puts the host library: `$CARGO_TARGET_DIR` when set."""
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    return (target if target.is_absolute() else ROOT / target) / "release"
+
+
 def sync() -> int:
     """The four steps an FFI change needs, in one command, then stamp what they were built from."""
     require("cargo")
@@ -103,10 +110,11 @@ def sync() -> int:
 
     run(["cargo", "build", "--release", "-p", "whoop-ffi"], ROOT)
 
-    lib = next((ROOT / "target" / "release" / n for n in ("whoop_ffi.dll", "libwhoop_ffi.so", "libwhoop_ffi.dylib")
-                if (ROOT / "target" / "release" / n).exists()), None)
+    release = host_release_dir()
+    lib = next((release / n for n in ("whoop_ffi.dll", "libwhoop_ffi.so", "libwhoop_ffi.dylib")
+                if (release / n).exists()), None)
     if lib is None:
-        raise SystemExit("error: no host library after `cargo build`; nothing to generate bindings from.")
+        raise SystemExit(f"error: no host library in {release} after `cargo build`; nothing to generate bindings from.")
     BINDINGS.mkdir(parents=True, exist_ok=True)
     # The generator is a BIN inside whoop-ffi behind the `cli` feature, not a package of its own, and
     # uniffi writes `<out-dir>/uniffi/whoop_ffi/whoop_ffi.kt`, so the out-dir is the java source root.
