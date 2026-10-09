@@ -254,6 +254,13 @@ pub fn is_rr_fill(rr_ms: u16, hr_bpm: Option<u32>) -> bool {
     physio_algo::rr::is_rr_fill(rr_ms, hr_bpm.map(|h| h.min(u8::MAX as u32) as u8))
 }
 
+/// A standard BLE heart-rate (0x2A37) R-R word in ms: 1/1024 s per the spec, or plain ms when
+/// `plain_ms` (a strap family that sends milliseconds on that characteristic).
+#[uniffi::export]
+pub fn standard_rr_ms(raw: u16, plain_ms: bool) -> u16 {
+    physio_algo::rr::standard_rr_word_ms(raw, plain_ms)
+}
+
 #[cfg(test)]
 mod rr_fill_tests {
     use super::*;
@@ -267,5 +274,6 @@ mod rr_fill_tests {
         assert!(!is_rr_fill(500, Some(100_000)));
         assert!(!is_rr_fill(500, None));
         assert!(!is_rr_fill(512, Some(60)));
+        assert_eq!((standard_rr_ms(1024, false), standard_rr_ms(1024, true)), (1000, 1024));
     }
 }
