@@ -410,7 +410,7 @@ impl<T: BleTransport> WhoopClient<T> {
 
     /// Fire the one-shot maverick buzz (GEN5).
     pub async fn buzz(&self) -> Result<(), Error> {
-        self.write_cmd(&haptic::maverick_buzz_frame(self.next_seq())).await
+        self.write_cmd(&haptic::maverick_buzz_frame(self.next_seq(), 1)).await
     }
 
     /// Warm-reboot the strap (opcode 29; stored data kept). Caller confirms; never automatic.

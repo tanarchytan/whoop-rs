@@ -220,7 +220,12 @@ impl WhoopCodec {
 
     /// One-shot 5/MG buzz.
     pub fn buzz_frame(&self, seq: u8) -> Vec<u8> {
-        haptic::maverick_buzz_frame(seq)
+        self.buzz_frame_with(seq, 1)
+    }
+
+    /// 5/MG buzz of `loops` pulses (0 and 1 are one pulse; more than 8 is clamped to 8).
+    pub fn buzz_frame_with(&self, seq: u8, loops: u8) -> Vec<u8> {
+        haptic::maverick_buzz_frame(seq, loops)
     }
 
     /// SET_DEVICE_CONFIG to advertise standard 0x180D HR (Garmin/Edge). Opt-in gated in the app.
