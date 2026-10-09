@@ -3,6 +3,8 @@
 //!
 //!   cargo run --release -p physio-algo --example abstain
 //!   ABSTAIN_DRAWS=20 cargo run ...   # average both random nulls over 20 draws (default 1)
+//!   ABSTAIN_DECODE=base cargo run ... # decode under tanv1::BASE (what the Experimental engine ships)
+//!                                     # instead of Params::SHIPPED (the default, the original R2 numbers)
 //!
 //! Every epoch gets a stage today whether the evidence supports one or not. Ranking epochs by
 //! confidence and keeping the top fraction raises kappa on what is kept - but so does dropping
@@ -22,6 +24,7 @@ mod common;
 use common::{dirs_of, median, read_accel, read_hr, read_meta, read_rr, read_truth, stage_idx};
 use physio_algo::sleep::abstain::{self, refuse_among, MIN_EPOCHS};
 use physio_algo::sleep::metrics::{confusion4, kappa4, paired_bar};
+use physio_algo::sleep::tanv1::BASE;
 use physio_algo::sleep::{decode_v2, emissions_v2, params::Params, prepare_v2, SleepInput};
 
 const COHORTS: [&str; 3] = ["dreamt", "aauwss", "sleep-accel"];
@@ -63,6 +66,11 @@ struct Night {
     to_edge: Vec<f64>,
 }
 
+/// The decode the nights are staged under: `Params::SHIPPED`, or `tanv1::BASE` with `ABSTAIN_DECODE=base`.
+fn decode_params() -> Params {
+    if std::env::var("ABSTAIN_DECODE").is_ok_and(|v| v == "base") { BASE } else { Params::SHIPPED }
+}
+
 fn load(set: &str) -> Vec<Night> {
     let mut out = Vec::new();
     for dir in &dirs_of(set) {
@@ -74,8 +82,9 @@ fn load(set: &str) -> Vec<Night> {
         }
         let n = n_meta.max(raw.keys().max().copied().unwrap_or(0) + 1);
         let input = SleepInput { start: w0, end: w1, hr: read_hr(dir), rr: read_rr(dir), accel };
-        let prep = prepare_v2(&input, &Params::SHIPPED);
-        let em = emissions_v2(&prep, &Params::SHIPPED);
+        let prm = decode_params();
+        let prep = prepare_v2(&input, &prm);
+        let em = emissions_v2(&prep, &prm);
         // `truth` below indexes `raw` positionally, which holds only while the grid is complete.
         // Checked BEFORE the length skip, or the hardest-collapsed grid is the one that leaves
         // silently instead of tripping it.
@@ -84,7 +93,7 @@ fn load(set: &str) -> Vec<Night> {
         if em.len() < MIN_EPOCHS {
             continue;
         }
-        let path = decode_v2(&em, &Params::SHIPPED.transition);
+        let path = decode_v2(&em, &prm.transition);
         let pred: Vec<usize> = path.iter().map(|s| stage_idx(*s)).collect();
         let margin: Vec<f64> = em
             .iter()
@@ -265,6 +274,7 @@ fn verdict(mean: f64, bar: f64) -> String {
 }
 
 fn main() {
+    println!("decode: {}\n", if decode_params() == BASE { "tanv1::BASE" } else { "Params::SHIPPED" });
     println!("Kappa on the epochs KEPT, every rule at MATCHED coverage, paired per night.");
     println!("`vs random` proves a drop is not free. `vs edge` needs no emissions, but a sticky");
     println!("decoder only changes state where the margin is wide, so epochs beside an edge carry");

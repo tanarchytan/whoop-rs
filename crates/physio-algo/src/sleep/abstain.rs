@@ -18,7 +18,10 @@ pub const MIN_EPOCHS: usize = 20;
 
 /// Fraction of epochs KEPT by default (the rest are refused). At 80% far-from-edge beats a
 /// class-matched random drop of the same size on every scored cohort with no lone-epoch hole; at 90%
-/// it does not on all of them.
+/// it does not on all of them. Measured on the decode the Experimental engine ships (`tanv1::BASE`,
+/// 20 draws, `ABSTAIN_DECODE=base cargo run --release -p physio-algo --example abstain`): far-from-edge
+/// beats the class-matched drop by 2.74x (dreamt), 3.31x (aauwss) and 3.10x (sleep-accel) of the paired
+/// bar, with 0% lone-epoch holes. Log: `dev-notes/_r15/abstain-base-20draws.log`.
 pub const DEFAULT_COVERAGE: f64 = 0.80;
 
 /// Epochs from each epoch to the nearest decoded stage change, which lies BETWEEN two epochs, so the
