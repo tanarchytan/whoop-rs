@@ -134,14 +134,7 @@ pub fn analyze_with(streams: &SleepStreams, engine: Engine) -> Vec<Session> {
             rr: streams.rr.clone(),
             accel: streams.accel.clone(),
         };
-        let (staged, unscored) = match engine {
-            Engine::V2 => (v2::stage(&input), Vec::new()),
-            Engine::Tanv1 => {
-                let t = tanv1::stage(&input, &tanv1::Tanv1Cfg::DEFAULT);
-                (t.segments, t.unscored)
-            }
-        };
-        let segments = refine::refine(&staged, &streams.accel, &streams.steps);
+        let (segments, unscored) = stage_engine(&input, &streams.steps, engine);
         let efficiency = detect::efficiency(span.start, span.end, &segments);
         let avg_hrv = HrvReadiness::windowed_avg_hrv(span.start as u32, span.end as u32, &beats);
         let motion_grid = detect::session_epoch_motion(span.start, span.end, &streams.accel);
@@ -176,14 +169,22 @@ pub fn stage_refined_with(
     if !is_stageable(input) {
         return (Vec::new(), Vec::new());
     }
-    let (staged, unscored) = match engine {
-        Engine::V2 => (v2::stage(input), Vec::new()),
+    stage_engine(input, steps, engine)
+}
+
+/// Stage with `engine`, refine, then take the holes from the refined hypnogram: the one the user sees,
+/// so a hole sits beside the stage changes that are drawn (refinement both removes and creates them).
+fn stage_engine(input: &SleepInput, steps: &[StepSample], engine: Engine) -> (Vec<StageSegment>, Vec<(i64, i64)>) {
+    match engine {
+        Engine::V2 => (refine::refine(&v2::stage(input), &input.accel, steps), Vec::new()),
         Engine::Tanv1 => {
-            let t = tanv1::stage(input, &tanv1::Tanv1Cfg::DEFAULT);
-            (t.segments, t.unscored)
+            let cfg = tanv1::Tanv1Cfg::DEFAULT;
+            let t = tanv1::stage(input, &cfg);
+            let segments = refine::refine(&t.segments, &input.accel, steps);
+            let unscored = cfg.abstain.map_or_else(Vec::new, |c| abstain::holes(&segments, &t.starts, c));
+            (segments, unscored)
         }
-    };
-    (refine::refine(&staged, &input.accel, steps), unscored)
+    }
 }
 
 /// Beats per hour of span below which a night cannot be staged.

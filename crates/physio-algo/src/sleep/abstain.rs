@@ -10,7 +10,7 @@
 //! draw a stage here", nothing more.
 
 use super::features::EPOCH_S;
-use super::SleepStage;
+use super::{SleepStage, StageSegment};
 
 /// Fewest epochs kept after abstention. A night shorter than this refuses nothing, and a longer one
 /// never keeps fewer, however low the coverage asked for.
@@ -83,6 +83,27 @@ pub fn spans(starts: &[i64], refused: &[bool]) -> Vec<(i64, i64)> {
     out
 }
 
+/// The holes to draw over `segments`: the refused runs of [`far_from_edge`] on the stage each epoch
+/// START shows in `segments`, as unix spans. Pass the segments the user will SEE (after any motion
+/// refinement), so a hole sits beside the edges that are drawn and not beside ones refinement removed.
+pub fn holes(segments: &[StageSegment], starts: &[i64], coverage: f64) -> Vec<(i64, i64)> {
+    spans(starts, &far_from_edge(&labels_at(segments, starts), coverage))
+}
+
+/// The stage of the segment holding each of `starts` (ascending).
+fn labels_at(segments: &[StageSegment], starts: &[i64]) -> Vec<SleepStage> {
+    let mut k = 0;
+    starts
+        .iter()
+        .map(|&t| {
+            while k + 1 < segments.len() && segments[k].end <= t {
+                k += 1;
+            }
+            segments.get(k).map_or(SleepStage::Light, |s| s.stage)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +156,33 @@ mod tests {
         let refused = [false, true, true, false, true, false, true, true];
         assert_eq!(spans(&starts, &refused), vec![(1030, 1090), (1120, 1150), (1180, 1240)]);
         assert!(spans(&starts, &[false; 8]).is_empty());
+    }
+
+    /// Refinement turns a wake run to light but keeps its burst minute wake, which MOVES the stage
+    /// changes. The holes must follow the refined hypnogram: a hole beside the burst edges, none beside
+    /// the wake edges refinement removed.
+    #[test]
+    fn holes_follow_the_edges_refinement_leaves() {
+        use crate::sleep::input::{AccelSample, StepSample};
+        use crate::sleep::refine::refine;
+        let seg = |start, end, stage| StageSegment { start, end, stage };
+        let raw = vec![seg(0, 3000, Light), seg(3000, 6600, Wake), seg(6600, 9600, Light)];
+        let (mut grav, mut steps) = (Vec::new(), Vec::new());
+        for m in 0..160i64 {
+            let (x, z) = if m == 80 { (1.0, 0.0) } else { (0.0, 1.0) };
+            grav.push(AccelSample { ts: m * 60, x: 0.0, y: 0.0, z: 1.0 });
+            grav.push(AccelSample { ts: m * 60 + 30, x, y: 0.0, z });
+            steps.push(StepSample { ts: m * 60, counter: 100, activity_class: Some(0) });
+        }
+        let shown = refine(&raw, &grav, &steps);
+        assert_eq!(shown, vec![seg(0, 4740, Light), seg(4740, 4920, Wake), seg(4920, 9600, Light)]);
+
+        let starts: Vec<i64> = (0..320).map(|k| k * 30).collect();
+        let covers = |h: &[(i64, i64)], t: i64| h.iter().any(|(a, b)| *a <= t && t < *b);
+        let before = holes(&raw, &starts, 0.8);
+        let after = holes(&shown, &starts, 0.8);
+        assert!(covers(&before, 3000) && !covers(&before, 4800), "pre-refine holes sit at the wake run");
+        assert!(covers(&after, 4740) && covers(&after, 4920), "holes sit beside the burst edges");
+        assert!(!covers(&after, 3000), "no hole at the wake edge refinement removed");
     }
 }

@@ -26,6 +26,15 @@ total are unchanged). Also public: `stage_refined(input, steps)` / `stage_refine
 refine one already-detected span, for the app's edit self-heal) and the main-night functions (`main_night_index/_group_indices/_selection`,
 `bridged_night_groups`, `habitual_midsleep_sec`).
 
+**The `unscored` contract.** A hole `(start, end)` (unix seconds, ascending, disjoint) means "no stage is drawn
+here": the engine is least sure of the epochs next to a stage change. Holes are computed AFTER `refine`, on the
+stage each epoch start shows in `segments` (`abstain::holes`), so a hole sits beside the changes the user sees,
+including the wake edges refinement creates around a burst minute and not the ones it removes. The rule keeps
+the `round(n * 0.80)` epochs farthest from a change (never fewer than 20 epochs), so about 20% of a night is
+a hole. `segments`, `efficiency` and every total are the refined values and are unchanged by holes. On the PSG
+cohorts `refine` declines (no step stream), so the measured abstention evidence is unaffected by this ordering.
+`tanv1::stage` still returns holes on the unrefined labels, for the harnesses.
+
 ## Modules
 
 | file | role |
