@@ -173,6 +173,10 @@ nightly_hrv      = same, buckets whose centre lands in a deep (N3) span only, AN
                    did not flag optical_signal_poor on. The DISPLAYED nightly HRV, and the only producer
                    of it: window and trust filter both live in one function so no caller can build a
                    second version. `nightly_rmssd` is this per UTC day, from decoded history
+nightly_hrv_checked = nightly_hrv behind a coverage gate (FFI `hrv_nightly_checked`): trusted beats in
+                   the window with covered_rr_coverage > MAX_RR_COVERAGE (1.3) give no value and DuplicatedBeats.
+                   covered_rr_coverage = rr_coverage over covered time (gaps between stamps capped at 5 s)
+                   Measured: healthy nights 0.93-1.10, doubled 1.49-2.40 (dev-notes/_r16/RR-DUP-4.0.md)
 rolling_rmssd    = trailing-window rmssd_plain per surviving beat, optional emit stride (the day chart)
 rr_coverage      = sum(rr) / elapsed ms. Over ~1.0 is impossible: beats double-counted or reports overlap
 duplicate_beat_count  = rows repeating an earlier (ts, rr) EXACTLY. Byte-identical re-inserts only

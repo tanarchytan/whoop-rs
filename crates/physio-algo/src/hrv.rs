@@ -107,6 +107,26 @@ pub struct RrReport {
     pub optical_signal_poor: Option<bool>,
 }
 
+/// [`covered_rr_coverage`] above which a night's stored R-R is taken as recorded more than once.
+/// Measured: healthy nights 0.93-1.10, doubled nights 1.49-2.40.
+pub const MAX_RR_COVERAGE: f64 = 1.3;
+/// Longest gap (s) between stamps still counted as covered time in [`covered_rr_coverage`].
+const COVER_GAP_SECS: i64 = 5;
+
+/// Whether a night's R-R could be trusted for a nightly HRV.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HrvQuality {
+    Ok,
+    DuplicatedBeats { coverage: f64 },
+}
+
+/// [`HrvReadiness::nightly_hrv_checked`]: `value` is `None` when refused or when no deep bucket yields one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NightlyHrv {
+    pub value: Option<f64>,
+    pub quality: HrvQuality,
+}
+
 /// Stage-by-stage survivor counts for one R-R series: input, after the range filter, after Malik ectopic.
 pub fn clean_counts(rr_ms: &[u16]) -> HrvCleanCounts {
     let ranged = HrvReadiness::range_filter(rr_ms);
@@ -319,6 +339,28 @@ impl HrvReadiness {
         let beats: Vec<(u32, u16)> =
             trusted.iter().flat_map(|r| r.rr.iter().map(|&v| (r.unix, v))).collect();
         Self::windowed_avg_hrv_deep(start, end, &beats, deep_spans)
+    }
+
+    /// [`Self::nightly_hrv`] behind the coverage gate: trusted beats in `[start, end]` whose [`rr_coverage`]
+    /// exceeds [`MAX_RR_COVERAGE`] yield no value and `DuplicatedBeats`.
+    pub fn nightly_hrv_checked(
+        start: u32,
+        end: u32,
+        reports: &[RrReport],
+        deep_spans: &[(u32, u32)],
+    ) -> NightlyHrv {
+        let (mut ts, mut ms) = (Vec::new(), Vec::new());
+        for r in reports.iter().filter(|r| rr_trusted(r.optical_signal_poor) && r.unix >= start && r.unix <= end) {
+            for &v in &r.rr {
+                ts.push(r.unix as i64);
+                ms.push(v as f64);
+            }
+        }
+        let coverage = covered_rr_coverage(&ts, &ms);
+        if coverage > MAX_RR_COVERAGE {
+            return NightlyHrv { value: None, quality: HrvQuality::DuplicatedBeats { coverage } };
+        }
+        NightlyHrv { value: Self::nightly_hrv(start, end, reports, deep_spans), quality: HrvQuality::Ok }
     }
 
     /// Per-UTC-day series of [`Self::nightly_hrv`] from history records, oldest → newest, for
@@ -555,6 +597,19 @@ pub fn rr_coverage(ts_sec: &[i64], rr_ms: &[f64]) -> f64 {
     rr_ms.iter().sum::<f64>() / span_ms
 }
 
+/// Like [`rr_coverage`] but over covered time: each gap between successive distinct stamps counts at most
+/// [`COVER_GAP_SECS`], so wear gaps inside a night do not dilute a doubled stream. `0.0` for no beats.
+pub fn covered_rr_coverage(ts_sec: &[i64], rr_ms: &[f64]) -> f64 {
+    let mut t: Vec<i64> = ts_sec.to_vec();
+    t.sort_unstable();
+    t.dedup();
+    if t.len() < 2 || rr_ms.is_empty() {
+        return 0.0;
+    }
+    let covered: i64 = 1 + t.windows(2).map(|w| (w[1] - w[0]).min(COVER_GAP_SECS)).sum::<i64>();
+    rr_ms.iter().sum::<f64>() / (covered as f64 * 1000.0)
+}
+
 /// Rows that repeat an earlier `(ts, rr_ms)` exactly: `total - distinct(ts, rr_ms)`. Measures byte-identical
 /// re-inserts only. It cannot see the overlap that [`overlapping_report_count`] counts, where two reports
 /// cover the same seconds with DIFFERENT values, so a low count here does not mean [`rr_coverage`] is sound.
@@ -727,6 +782,52 @@ mod tests {
         let deep = [(0u32, 600u32)];
         assert!((HrvReadiness::nightly_hrv(0, 600, &clean, &deep).unwrap() - 105.0).abs() < 1e-9);
         assert!((HrvReadiness::nightly_hrv(0, 600, &flagged, &deep).unwrap() - 10.0).abs() < 1e-9);
+    }
+
+    fn doubled_night(copies: usize) -> Vec<RrReport> {
+        // One report per second, 1000 ms beats alternating 950/1050 so RMSSD is nonzero; `copies` stores each.
+        (0..600u32)
+            .flat_map(|t| (0..copies).map(move |_| RrReport {
+                unix: t, rr: vec![if t % 2 == 0 { 950 } else { 1050 }], optical_signal_poor: None,
+            }))
+            .collect()
+    }
+
+    #[test]
+    fn nightly_hrv_checked_passes_a_healthy_night() {
+        let r = HrvReadiness::nightly_hrv_checked(0, 600, &doubled_night(1), &[(0, 600)]);
+        assert_eq!(r.quality, HrvQuality::Ok);
+        assert!(r.value.is_some());
+    }
+
+    #[test]
+    fn nightly_hrv_checked_refuses_every_beat_stored_twice() {
+        let r = HrvReadiness::nightly_hrv_checked(0, 600, &doubled_night(2), &[(0, 600)]);
+        assert_eq!(r.value, None);
+        assert!(matches!(r.quality, HrvQuality::DuplicatedBeats { coverage } if coverage > 1.9));
+    }
+
+    #[test]
+    fn nightly_hrv_checked_boundary_is_strictly_above_the_limit() {
+        // Two beats 5 s apart cover 6 s: coverage = (a + b) / 6000.
+        let q = |a: u16, b: u16| {
+            let rep = |unix: u32, v: u16| RrReport { unix, rr: vec![v], optical_signal_poor: None };
+            HrvReadiness::nightly_hrv_checked(0, 600, &[rep(0, a), rep(5, b)], &[(0, 600)]).quality
+        };
+        assert_eq!(q(3900, 3900), HrvQuality::Ok, "exactly 1.3 passes");
+        assert!(matches!(q(3901, 3900), HrvQuality::DuplicatedBeats { .. }));
+    }
+
+    #[test]
+    fn covered_rr_coverage_ignores_a_long_gap() {
+        // Two stored copies of a 1 s beat at 0..9 s and again at 3600..3609 s: a span-based ratio
+        // dilutes to ~0.01, covered time keeps it above 1.
+        let ts: Vec<i64> = (0..10).chain(3600..3610).flat_map(|t| [t, t]).collect();
+        let ms = vec![1000.0; ts.len()];
+        assert!(rr_coverage(&ts, &ms) < 0.1);
+        let c = covered_rr_coverage(&ts, &ms);
+        assert!((c - 40.0 / 24.0).abs() < 1e-9, "{c}"); // 40 s of beats over 1 + 9 + 5 + 9 covered s
+        assert_eq!(covered_rr_coverage(&[5], &[1000.0]), 0.0);
     }
 
     #[test]
