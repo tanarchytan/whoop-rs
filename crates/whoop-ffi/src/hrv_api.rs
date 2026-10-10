@@ -286,6 +286,40 @@ pub fn hrv_nightly(
     HrvReadiness::nightly_hrv(start, end, &r, &deep_spans)
 }
 
+/// [`hrv_nightly`] behind the R-R coverage gate. `duplicated_beats` means the night's stored beats
+/// outnumber its covered time, so `value` is withheld; `coverage` is the measured beat-time ratio.
+#[derive(uniffi::Record)]
+pub struct HrvNightlyChecked {
+    pub value: Option<f64>,
+    pub duplicated_beats: bool,
+    pub coverage: f64,
+}
+
+#[uniffi::export]
+pub fn hrv_nightly_checked(
+    start: u32,
+    end: u32,
+    reports: Vec<RrReport>,
+    segments: Vec<SleepSegment>,
+) -> HrvNightlyChecked {
+    let r: Vec<physio_algo::hrv::RrReport> = reports
+        .into_iter()
+        .map(|x| physio_algo::hrv::RrReport { unix: x.unix, rr: x.rr, optical_signal_poor: x.optical_signal_poor })
+        .collect();
+    let deep_spans: Vec<(u32, u32)> = segments
+        .iter()
+        .filter(|s| matches!(s.stage, SleepStage::Deep))
+        .map(|s| (s.start as u32, s.end as u32))
+        .collect();
+    let n = HrvReadiness::nightly_hrv_checked(start, end, &r, &deep_spans);
+    match n.quality {
+        physio_algo::hrv::HrvQuality::Ok => HrvNightlyChecked { value: n.value, duplicated_beats: false, coverage: 0.0 },
+        physio_algo::hrv::HrvQuality::DuplicatedBeats { coverage } => {
+            HrvNightlyChecked { value: None, duplicated_beats: true, coverage }
+        }
+    }
+}
+
 // ── Rest (sleep performance composite) ─────────────────────────────────────
 
 /// Nocturnal RMSSD age norm (ms) — the reference the HRV driver is scored against.
