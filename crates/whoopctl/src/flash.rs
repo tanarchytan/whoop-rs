@@ -12,12 +12,20 @@ use whoop_client::{
 use whoop_protocol::bytes::to_hex;
 use whoop_protocol::firmware::{data_frames_with, Tail, CHUNK_AMBIQ};
 use whoop_protocol::firmware_image::inspect;
+use whoop_protocol::variant::Variant;
 
 use crate::cli::{Cli, FlashArgs};
 
 /// The only serials this verb will ever transfer to. Compiled in: no environment variable can widen it,
 /// though `WHOOPCTL_PROTECT` can still narrow it.
-const FLASHABLE_SERIALS: &[&str] = &["5A00960910"];
+const FLASHABLE_SERIALS: &[&str] = &["5AM0306316"];
+
+/// The board the allowlisted band must be (316 is an MG, `WS50_`). The client checks this against the
+/// strap's own hardware revision, so a serial that moved boards would still refuse.
+const FLASHABLE_VARIANT: Variant = Variant::WhoopMg;
+
+/// How many trailing serial digits a consent flag must repeat.
+const CONSENT_DIGITS: usize = 3;
 
 /// Ceiling on the retry budget, and how long the strap is given to reboot after a commit.
 const MAX_RETRIES: u32 = 16;
@@ -70,9 +78,13 @@ pub(crate) async fn run(cli: &Cli, args: &FlashArgs) -> Result<()> {
 
 /// Turn the flags into options, refusing anything the transfer cannot honour.
 fn options(cli: &Cli, args: &FlashArgs) -> Result<FlashOptions> {
-    let arm = if args.commit {
+    let serial = expected_serial(cli)?;
+    for given in [&args.stage, &args.commit].into_iter().flatten() {
+        consent_names_band(given, &serial)?;
+    }
+    let arm = if args.commit.is_some() {
         FlashArm::Commit
-    } else if args.stage {
+    } else if args.stage.is_some() {
         FlashArm::Stage
     } else {
         FlashArm::Plan
@@ -96,7 +108,8 @@ fn options(cli: &Cli, args: &FlashArgs) -> Result<FlashOptions> {
         println!("--retries {} is above the cap; using {MAX_RETRIES}", args.retries);
     }
     Ok(FlashOptions {
-        expect_serial: expected_serial(cli)?,
+        expect_serial: serial,
+        expect_variant: Some(FLASHABLE_VARIANT),
         arm,
         min_battery_pct: args.min_battery,
         tail,
@@ -104,6 +117,16 @@ fn options(cli: &Cli, args: &FlashArgs) -> Result<FlashOptions> {
         retry_budget: args.retries.min(MAX_RETRIES),
         step_timeout: FlashOptions::default().step_timeout,
     })
+}
+
+/// A consent flag only counts when it repeats the last digits of the band it will write to, so a
+/// command copied from a note about another strap is refused rather than obeyed.
+fn consent_names_band(given: &str, serial: &str) -> Result<()> {
+    let want = &serial[serial.len() - CONSENT_DIGITS..];
+    if given.trim() != want {
+        bail!("the consent flag names band {given:?}, but this verb writes only band {want} ({serial})");
+    }
+    Ok(())
 }
 
 /// The serial the strap must report. `--sn` may only pick from the allowlist, never add to it.
@@ -218,16 +241,32 @@ mod tests {
     fn the_default_arm_is_plan_and_each_opt_in_arms_one_more_step() {
         assert_eq!(parsed(&[]).unwrap().arm, FlashArm::Plan);
         assert_eq!(parsed(&["--check"]).unwrap().arm, FlashArm::Plan);
-        assert_eq!(parsed(&["--i-agree-to-stage-firmware-on-band-910"]).unwrap().arm, FlashArm::Stage);
-        assert_eq!(parsed(&["--i-agree-to-commit-firmware-on-band-910"]).unwrap().arm, FlashArm::Commit);
+        assert_eq!(parsed(&["--i-agree-to-stage-firmware-on-band", "316"]).unwrap().arm, FlashArm::Stage);
+        assert_eq!(parsed(&["--i-agree-to-commit-firmware-on-band", "316"]).unwrap().arm, FlashArm::Commit);
     }
 
     /// `--check` promises to send no firmware command, so it cannot ride along with a flag that arms
     /// one — otherwise the safety flag is on the line and means nothing.
     #[test]
     fn check_cannot_be_combined_with_an_arming_flag() {
-        assert!(parse(&["--check", "--i-agree-to-stage-firmware-on-band-910"]).is_none());
-        assert!(parse(&["--check", "--i-agree-to-commit-firmware-on-band-910"]).is_none());
+        assert!(parse(&["--check", "--i-agree-to-stage-firmware-on-band", "316"]).is_none());
+        assert!(parse(&["--check", "--i-agree-to-commit-firmware-on-band", "316"]).is_none());
+    }
+
+    /// The consent flag must repeat the band's last three digits: the old 910 wording, another strap's
+    /// digits and an empty value all refuse, and refusal happens before anything connects.
+    #[test]
+    fn the_consent_flag_must_name_the_allowlisted_band() {
+        for flag in ["--i-agree-to-stage-firmware-on-band", "--i-agree-to-commit-firmware-on-band"] {
+            for wrong in ["910", "409", "360", "", "3160"] {
+                assert!(parsed(&[flag, wrong]).is_err(), "{flag} {wrong:?}");
+            }
+            assert!(parsed(&[flag, "316"]).is_ok());
+        }
+        // The retired 910-named flags no longer exist.
+        assert!(parse(&["--i-agree-to-stage-firmware-on-band-910"]).is_none());
+        assert!(parse(&["--i-agree-to-commit-firmware-on-band-910"]).is_none());
+        assert_eq!(parsed(&[]).unwrap().expect_variant, Some(Variant::WhoopMg));
     }
 
     #[test]
@@ -257,11 +296,14 @@ mod tests {
         let default = cli(vec!["whoopctl", "flash", "--image", "x.bin"]);
         assert_eq!(expected_serial(&default).unwrap(), FLASHABLE_SERIALS[0]);
 
-        let listed = cli(vec!["whoopctl", "--sn", "960910", "flash", "--image", "x.bin"]);
+        let listed = cli(vec!["whoopctl", "--sn", "306316", "flash", "--image", "x.bin"]);
         assert_eq!(expected_serial(&listed).unwrap(), FLASHABLE_SERIALS[0]);
 
-        let other = cli(vec!["whoopctl", "--sn", "5A00960911", "flash", "--image", "x.bin"]);
-        assert!(expected_serial(&other).is_err());
+        // 316 only: the prod 5.0 (910), the test rig (409), the old MG (360) and a near-miss all refuse.
+        for sn in ["5A00960910", "910", "5AG0546409", "409", "5AM0020360", "360", "5AM0306317", "317"] {
+            let other = cli(vec!["whoopctl", "--sn", sn, "flash", "--image", "x.bin"]);
+            assert!(expected_serial(&other).is_err(), "{sn} must not be flashable");
+        }
         assert!(!FLASHABLE_SERIALS.is_empty() && !FLASHABLE_SERIALS.contains(&""));
     }
 }

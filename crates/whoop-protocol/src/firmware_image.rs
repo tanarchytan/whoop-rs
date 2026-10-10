@@ -2,12 +2,16 @@
 //! is gated on. Pure byte reads; `firmware` builds the frames that carry the bytes this describes.
 
 use crate::crc::crc32_zlib;
+use crate::variant::Variant;
 
 /// Plaintext header ahead of the compressed payload.
 pub const IMAGE_HEADER_LEN: usize = 512;
 
 /// Product marker at [`PRODUCT_OFFSET`]: the 5.0/MG line. The 4.0 line carries 6.
 pub const PRODUCT_MAVERICK: u32 = 13;
+
+/// Product marker for the 4.0 line.
+pub const PRODUCT_HARVARD: u32 = 6;
 
 /// Container marker at [`CONTAINER_OFFSET`]: set on the wrapped image that goes on the wire. A
 /// decompressed image carries 1, so this one field separates the two.
@@ -101,6 +105,21 @@ pub fn inspect(image: &[u8]) -> Result<ImageHeader, ImageFault> {
         version: version_string(image),
         header_crc,
     })
+}
+
+/// The straps an image of this product marker is built for. Empty for a marker we do not know, so an
+/// unknown image fails closed.
+///
+/// The header carries NO 5.0-versus-MG field: one unified Maverick image runs on both boards, which
+/// tell themselves apart at boot from a resistor-ladder board id (`WG50_` vs `WS50_`). So the image can
+/// only be checked against the strap's PRODUCT LINE; which of the two boards it is comes from the
+/// strap's hardware revision, never from the file.
+pub fn runs_on(product: u32) -> &'static [Variant] {
+    match product {
+        PRODUCT_MAVERICK => &[Variant::Whoop5, Variant::WhoopMg],
+        PRODUCT_HARVARD => &[Variant::Whoop4],
+        _ => &[],
+    }
 }
 
 /// The NUL-terminated version field. Masked in every shipped image, so it names a line and never a
@@ -206,6 +225,34 @@ mod tests {
 
         assert_eq!(inspect(&with_field(1000, CONTAINER_OFFSET, 1)), Err(ImageFault::NotAContainer(1)));
         assert_eq!(inspect(&with_field(1000, PRODUCT_OFFSET, 6)), Err(ImageFault::WrongProduct(6)));
+    }
+
+    #[test]
+    fn runs_on_names_the_product_line_and_fails_closed_on_an_unknown_marker() {
+        assert_eq!(runs_on(PRODUCT_MAVERICK), &[Variant::Whoop5, Variant::WhoopMg]);
+        assert_eq!(runs_on(PRODUCT_HARVARD), &[Variant::Whoop4]);
+        assert!(runs_on(0).is_empty() && runs_on(14).is_empty());
+    }
+
+    /// The real 512-byte header of `MAVERICK-50.40.1.0.zbin` (the build 316 runs), first 0x60 bytes: the
+    /// product marker is 13 and nothing in it separates 5.0 from MG. Header bytes only, no firmware.
+    #[test]
+    fn a_real_maverick_header_is_the_unified_line() {
+        let mut h = [0u8; 0x60];
+        h[..0x1C].copy_from_slice(&hex(REAL_MAVERICK_HEAD));
+        h[VERSION_OFFSET..VERSION_OFFSET + 9].copy_from_slice(b"50.40.x.x");
+        let at = |i: usize| u32::from_le_bytes(h[i..i + 4].try_into().unwrap());
+        assert_eq!(at(CONTAINER_OFFSET), CONTAINER_ZBIN);
+        assert_eq!(at(PRODUCT_OFFSET), PRODUCT_MAVERICK);
+        assert_eq!(runs_on(at(PRODUCT_OFFSET)), &[Variant::Whoop5, Variant::WhoopMg]);
+    }
+
+    /// Bytes 0x00..0x1C of MAVERICK-50.40.1.0.zbin: payload crc, length, 0x5, 0x5, product 0xd, 0, built.
+    const REAL_MAVERICK_HEAD: &str = "93d43afb8053110005000000050000000d0000000000000003b5326a";
+
+    fn hex(s: &str) -> Vec<u8> {
+        let s: String = s.split_whitespace().collect();
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
     /// Every archived image in `WHOOP_ZBIN_DIR` must satisfy its own header. Run after extracting them.

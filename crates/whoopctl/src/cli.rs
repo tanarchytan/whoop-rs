@@ -150,11 +150,14 @@ pub(crate) struct FlashArgs {
     pub(crate) check: bool,
     /// Open the load, send every chunk, then ask the strap to check them. Stops before the commit, so
     /// the running image is untouched.
-    #[arg(long = "i-agree-to-stage-firmware-on-band-910")]
-    pub(crate) stage: bool,
-    /// Also send the commit. This is the irreversible step, and it implies the staging flag.
-    #[arg(long = "i-agree-to-commit-firmware-on-band-910")]
-    pub(crate) commit: bool,
+    /// The value must be the last three digits of the one flashable band's serial (checked against the
+    /// compiled-in allowlist here and against the connected strap at run time).
+    #[arg(long = "i-agree-to-stage-firmware-on-band", value_name = "LAST3")]
+    pub(crate) stage: Option<String>,
+    /// Also send the commit. This is the irreversible step, and it implies the staging flag. Same
+    /// value rule.
+    #[arg(long = "i-agree-to-commit-firmware-on-band", value_name = "LAST3")]
+    pub(crate) commit: Option<String>,
     /// Battery floor in percent. Values below 80 are refused.
     #[arg(long = "min-battery", default_value_t = 80.0)]
     pub(crate) min_battery: f64,

@@ -3,10 +3,12 @@
 
 mod common;
 
-use common::{identity, image_with_broken_field, three_chunks, transport, Strap, CONTAINER_OFFSET, SERIAL};
+use common::{board, identity, image_of_product, image_with_broken_field, three_chunks, transport, Strap, CONTAINER_OFFSET, SERIAL};
 
 use whoop_client::{Error, FlashArm, FlashFault, FlashOptions, FlashStep, WhoopClient};
 use whoop_protocol::command;
+use whoop_protocol::firmware_image::ImageFault;
+use whoop_protocol::variant::Variant;
 use whoop_protocol::Family;
 
 /// Options armed to commit against the rig's strap — the maximum a test can ask for.
@@ -267,4 +269,57 @@ fn the_forbidden_and_destructive_lists_are_unchanged() {
     assert!(!command::is_forbidden(command::VERIFY_FIRMWARE_IMAGE));
     assert!(!command::is_destructive(command::VERIFY_FIRMWARE_IMAGE));
     assert!(command::is_forbidden(command::ENTER_BLE_DFU));
+}
+
+/// The image's product line must match the strap's own board. The header has no 5.0-versus-MG field
+/// (one image runs on both), so this is the only family check the file can support: a 4.0 image on a
+/// 5-series board, any image on a 4.0 or unreadable or unrecognised board, all refuse before a write.
+#[tokio::test(start_paused = true)]
+async fn the_image_family_must_match_the_straps_board() {
+    let harvard = || image_of_product(6);
+    for (hardware, image, label) in [
+        (Some("WS50_r00"), harvard(), "4.0 image on an MG"),
+        (Some("WG50_r45"), harvard(), "4.0 image on a 5.0"),
+        (Some("HARVARD_r01"), three_chunks(), "maverick image on a 4.0 board"),
+        (Some("XX99_r00"), three_chunks(), "unrecognised board"),
+        (None, three_chunks(), "unreadable board"),
+    ] {
+        let strap = Strap::healthy();
+        let mut client = WhoopClient::new(board(&strap, hardware), Family::Gen5);
+        let err = client.flash_firmware(&image, &armed(), |_| {}).await.unwrap_err();
+        let refused = match &err {
+            // Product 6 is stopped earlier still, by the image's own header check.
+            Error::Flash(FlashFault::Image(f)) => label.starts_with("4.0 image") && *f == ImageFault::WrongProduct(6),
+            Error::Flash(FlashFault::ImageNotForStrap(_)) => !label.starts_with("4.0 image"),
+            _ => false,
+        };
+        assert!(refused, "{label}: {err}");
+        no_firmware_reached(&strap);
+    }
+}
+
+/// The caller can pin the board: an MG-pinned run refuses a 5.0 strap and accepts an MG, and an
+/// unpinned run accepts either board the image is built for.
+#[tokio::test(start_paused = true)]
+async fn a_pinned_board_refuses_the_other_board() {
+    let pinned = |v| FlashOptions { expect_variant: Some(v), ..armed() };
+
+    let strap = Strap::healthy();
+    let mut client = WhoopClient::new(board(&strap, Some("WG50_r45")), Family::Gen5);
+    let err = client.flash_firmware(&three_chunks(), &pinned(Variant::WhoopMg), |_| {}).await.unwrap_err();
+    assert!(matches!(err, Error::Flash(FlashFault::WrongBoard { have: Variant::Whoop5, want: Variant::WhoopMg, .. })), "{err}");
+    no_firmware_reached(&strap);
+
+    let strap = Strap::healthy();
+    let mut client = WhoopClient::new(board(&strap, Some("WS50_r00")), Family::Gen5);
+    let err = client.flash_firmware(&three_chunks(), &pinned(Variant::Whoop5), |_| {}).await.unwrap_err();
+    assert!(matches!(err, Error::Flash(FlashFault::WrongBoard { have: Variant::WhoopMg, .. })), "{err}");
+    no_firmware_reached(&strap);
+
+    for hw in ["WS50_r00", "WG50_r52"] {
+        let strap = Strap::healthy();
+        let mut client = WhoopClient::new(board(&strap, Some(hw)), Family::Gen5);
+        let pin = if hw.starts_with("WS") { Variant::WhoopMg } else { Variant::Whoop5 };
+        assert_eq!(client.flash_firmware(&three_chunks(), &pinned(pin), |_| {}).await.unwrap().reached, FlashStep::Committed);
+    }
 }

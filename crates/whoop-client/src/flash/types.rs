@@ -6,6 +6,7 @@ use std::time::Duration;
 use whoop_protocol::event::ResultCode;
 use whoop_protocol::firmware::Tail;
 use whoop_protocol::firmware_image::{ImageFault, ImageHeader};
+use whoop_protocol::variant::Variant;
 
 /// The lowest battery percent a transfer may run at. A caller may raise this floor, never lower it.
 pub const BATTERY_FLOOR_PCT: f64 = 80.0;
@@ -54,6 +55,9 @@ pub struct FlashOptions {
     /// Serial the connected strap must report, matched as a case-insensitive suffix. Anything too
     /// short to name one band is refused, so there is no wildcard.
     pub expect_serial: String,
+    /// The board the strap must be, on top of the image-versus-strap family check that always runs.
+    /// `None` accepts any board the image is built for; the CLI pins it to the carve-out's board.
+    pub expect_variant: Option<Variant>,
     pub arm: FlashArm,
     /// Floor in percent, clamped up to [`BATTERY_FLOOR_PCT`].
     pub min_battery_pct: f64,
@@ -69,6 +73,7 @@ impl Default for FlashOptions {
     fn default() -> Self {
         FlashOptions {
             expect_serial: String::new(),
+            expect_variant: None,
             arm: FlashArm::Plan,
             min_battery_pct: BATTERY_FLOOR_PCT,
             tail: Tail::Pad,
@@ -125,6 +130,10 @@ pub enum FlashFault {
     WrongFamily,
     #[error("strap reports firmware {0}, which is not a 5.0/MG line")]
     WrongStrapFirmware(String),
+    #[error("strap hardware {0:?} is not a board this image can be sent to — refusing to flash")]
+    ImageNotForStrap(String),
+    #[error("strap hardware {found:?} is {have:?}, the flashable band is {want:?} — refusing to flash")]
+    WrongBoard { found: String, have: Variant, want: Variant },
     #[error("battery unreadable — refusing to flash")]
     BatteryUnreadable,
     #[error("battery {have:.0}% is below the {floor:.0}% floor")]

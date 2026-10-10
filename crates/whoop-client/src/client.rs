@@ -143,6 +143,11 @@ impl<T: BleTransport> WhoopClient<T> {
         self.read_identity_string(uuids::FIRMWARE_REVISION).await
     }
 
+    /// Read the strap's hardware revision (`WS50_r00`, `WG50_r45`) from the standard identity char.
+    pub async fn hardware_revision(&self) -> Option<String> {
+        self.read_identity_string(uuids::HARDWARE_REVISION).await
+    }
+
     /// Negotiated ATT MTU, when the transport reports one. A confirmed write of `n` bytes needs `n + 3`.
     pub fn mtu(&self) -> Option<usize> {
         self.transport.mtu()

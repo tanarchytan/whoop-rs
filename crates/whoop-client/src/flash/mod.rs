@@ -12,6 +12,7 @@ use whoop_protocol::event::ResultCode;
 use whoop_protocol::firmware::{self, CHUNK_AMBIQ};
 use whoop_protocol::firmware_image::{self, ImageFault};
 use whoop_protocol::response::{self, resp_status, CommandResponse};
+use whoop_protocol::variant::Variant;
 use whoop_protocol::{command, framing, Family, Frame};
 
 use crate::client::WhoopClient;
@@ -59,7 +60,7 @@ pub(crate) async fn run<T: BleTransport>(
         return Err(FlashFault::WrongFamily.into());
     }
     let mtu = check_link(client)?;
-    let serial = check_strap(client, opts).await?;
+    let serial = check_strap(client, opts, header.product).await?;
     let battery = check_battery(client, opts).await?;
 
     // The same length the chunker reads, so the seq block reserved below always matches the frames built.
@@ -296,13 +297,37 @@ fn check_link<T: BleTransport>(client: &WhoopClient<T>) -> Result<Option<usize>,
 }
 
 /// Serial allowlist plus the firmware-line check. Comparison is case-insensitive suffix.
-async fn check_strap<T: BleTransport>(client: &WhoopClient<T>, opts: &FlashOptions) -> Result<String, FlashFault> {
+async fn check_strap<T: BleTransport>(
+    client: &WhoopClient<T>,
+    opts: &FlashOptions,
+    product: u32,
+) -> Result<String, FlashFault> {
     let found = check_serial(client, opts).await?;
+    check_board(client, opts, product).await?;
     let fw = client.firmware_revision().await.unwrap_or_else(|| "unreadable".to_string());
     if !fw.starts_with(GEN5_FW_PREFIX) {
         return Err(FlashFault::WrongStrapFirmware(fw));
     }
     Ok(found)
+}
+
+/// Image family against the strap's own board. The strap's hardware revision is the only source of
+/// 5.0-versus-MG (the image header has none), so an unreadable or unrecognised revision refuses, as does
+/// a board the image is not built for, or one other than the board the caller pinned.
+async fn check_board<T: BleTransport>(
+    client: &WhoopClient<T>,
+    opts: &FlashOptions,
+    product: u32,
+) -> Result<(), FlashFault> {
+    let hw = client.hardware_revision().await.unwrap_or_default();
+    let have = Variant::classify(&hw, client.family());
+    if !firmware_image::runs_on(product).contains(&have) {
+        return Err(FlashFault::ImageNotForStrap(hw));
+    }
+    match opts.expect_variant {
+        Some(want) if want != have => Err(FlashFault::WrongBoard { found: hw, have, want }),
+        _ => Ok(()),
+    }
 }
 
 /// The serial half alone, so the pre-commit re-check costs one read rather than two.

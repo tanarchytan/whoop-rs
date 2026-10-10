@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ble_core::{BleError, BleTransport, MockTransport, Notification, FIRMWARE_REVISION, SERIAL_NUMBER};
+use ble_core::{BleError, BleTransport, MockTransport, Notification, FIRMWARE_REVISION, HARDWARE_REVISION, SERIAL_NUMBER};
 use futures::stream::BoxStream;
 use uuid::Uuid;
 use whoop_protocol::crc::crc32_zlib;
@@ -19,6 +19,8 @@ use whoop_protocol::{command, framing, Channel, Family};
 /// Identity the rig's strap reports. The firmware string only has to name the 5.0/MG line.
 pub const SERIAL: &str = "5A00000001";
 pub const FIRMWARE: &str = "50.0.0.0";
+/// The rig strap is an MG board, like the one the carve-out names.
+pub const HARDWARE: &str = "WS50_r00";
 
 /// Header offsets, mirrored to build a fixture. `firmware_image::inspect` is the oracle here: a wrong
 /// offset makes every test that uses the image fail rather than pass quietly.
@@ -41,6 +43,16 @@ pub fn image(payload: usize) -> Vec<u8> {
     let payload_crc = crc32_zlib(&v[HEADER_LEN..]);
     v[0..4].copy_from_slice(&payload_crc.to_le_bytes());
     v[CRC_COPY_AT..CRC_COPY_AT + 4].copy_from_slice(&payload_crc.to_le_bytes());
+    let header_crc = crc32_zlib(&v[8..HEADER_CRC_AT]);
+    v[HEADER_CRC_AT..HEADER_CRC_AT + 4].copy_from_slice(&header_crc.to_le_bytes());
+    v
+}
+
+/// A self-consistent image of another product line (6 = the 4.0 line): header CRC re-sealed, so only the
+/// family disagrees.
+pub fn image_of_product(product: u32) -> Vec<u8> {
+    let mut v = three_chunks();
+    v[PRODUCT_AT..PRODUCT_AT + 4].copy_from_slice(&product.to_le_bytes());
     let header_crc = crc32_zlib(&v[8..HEADER_CRC_AT]);
     v[HEADER_CRC_AT..HEADER_CRC_AT + 4].copy_from_slice(&header_crc.to_le_bytes());
     v
@@ -218,6 +230,18 @@ pub fn identity(strap: &Arc<Strap>, serial: Option<&str>, firmware: Option<&str>
     }
     if let Some(firmware) = firmware {
         t = t.with_read(FIRMWARE_REVISION, firmware.as_bytes().to_vec());
+    }
+    t.with_read(HARDWARE_REVISION, HARDWARE.as_bytes().to_vec())
+}
+
+/// The default rig, but reporting a chosen hardware revision; `None` reads as unreadable.
+pub fn board(strap: &Arc<Strap>, hardware: Option<&str>) -> MockTransport {
+    let s = strap.clone();
+    let mut t = MockTransport::with_responder(Arc::new(move |w: &[u8]| s.answer(w)))
+        .with_read(SERIAL_NUMBER, SERIAL.as_bytes().to_vec())
+        .with_read(FIRMWARE_REVISION, FIRMWARE.as_bytes().to_vec());
+    if let Some(hw) = hardware {
+        t = t.with_read(HARDWARE_REVISION, hw.as_bytes().to_vec());
     }
     t
 }
