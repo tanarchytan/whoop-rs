@@ -19,7 +19,7 @@ the only crate that links a radio. `whoop-client` is `WhoopClient<T: BleTranspor
 transport, so it does NOT depend on `ble-btleplug`; `whoopctl` is the one crate that joins the two sides.
 There is no `whoop-metrics` crate — it became `physio-algo`. Full graph: `docs/architecture.md`.
 
-## Current shape (2026-10-09; the app's side is noop-tan `feat/rr-filler-v103`)
+## Current shape (2026-10-09; the app's side is `noop-tan`, which absorbed `feat/rr-filler-v103` on 2026-10-18)
 
 - **Where to work:** the local clone `C:\work\whoop\whoop-rs` (`master`). `P:\whoop\whoop-rs` is a NAS mirror,
   refreshed by `P:\whoop\dev-notes\mirror_nas.py`; never commit there. David pushes, SHA-pinned.
